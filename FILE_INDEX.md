@@ -1,52 +1,78 @@
-# FILE_INDEX.md — streamlit-sales-dashboard
+# FILE_INDEX — streamlit-sales-dashboard
 
-> **新セッション開始時に必ずこのファイルを読む。**
-> ファイル追加・削除・移動時は必ずこのファイルを更新すること。
-> 最終更新: 2026-04-30
+> ⚠️ このファイルは自動生成です。手動編集は次回更新で上書きされます。
 
-## 概要
-StreamlitによるシンプルなECサイト売上分析ダッシュボード。CSVデータ読み込みによるインタラクティブ可視化。
-
-**スタック:** Python, Streamlit, Pandas
-
----
-
-## 📋 最初に読むべきファイル
-
-| 優先度 | ファイル | 内容 |
-|---|---|---|
-| ★★★ | `my_dashboard.py` | Streamlit ダッシュボードメインファイル |
-| ★★ | `requirements.txt` | Python依存関係 |
-| ★★ | `sales_data.csv` | 売上データ（基本） |
-| ★★ | `sales_data_extended.csv` | 売上データ（拡張） |
+| 項目 | 値 |
+|---|---|
+| リポジトリ | KazuyaMurayama/streamlit-sales-dashboard |
+| ブランチ | main |
+| 総ファイル数 | 10 |
+| 最終更新 | 2026-05-02 |
+| 管理者 | 男座員也（Kazuya Oza） |
 
 ---
 
-## 🗂️ ディレクトリ構造
+## カテゴリ別サマリー
+
+| カテゴリ | ファイル数 |
+|---|---|
+| Documentation | 5 |
+| Code | 1 |
+| Data | 2 |
+| Config | 2 |
+
+---
+
+## ディレクトリ構成
 
 ```
-streamlit-sales-dashboard/
-├── my_dashboard.py              ← Streamlitダッシュボード
+.
+├── .gitignore
+├── CLAUDE.md
+├── FILE_INDEX.md
+├── my_dashboard.py
+├── README.md
 ├── requirements.txt
-├── sales_data.csv               ← 売上データ（基本）
-└── sales_data_extended.csv      ← 売上データ（拡張）
+├── sales_data_extended.csv
+├── sales_data.csv
+├── tasks.md
+└── Timeout_Prevention.md
 ```
 
 ---
 
-## 📑 全ファイル一覧
+## ファイル詳細
 
-| パス | 種別 | 説明 |
+### Documentation (5件)
+
+| ファイル | サイズ | 説明 |
 |---|---|---|
-| `my_dashboard.py` | Python | Streamlit売上分析ダッシュボード |
-| `requirements.txt` | 設定 | Python依存関係（Streamlit, Pandas等） |
-| `sales_data.csv` | データ | 売上データ（基本版） |
-| `sales_data_extended.csv` | データ | 売上データ（拡張版） |
+| `CLAUDE.md` | 1.3 KB | Claude Code プロジェクト設定・命名ルール |
+| `FILE_INDEX.md` | 1.7 KB | （このファイル）全ファイルインデックス |
+| `README.md` | 2.1 KB | リポジトリ概要・セットアップ手順 |
+| `tasks.md` | 1.2 KB | タスク管理・セッション履歴 |
+| `Timeout_Prevention.md` | 4.9 KB | タイムアウト対策ガイド |
+
+### Code (1件)
+
+| ファイル | サイズ | 説明 |
+|---|---|---|
+| `my_dashboard.py` | 3.9 KB | Python スクリプト |
+
+### Data (2件)
+
+| ファイル | サイズ | 説明 |
+|---|---|---|
+| `sales_data_extended.csv` | 2.6 KB | CSV データ |
+| `sales_data.csv` | 707 B | CSV データ |
+
+### Config (2件)
+
+| ファイル | サイズ | 説明 |
+|---|---|---|
+| `.gitignore` | 377 B | Git 除外設定 |
+| `requirements.txt` | 66 B | Python 依存パッケージリスト |
 
 ---
 
-## 🔖 ファイル更新ルール
-
-1. 新ファイル追加時: 該当セクションに1行追加
-2. ファイル削除・移動時: 該当行を削除または更新
-3. 更新後: `git add FILE_INDEX.md && git commit -m "docs: FILE_INDEX.md更新"`
+_自動生成: 2026-05-02 | 管理者: 男座員也（Kazuya Oza）_
