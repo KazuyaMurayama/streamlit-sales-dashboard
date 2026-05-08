@@ -56,3 +56,19 @@
 
 - 更新時は **最終更新日のみ** を当日付に書き換える（作成日は固定）
 - 除外: README / CLAUDE.md / FILE_INDEX / tasks.md / CHANGELOG / LICENSE
+
+## 作業品質ルール
+
+### Git・ブランチ管理
+- 作業前: `git branch --show-current` でブランチ確認 → main以外なら `git checkout main && git pull` してから開始。
+
+### ファイル特定（編集前）
+- ユーザー発話のキーワード全てをファイル名と照合してから編集。キーワード不完全一致・候補不確かなら必ず確認。
+
+### 成果物報告
+- ファイル作成・更新・push後は必ず3列表で報告: `| 成果物 | 説明 | リンク |`
+- リンクは `/blob/<実ブランチ>/<パス>` 形式。報告前に `gh api repos/OWNER/REPO/contents/PATH?ref=BRANCH` で存在確認。push前はURL生成しない。
+
+### ドキュメント品質
+- UIパス・コマンド・設定名は公式ドキュメントで確認後に記載。確認不可なら「[要確認]」と明記。
+- OS/環境制約（例: Windows専用）をタスク開始時に確認。完成後に `brew`/`Cmd`/`macOS` 等をgrepして除去。
