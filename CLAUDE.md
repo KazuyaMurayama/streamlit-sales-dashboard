@@ -111,4 +111,8 @@
 ## 他リポジトリ参照ルール
 別リポジトリの内容を参照する必要が生じたら、必ず `.claude/cross-repo.md` を読み、その手順に従って `WebFetch` で取得する（「できない」と返さない）。
 
+### 品質ルール（必読）
+- ブランチ衛生・リサーチファクトチェックは `.claude/quality-rules.md` を参照し、ファイル生成前・push前に必ず適用する。
+- Repo type: app
+
 <!-- GLOBAL_RULES_END -->
