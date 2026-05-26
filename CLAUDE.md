@@ -115,4 +115,8 @@
 - ブランチ衛生・リサーチファクトチェックは `.claude/quality-rules.md` を参照し、ファイル生成前・push前に必ず適用する。
 - Repo type: app
 
+### ビジュアルルール（レポートMD生成時）
+- レポート・成果物MDの新規作成／更新時は `.claude/visual-rules.md` を読み、図の種類判定（§2）と Mermaid 最適化（§3）を毎回適用する。
+- 適用対象: `## ` 見出しが2つ以上ある構造化MD（README・調査メモ・設計書・PR説明など）。
+
 <!-- GLOBAL_RULES_END -->
