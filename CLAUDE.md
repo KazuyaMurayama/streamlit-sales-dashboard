@@ -103,7 +103,7 @@
 - 長時間処理は `run_in_background: true` を積極使用。
 
 ### モデル・サブエージェント
-- メイン Opus / 探索・検索・テスト系サブは Sonnet (`model: "sonnet"`)。
+- 全タスク Opus（期間限定）。サブエージェントも `model: "opus"` を明示。
 - サブ起動promptに必ず明記:「成果物は3列表報告・URL検証必須・Markdownリンク形式」
 
 ### 回答スタイル
