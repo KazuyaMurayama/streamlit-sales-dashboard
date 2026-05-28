@@ -120,11 +120,14 @@
 - 適用対象: `## ` 見出しが2つ以上ある構造化MD（README・調査メモ・設計書・PR説明など）。
 
 <!-- SKILLS_RULES_START -->
-## Skill 起動ルール（v1.0 / 2026-05-27）
-- **新機能実装前** → `sp-brainstorming` → `sp-writing-plans` で設計
-- **コミット/PR 前** → `code-review`（5 並列・confidence 80+）
-- **アーキ図/フロー図が必要な時** → `mermaid-agents365`
-- **要件調査が真に必要な時のみ** → `research-deep`
+## Skill 起動ルール（v2.0 / 2026-05-28）
+以下のスキルは **必須・スキップ禁止**。該当シーンでは SKILL.md を読んでから作業を開始すること。
+
+- **新機能実装・設計を始める前に必ず** `.claude/skills/sp-brainstorming/SKILL.md` でアイデアを出し、`.claude/skills/sp-writing-plans/SKILL.md` で計画を作成してから着手する
+- **複雑な多段タスクは** `.claude/skills/sp-executing-plans/SKILL.md` の手順で実行する
+- **アーキ図・フロー図が必要な時は必ず** `.claude/skills/mermaid-agents365/SKILL.md` を読んでからダイアグラムを作成する
+- **成果物を納品・コミットする前に必ず** `.claude/skills/sp-verification-before-completion/SKILL.md` のチェックリストを実行する
+- **要件調査が真に必要な時のみ** `.claude/skills/research-deep/SKILL.md` を読んで Web リサーチを実行する
 <!-- SKILLS_RULES_END -->
 
 <!-- GLOBAL_RULES_END -->
