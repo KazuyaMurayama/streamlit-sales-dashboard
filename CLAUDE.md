@@ -101,3 +101,14 @@ Streamlit で構築したリアルタイム売上・営業 KPI 管理ダッシ�
 | バグ・エラー調査 | `.claude/skills/sp-systematic-debugging/SKILL.md` |
 | QC・レビュー前 | `.claude/skills/analysis-qa-checklist/SKILL.md` |
 | 成果物の納品・コミット前 | `.claude/skills/sp-verification-before-completion/SKILL.md` |
+
+---
+
+## モデル使い分け
+- メイン: **Claude Fable 5（`claude-fable-5`）** を使用。
+  計画・中〜高難易度の実装/分析・全体指揮を担当。
+- 実行フェーズ（定型実装・ファイル編集・テスト実行）:
+  サブエージェントを `model: "sonnet"` で起動して委譲。
+- 軽量大量処理（grep集計・単純変換）: `model: "haiku"` 可。
+- ※難易度ベースの自動メイン切替は不可。Fable の自動切替は安全性ブロック時の
+  Opus 4.8 フォールバックのみ。工程別の使い分けはサブエージェント委譲で行う。
