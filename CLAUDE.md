@@ -194,3 +194,14 @@ Claude Code はコンテキスト利用率が高まると自動でテキスト�
 - 重い調査・実装はサブエージェントに委譲し、親には要約のみ戻す（コンテキスト分離）
 - 利用率が高まったら警告を待たず能動的に `/compact <保持指示>` を実行。別タスクへ移る際は `/clear`（CLAUDE.md・tasks.md は残る）
 - ※潜在空間ベクトル圧縮（Codex方式）は公開APIの制約上、本ハーネスでは実装不可。テキスト要約＋外部メモリで代替する
+
+---
+
+## 上位ガバナンスへの参照
+
+<!-- GOVERNANCE_LINK_START -->
+- 本リポの運用は [KazuyaMurayama/claude-governance](https://github.com/KazuyaMurayama/claude-governance) の正典に準拠する
+- 競合した場合は本リポの CLAUDE.md が優先（リポ固有ルールが上位ガバナンスに勝つ）
+- 上位ガバナンスを変更した際は、本リポの CLAUDE.md にも反映する責務がある
+- 監査スクリプト: `claude-governance/audits/audit_43repos.py` を実行することで本リポの適合状況を確認できる
+<!-- GOVERNANCE_LINK_END -->
