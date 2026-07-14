@@ -12,6 +12,15 @@ worsen) that mismatch in a .md file.
   unrelated edit to an already-broken file is never blocked.
 
 Fail-open: any error -> exit 0 (never blocks on our own bug).
+
+Dedup rule: the global copy (~/.claude/hooks/) steps aside ONLY when the
+project both ships a repo-local copy AND registers it in the project's
+.claude/settings(.local).json. A merely-deployed-but-unregistered local copy
+(the normal state of governed repos, where the local file mainly serves CI)
+must NOT silence the global hook — that was a real protection gap found in
+QC on 2026-07-14: the old check deferred on file existence alone, which
+deactivated the hook layer in exactly the 44 deployed repos.
+
 Deployed from claude-governance/templates/hooks/ — edit there, not here.
 """
 import json
@@ -19,14 +28,32 @@ import os
 import sys
 
 
-def main():
+def _registered_local_copy_exists():
+    """True only if a DIFFERENT repo-local copy exists AND is registered in
+    the project's .claude/settings.json or .claude/settings.local.json.
+    Any doubt (unreadable settings, missing file) -> False, i.e. we run the
+    check: protection wins over dedup."""
     try:
         me = os.path.abspath(__file__)
-        local = os.path.abspath(os.path.join(os.getcwd(), ".claude", "hooks", os.path.basename(__file__)))
-        if me != local and os.path.exists(local):
-            return
+        base = os.path.basename(__file__)
+        local = os.path.abspath(os.path.join(os.getcwd(), ".claude", "hooks", base))
+        if me == local or not os.path.exists(local):
+            return False
+        for name in ("settings.json", "settings.local.json"):
+            try:
+                with open(os.path.join(os.getcwd(), ".claude", name), encoding="utf-8-sig") as f:
+                    if base in f.read():
+                        return True
+            except Exception:
+                continue
+        return False
     except Exception:
-        pass
+        return False
+
+
+def main():
+    if _registered_local_copy_exists():
+        return
 
     try:
         here = os.path.dirname(os.path.abspath(__file__))
