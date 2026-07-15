@@ -222,5 +222,16 @@ Claude Code はコンテキスト利用率が高まると自動でテキスト�
 - 競合した場合は本リポの CLAUDE.md が優先（リポ固有ルールが上位ガバナンスに勝つ）
 - 上位ガバナンスを変更した際は、本リポの CLAUDE.md にも反映する責務がある
 - 監査スクリプト: `claude-governance/audits/audit_43repos.py` を実行することで本リポの適合状況を確認できる
-- 過去レポート探索（作成リポが不明・記憶と違う時）: 個別リポを推測せず、`curl -s https://raw.githubusercontent.com/KazuyaMurayama/claude-governance/main/index/REPORT_INDEX.md | grep <日本語キーワード>` で横断検索する（各行=`日付 | [H1日本語タイトル](URL) | パス`。ファイル名が英語でも H1 は日本語なのでヒットする。約340KBのため WebFetch でなく curl→grep が確実。毎日06:00 JST 自動更新。ローカルなら `python claude-governance/index/search_reports.py <キーワード...>`）
+- 過去レポート探索（作成リポが不明・記憶と違う時）: 個別リポを推測せず横断検索する。**全リポ private 化済（2026-07-14〜）のため `raw.githubusercontent.com` の無認証取得・WebFetch は 404 になる。必ず認証付き Contents API（raw media）で取得する**:
+  ```bash
+  GH_TOKEN=$(printf 'protocol=https
+host=github.com
+
+' | git credential fill 2>/dev/null | grep '^password=' | cut -d= -f2)
+  curl -s -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github.raw" \
+    "https://api.github.com/repos/KazuyaMurayama/claude-governance/contents/index/REPORT_INDEX.md?ref=main" \
+    -o "$TMPDIR/REPORT_INDEX.md"
+  grep -i "<日本語キーワード>" "$TMPDIR/REPORT_INDEX.md"
+  ```
+  （各行=`日付 | [H1日本語タイトル](URL) | パス`。ファイル名が英語でも H1 は日本語なのでヒットする。毎日06:00 JST 自動更新。ローカルなら `python claude-governance/index/search_reports.py <キーワード...>`）
 <!-- GOVERNANCE_LINK_END -->
