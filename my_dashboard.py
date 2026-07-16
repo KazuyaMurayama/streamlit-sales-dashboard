@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import matplotlib.pyplot as plt
-import seaborn as sns
 
 # ページ設定
 st.set_page_config(
@@ -43,28 +42,24 @@ df = load_data(uploaded_file)
 # サイドバー：フィルター設定
 st.sidebar.header("🔍 フィルター設定")
 
-# TODO: 商品フィルター
 selected_products = st.sidebar.multiselect(
     "商品を選択",
     options=df['商品名'].unique(),
     default=df['商品名'].unique()
 )
 
-# TODO: エリアフィルター
 selected_areas = st.sidebar.multiselect(
     "エリアを選択",
     options=df['エリア'].unique(),
     default=df['エリア'].unique()
 )
 
-# TODO: データフィルタリング
 filtered_df = df[
     (df['商品名'].isin(selected_products)) & 
     (df['エリア'].isin(selected_areas))
 ]
 
 # メイン表示エリア
-# TODO: KPIメトリクスを表示
 st.subheader("📈 主要指標")
 col1, col2, col3, col4 = st.columns(4)
 
