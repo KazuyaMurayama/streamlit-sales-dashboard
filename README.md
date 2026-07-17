@@ -67,7 +67,7 @@ streamlit run my_dashboard.py
 | GitHub | [@KazuyaMurayama](https://github.com/KazuyaMurayama) |
 | 専門領域 | データサイエンス・生成AIコンサルタント |
 | 主要スキル | Python, LightGBM, LangChain, RAG, Streamlit, React, TypeScript |
-| 事業 | AIコンサルティング（月単価目標300万円）/ SaaS開発 / 定量投資 |
+| 事業 | AIコンサルティング / SaaS開発 / 定量投資 |
 
 ## 📄 ライセンス
 
