@@ -224,10 +224,7 @@ Claude Code はコンテキスト利用率が高まると自動でテキスト�
 - 監査スクリプト: `claude-governance/audits/audit_43repos.py` を実行することで本リポの適合状況を確認できる
 - 過去レポート探索（作成リポが不明・記憶と違う時）: 個別リポを推測せず横断検索する。**全リポ private 化済（2026-07-14〜）のため `raw.githubusercontent.com` の無認証取得・WebFetch は 404 になる。必ず認証付き Contents API（raw media）で取得する**:
   ```bash
-  GH_TOKEN=$(printf 'protocol=https
-host=github.com
-
-' | git credential fill 2>/dev/null | grep '^password=' | cut -d= -f2)
+  GH_TOKEN=$(printf 'protocol=https\nhost=github.com\n\n' | git credential fill 2>/dev/null | grep '^password=' | cut -d= -f2)
   curl -s -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github.raw" \
     "https://api.github.com/repos/KazuyaMurayama/claude-governance/contents/index/REPORT_INDEX.md?ref=main" \
     -o "$TMPDIR/REPORT_INDEX.md"
