@@ -7,6 +7,10 @@
           {
             "type": "command",
             "command": "python .claude/hooks/pre_write_guard.py || python3 .claude/hooks/pre_write_guard.py || exit 0"
+          },
+          {
+            "type": "command",
+            "command": "python .claude/hooks/pre_md_table_guard.py || python3 .claude/hooks/pre_md_table_guard.py || exit 0"
           }
         ]
       }
