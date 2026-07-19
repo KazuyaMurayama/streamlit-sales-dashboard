@@ -146,6 +146,10 @@ streamlit run my_dashboard.py
 
 ### 対象外（日付サフィックスを入れない）
 README / CLAUDE.md / FILE_INDEX / tasks.md / CHANGELOG / LICENSE / SPEC.md / `CURRENT_*.md` / パイプライン自動生成ファイル。
+- **追記型の単一集約ログ**（`*-log.md` 等、日付で分割せず単一ファイルに追記していく台帳）
+- **継続更新型の設計文書**（`ALTERNATIVES.md` / `PROCESS.md` / `QUALITY.md` / `SKILLS.md` 等、旧版を別ファイルで残さないもの）
+
+> 💡 **原則**: 日付サフィックスは「**その日時点の成果物として凍結し、後日の版と併存させる**」ことを表す。更新し続けるファイルには付けない（グローバル §10b と同一）。
 
 ### 旧形式（廃止・新規禁止）
 - ❌ `2026-06-03_<TOPIC>.md` / ❌ `<TOPIC>_2026-06-03.md`
