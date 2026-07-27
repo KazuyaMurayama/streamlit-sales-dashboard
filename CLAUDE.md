@@ -236,3 +236,15 @@ Claude Code はコンテキスト利用率が高まると自動でテキスト�
   ```
   （各行=`日付 | [H1日本語タイトル](URL) | パス`。ファイル名が英語でも H1 は日本語なのでヒットする。毎日06:00 JST 自動更新。ローカルなら `python claude-governance/index/search_reports.py <キーワード...>`）
 <!-- GOVERNANCE_LINK_END -->
+
+<!-- CONTEXT-HYGIENE:BEGIN -->
+## コンテキスト管理・肥大化防止（全セッション共通）
+auto-compact 頻発を防ぐため、コンテキストに載せる量を機械的に絞る（正典: claude-governance/templates/context-hygiene-block.md）。
+- **C1 ファイル受け**: 外部出力・API応答は必ずファイルに保存し、grep/jq/python で抽出した必要フィールドのみコンテキストへ。base64 本文・全文 JSON の表示・保持は禁止（API応答は status・sha のみ）。用済み中間 JSON は削除。
+- **C2 大ファイルRead制限**: 50KB 超のファイルを limit/offset なしで全文 Read しない（Grep／offset+limit 部分Read／スクリプト処理で件数のみ受領）。編集後の確認 Read 禁止。
+- **C3 スクリプト統合**: 一括置換・統合は Python スクリプト＋「ちょうど1回一致」全数アサート（不一致は例外停止）。コンテキストに受け取るのは件数のみ。完了根拠はリモート実バイト検証（スクリプトの自己申告を信じない）。
+- **C4 サブエージェント戻り上限**: 委託 prompt に「成果物・詳細はファイルに保存しパスを返す。最終返信は要約2KB以内」を明記。
+- **C5 シリーズ作業の /clear 設計**: 定型反復作業は台帳ファイル（tasks.md 等）を状態アンカーにし、約3ユニットごとに /clear で新しいコンテキストから再開。台帳＋CLAUDE.md だけで再開できる状態を保つ。
+- **C6 能動 /compact**: 利用率が高まったら警告を待たず `/compact <保持指示>`。圧縮時保持=目的・前提制約・意思決定・進行中タスク・正典ファイル参照・直近エラー。状態は tasks.md 等の永続層に書き出し会話履歴に依存させない。
+- 機械ガード: `.claude/hooks/pre_read_guard.py`（PreToolUse: Read）が C2 を自動検査する。
+<!-- CONTEXT-HYGIENE:END -->
