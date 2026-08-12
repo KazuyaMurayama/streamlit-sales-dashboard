@@ -306,3 +306,16 @@ auto-compact 頻発を防ぐため、コンテキストに載せる量を機械�
 - **C6 能動 /compact**: 利用率が高まったら警告を待たず `/compact <保持指示>`。圧縮時保持=目的・前提制約・意思決定・進行中タスク・正典ファイル参照・直近エラー。状態は tasks.md 等の永続層に書き出し会話履歴に依存させない。
 - 機械ガード: `.claude/hooks/pre_read_guard.py`（PreToolUse: Read）が C2 を自動検査する。
 <!-- CONTEXT-HYGIENE:END -->
+
+<!-- REINJECT-GUARD:BEGIN -->
+## コンテキスト再注入の抑制（C7・自動発火）
+
+自動圧縮の主因は「1回のReadが大きい」ことではなく「同じ内容が何度も入る」ことである
+（実測: file attachment の 87.8% が2回目以降の再注入。445ファイルが計1,335回注入され、最悪は同一ファイル33回）。
+
+- **同一セッション内で、内容が変わっていないファイルを全文 Read し直さない。**
+  既にコンテキスト内にある内容をそのまま使う。特定箇所だけ必要なら `offset`/`limit` を付ける。検索は `Grep`。
+- `.claude/hooks/pre_reinject_guard.py` が `PreToolUse(Read)` で自動判定し、該当する Read を deny する。
+  ファイルが更新されていれば（mtime かサイズが変化）再 Read は通る。記憶に依存せず毎回発火する。
+- サイズ上限の `pre_read_guard.py`（C2）とは対象クラスが異なり、両方が同時に動く。
+<!-- REINJECT-GUARD:END -->
