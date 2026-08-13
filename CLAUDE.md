@@ -211,13 +211,32 @@ README / CLAUDE.md / FILE_INDEX / tasks.md / CHANGELOG / LICENSE / SPEC.md / `CU
 
 ---
 
-## 9. モデル使い分け（v2 / 2026-07-13 改訂・Fable 消費最小化）
+<!-- MODEL-TIER:BEGIN v3 -->
+## モデル使い分け（v3 / 2026-08-14 改訂・Opus/Fable 積極活用）
 
-- **メインは Sonnet**（`settings.json` の `model` に従う。現 `sonnet[1m]`）。日常の対話・調査・実装・**計画のためのドラフト/事前調査**・定型作業はすべて Sonnet が担当し、Fable の消費を抑える。
-- **Fable（`claude-fable-5`）は要所のみ明示的に使う**：①方針策定 ②計画の骨子づくり ③最終チェック（QC/レビュー）。この3場面だけ、サブエージェント起動または `/model` での一時切替で Fable を呼ぶ。それ以外はメイン Sonnet で完結させる。
-- 計画のための事前調査も Sonnet に委託する（Fable は調査結果を受けて骨子・方針・最終判断だけを担う）。
-- ※起動モデルそのものは `settings.json` の `model` が決める。本節は「メイン Sonnet ＋ 要所のみ Fable 明示起動」という工程別の役割分担方針。難易度ベースの自動メイン切替は不可。
----
+> v2（2026-07-13「Fable 消費最小化・メインは Sonnet」）は**廃止**。使用量に余裕があるため、
+> 判断を伴う工程は上位モデルを既定とする方針へ転換した。
+
+### 階層と担当工程
+
+| 階層 | モデル | 担当する工程 | 起動方法 |
+|---|---|---|---|
+| **既定（メイン）** | **Opus 5**（`claude-opus-5`） | 計画・設計・分析・実装・検証・判断を伴う全工程 | `settings.json` の `model: "opus[1m]"` で起動時から適用（切替操作は不要） |
+| **独立QC** | **Fable 5**（`claude-fable-5`） | 最終チェック／独立レビュー／批判的検証／反証。**自分の計画を自分でQCしない**ため、メインと別モデルで実施する | サブエージェントを `model: claude-fable-5` で起動、または `/model` で一時切替 |
+| **単純タスク** | Sonnet 5（`claude-sonnet-5`） | 整形・転記・リネーム・機械的抽出・grep相当・大量の定型読み取り | サブエージェントを `model: sonnet` で委譲 |
+
+### 判定ルール（迷ったら上位へ）
+- **判断が要るか？** — 要るなら Opus 5 以上。「どちらが良いか」「妥当か」「何が抜けているか」を答える工程は全て判断。
+- **独立性が要るか？** — 最終QC・レビュー・反証は Fable 5。メインが Opus で作った成果物を Opus 自身がQCしても独立性がないため、ここだけモデルを変える。
+- **単純作業か？** — 入力から出力が一意に決まる機械的作業のみ Sonnet。判断が1つでも混ざるなら Opus。
+- **Opus と Fable の使い分け根拠**: 両者とも 1M コンテキスト・adaptive thinking で同等だが、Fable は Opus の 2 倍のコスト（$10/$50 vs $5/$25 per MTok）。よって「最高性能の独立した第二意見」が価値を持つ最終QCに限定し、日常の判断は Opus が担う。
+- ※難易度ベースの自動メイン切替は不可。工程別の使い分けはサブエージェント委譲（`model:` 指定）で行う。
+
+### 機械的な担保（文面だけに頼らない）
+- 起動モデル: `settings.json` の `model` = `opus[1m]`（＝Opus 5、1M コンテキスト）。`effortLevel` = `high`。
+- `.claude/hooks/model_tier_guard.py`（PreToolUse / matcher=`Task`）が、**判断系の語を含む Task を sonnet 系で起動しようとした場合に警告**する。ブロックはしない（誤検知で作業を止めないため）。
+- サブエージェント定義（`.claude/agents/*.md`）の `model:` は、判断系エージェント（critic / reviewer / verifier / analyst 等）は `claude-fable-5` または `opus`、単純作業エージェントのみ `sonnet` とする。
+<!-- MODEL-TIER:END -->
 
 ## 10. Skill 起動ルール
 
