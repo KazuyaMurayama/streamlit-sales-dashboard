@@ -64,7 +64,8 @@ def main():
         return
 
     try:
-        data = json.load(sys.stdin)
+        raw = sys.stdin.buffer.read()
+        data = json.loads(raw.decode("utf-8", "replace"))
         tool_name = data.get("tool_name") or ""
         tool_input = data.get("tool_input") or {}
         fp = tool_input.get("file_path") or ""
@@ -112,10 +113,16 @@ def main():
 
 
 def _deny(c):
-    reason = (
-        f"MDテーブル列数不一致: 行{c['line']} ヘッダー{c['header']}列≠区切り行{c['sep']}列"
-        f"（先頭セル「{c['cell']}」）。区切り行の `---` セルを{c['header']}個に揃えてから保存。"
-    )
+    if c["sep"] == 0:
+        reason = (
+            f"MDテーブルが描画されない: 行{c['line']} の区切り行の直後に本文行が無い"
+            f"（表「{c['cell']}」）。区切り行と最初の本文行の間の空行を削除してから保存。"
+        )
+    else:
+        reason = (
+            f"MDテーブル列数不一致: 行{c['line']} ヘッダー{c['header']}列≠区切り行{c['sep']}列"
+            f"（先頭セル「{c['cell']}」）。区切り行の `---` セルを{c['header']}個に揃えてから保存。"
+        )
     print(json.dumps({
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",

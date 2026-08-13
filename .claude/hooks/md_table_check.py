@@ -123,7 +123,9 @@ def analyze_text(text):
                     header_len = len(header_cells)
 
                 # consume data rows
+                body_rows = 0
                 while j < n and not FENCE_RE.match(lines[j]) and _looks_like_row(lines[j]) and not _is_delimiter_row(lines[j]):
+                    body_rows += 1
                     data_cells = _split_cells(lines[j])
                     if len(data_cells) != header_len:
                         warnings.append({
@@ -133,6 +135,20 @@ def analyze_text(text):
                             "cell": data_cells[0] if data_cells else "",
                         })
                     j += 1
+
+                # A delimiter row with no data row after it does not render as a
+                # table at all: GitHub emits the header+delimiter as a table with
+                # an empty body and drops the following pipe lines into a
+                # paragraph. The usual cause is a blank line accidentally spliced
+                # between the delimiter row and the first data row, which is
+                # invisible in the source but destroys the rendering.
+                if body_rows == 0:
+                    criticals.append({
+                        "line": sep_line_no,
+                        "header": header_len,
+                        "sep": 0,
+                        "cell": header_cells[0] if header_cells else "",
+                    })
 
                 i = j
                 continue
