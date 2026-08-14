@@ -128,12 +128,23 @@ def analyze_text(text):
                     body_rows += 1
                     data_cells = _split_cells(lines[j])
                     if len(data_cells) != header_len:
-                        warnings.append({
+                        # A short row that also does not end in a closing pipe is
+                        # a row cut off mid-write: the CONTENT is gone, not just
+                        # misaligned. That is worse than a rendering fault and
+                        # must fail, whereas ordinary column drift (row still
+                        # properly terminated) only misaligns and stays a warning.
+                        truncated = not lines[j].rstrip().endswith("|")
+                        finding = {
                             "line": j + 1,
                             "header": header_len,
                             "sep": len(data_cells),
                             "cell": data_cells[0] if data_cells else "",
-                        })
+                        }
+                        if truncated:
+                            finding["kind"] = "truncated"
+                            criticals.append(finding)
+                        else:
+                            warnings.append(finding)
                     j += 1
 
                 # A delimiter row with no data row after it does not render as a
@@ -184,6 +195,9 @@ def _describe(c):
     """Human-readable cause for a critical finding."""
     if c.get("kind") == "fence":
         return "コードフェンスが閉じていない（以降が全てコード扱いになる）"
+    if c.get("kind") == "truncated":
+        return (f"表の行が途中で切れている（内容が欠落。ヘッダー{c['header']}列に対し"
+                f"{c['sep']}列で、行末の `|` も無い。先頭セル「{c['cell']}」）")
     if c["sep"] == 0:
         return f"区切り行の直後に本文行が無い（表「{c['cell']}」が描画されない）"
     return (f"MDテーブル列数不一致: ヘッダー{c['header']}列 != 区切り行{c['sep']}列"

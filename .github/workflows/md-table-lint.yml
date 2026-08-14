@@ -1,12 +1,32 @@
 name: MD Table Lint
 
+# Fails the build when a Markdown file would not render as written:
+#   * a table whose delimiter row is not followed by a body row
+#     (a blank line spliced in between — invisible in source, destroys rendering)
+#   * a table whose header and delimiter column counts disagree
+#   * an unclosed code fence (swallows every heading and table after it)
+#
+# The checker itself is a trigger path: changing it must re-validate every
+# existing .md, otherwise a newly-added invariant never runs against files that
+# were committed before it existed — which is exactly how a green CI came to
+# coexist with visibly broken reports.
+
 on:
   push:
     paths:
       - '**/*.md'
+      - '.claude/hooks/md_table_check.py'
+      - '.github/workflows/md-table-lint.yml'
   pull_request:
     paths:
       - '**/*.md'
+      - '.claude/hooks/md_table_check.py'
+      - '.github/workflows/md-table-lint.yml'
+  schedule:
+    # Weekly full re-scan: catches files that entered the repo by any path the
+    # push trigger misses (force-push, direct web edit, API commit, or a merge
+    # whose changed-file set did not match the filters above).
+    - cron: '0 21 * * 0'
   workflow_dispatch: {}
 
 jobs:
@@ -14,6 +34,30 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      # Self-test before trusting the result. A checker that has been blinded
+      # would otherwise report "no problems" and turn the build green — the
+      # failure mode this job exists to prevent. Silence is only meaningful
+      # once the checker has proven it can still fail.
+      - name: Canary — the checker must still detect known-broken markup
+        run: |
+          set -e
+          mkdir -p "$RUNNER_TEMP/canary"
+          printf '| a | b |\n|---|---|\n\n| 1 | 2 |\n' > "$RUNNER_TEMP/canary/no_body.md"
+          printf '| a | b | c |\n|---|---|\n| 1 | 2 |\n'  > "$RUNNER_TEMP/canary/mismatch.md"
+          printf '```\nx\n\n## h\n'                        > "$RUNNER_TEMP/canary/fence.md"
+          for f in no_body mismatch fence; do
+            if python3 .claude/hooks/md_table_check.py --file "$RUNNER_TEMP/canary/$f.md"; then
+              echo "::error::カナリア失敗: $f を検出できない。検査器が無効化されている。"
+              exit 1
+            fi
+          done
+          printf '| a | b |\n|---|---|\n| 1 | 2 |\n' > "$RUNNER_TEMP/canary/good.md"
+          if ! python3 .claude/hooks/md_table_check.py --file "$RUNNER_TEMP/canary/good.md"; then
+            echo "::error::カナリア失敗: 正常なファイルを誤検知している。"
+            exit 1
+          fi
+          echo "canary OK"
 
       - name: Check Markdown rendering (tables / code fences)
         run: python3 .claude/hooks/md_table_check.py --scan . --format github
