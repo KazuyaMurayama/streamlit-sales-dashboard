@@ -53,23 +53,6 @@ def _stale_copies():
     return out
 
 
-_FENCE_RE = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
-
-
-def _unclosed_fence_line(text):
-    """Line number of a code fence that is never closed, or 0 if balanced."""
-    inside = False
-    start = 0
-    for i, line in enumerate(text.split("\n"), 1):
-        if _FENCE_RE.match(line):
-            if inside:
-                inside = False
-            else:
-                inside = True
-                start = i
-    return start if inside else 0
-
-
 def _git_bytes(*args, **kw):
     """git returning raw bytes: filenames may not be valid UTF-8 in this locale."""
     p = subprocess.run(["git"] + list(args), capture_output=True,
@@ -87,7 +70,9 @@ def _md_table_problems(git):
     except Exception:
         return ["MDテーブル検査器を読み込めなかった（md_table_check.py）。検査は実行されていない。"]
 
-    # Fail-closed canary: prove the checker still detects known-broken tables.
+    # Fail-closed canary: prove the checker still detects known-broken markup.
+    # One probe per invariant — a canary that only exercises some of them would
+    # let a partially-blinded checker pass.
     for probe in _CANARY:
         try:
             criticals, _ = md_table_check.analyze_text(probe)
@@ -96,6 +81,12 @@ def _md_table_problems(git):
         if not criticals:
             return ["MDテーブル検査器が既知の壊れた表を検出できない（カナリア失敗）。"
                     "検査は無効化されている。md_table_check.py を修復するまで .md の描画は保証されない。"]
+    try:
+        if not md_table_check.unclosed_fence_line("```\nx\n"):
+            raise ValueError
+    except Exception:
+        return ["コードフェンス検査が既知の未閉フェンスを検出できない（カナリア失敗）。"
+                "md_table_check.py を修復するまで .md の描画は保証されない。"]
 
     # Paths are resolved against the repository ROOT, not the current directory:
     # `git status` reports root-relative paths, so opening them from a nested cwd
@@ -171,7 +162,7 @@ def _md_table_problems(git):
         # after it into one code block — a larger rendering failure than a
         # broken table, and invisible in the source. Same defect class:
         # a visually broken artifact shipped without anyone noticing.
-        opened = _unclosed_fence_line(text)
+        opened = md_table_check.unclosed_fence_line(text)
         if opened:
             bad.append(f"{p}:{opened} (コードフェンスが閉じていない→以降が全てコード扱いになる)")
 

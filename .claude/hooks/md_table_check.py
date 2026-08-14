@@ -158,6 +158,38 @@ def analyze_text(text):
     return criticals, warnings
 
 
+_FENCE_ANY_RE = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
+
+
+def unclosed_fence_line(text):
+    """Line number of a code fence that is never closed, or 0 if balanced.
+
+    An unclosed fence swallows every heading, table and paragraph after it into
+    a single code block. It is invisible in the source and strictly worse than
+    a broken table, so it belongs in the same gate.
+    """
+    inside = False
+    start = 0
+    for i, line in enumerate(text.split("\n"), 1):
+        if _FENCE_ANY_RE.match(line):
+            if inside:
+                inside = False
+            else:
+                inside = True
+                start = i
+    return start if inside else 0
+
+
+def _describe(c):
+    """Human-readable cause for a critical finding."""
+    if c.get("kind") == "fence":
+        return "コードフェンスが閉じていない（以降が全てコード扱いになる）"
+    if c["sep"] == 0:
+        return f"区切り行の直後に本文行が無い（表「{c['cell']}」が描画されない）"
+    return (f"MDテーブル列数不一致: ヘッダー{c['header']}列 != 区切り行{c['sep']}列"
+            f"（先頭セル「{c['cell']}」）")
+
+
 def _read_text(path):
     try:
         with open(path, encoding="utf-8-sig") as f:
@@ -179,6 +211,10 @@ def _scan_root(root):
             if not text:
                 continue
             criticals, warnings = analyze_text(text)
+            fence = unclosed_fence_line(text)
+            if fence:
+                criticals.append({"line": fence, "header": 0, "sep": -1,
+                                  "cell": "", "kind": "fence"})
             for c in criticals:
                 c["path"] = path
                 all_criticals.append(c)
@@ -203,9 +239,13 @@ def main():
         if text is None:
             sys.exit(0)
         criticals, _warnings = analyze_text(text)
+        fence = unclosed_fence_line(text)
+        if fence:
+            criticals.append({"line": fence, "header": 0, "sep": -1,
+                              "cell": "", "kind": "fence"})
         if criticals:
             for c in criticals:
-                print(f"{path}:{c['line']}: header={c['header']} sep={c['sep']}")
+                print(f"{path}:{c['line']}: {_describe(c)}")
             sys.exit(1)
         sys.exit(0)
 
@@ -215,14 +255,13 @@ def main():
         criticals, warnings = _scan_root(root)
         if fmt == "github":
             for c in criticals:
-                print(f"::error file={c['path']},line={c['line']}::MDテーブル列数不一致: "
-                      f"ヘッダー{c['header']}列 != 区切り行{c['sep']}列（先頭セル「{c['cell']}」）")
+                print(f"::error file={c['path']},line={c['line']}::{_describe(c)}")
             for w in warnings:
                 print(f"::warning file={w['path']},line={w['line']}::MDテーブル列数不一致(データ行): "
                       f"ヘッダー{w['header']}列 != データ行{w['sep']}列（先頭セル「{w['cell']}」）")
         else:
             for c in criticals:
-                print(f"CRITICAL {c['path']}:{c['line']}: header={c['header']} sep={c['sep']} cell={c['cell']}")
+                print(f"CRITICAL {c['path']}:{c['line']}: {_describe(c)}")
             for w in warnings:
                 print(f"WARNING  {w['path']}:{w['line']}: header={w['header']} data={w['sep']} cell={w['cell']}")
             print(f"\n{len(criticals)} CRITICAL, {len(warnings)} WARNING")
