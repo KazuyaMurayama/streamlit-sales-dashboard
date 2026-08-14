@@ -128,12 +128,15 @@ def analyze_text(text):
                     body_rows += 1
                     data_cells = _split_cells(lines[j])
                     if len(data_cells) != header_len:
-                        # A short row that also does not end in a closing pipe is
-                        # a row cut off mid-write: the CONTENT is gone, not just
-                        # misaligned. That is worse than a rendering fault and
-                        # must fail, whereas ordinary column drift (row still
-                        # properly terminated) only misaligns and stays a warning.
-                        truncated = not lines[j].rstrip().endswith("|")
+                        # A row cut off mid-write has BOTH fewer cells than the
+                        # header AND no closing pipe: its last cell is a partial
+                        # sentence and the rest of the content is gone. Requiring
+                        # "fewer" is what separates it from a row that merely
+                        # carries a trailing annotation after the final pipe
+                        # (e.g. "| a | b | ← note"), which has MORE cells and
+                        # loses nothing — that stays a warning.
+                        truncated = (len(data_cells) < header_len
+                                     and not lines[j].rstrip().endswith("|"))
                         finding = {
                             "line": j + 1,
                             "header": header_len,
