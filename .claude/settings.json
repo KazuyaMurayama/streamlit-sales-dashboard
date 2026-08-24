@@ -53,5 +53,8 @@
         ]
       }
     ]
+  },
+  "env": {
+    "CLAUDE_CODE_RETRY_WATCHDOG": "1"
   }
 }
