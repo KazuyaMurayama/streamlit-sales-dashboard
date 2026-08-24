@@ -49,6 +49,20 @@
           {
             "type": "command",
             "command": "python .claude/hooks/session_guard.py || python3 .claude/hooks/session_guard.py || exit 0"
+          },
+          {
+            "type": "command",
+            "command": "python .claude/hooks/review_gate.py || python3 .claude/hooks/review_gate.py || exit 0"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .claude/hooks/reqspec_gate.py || python3 .claude/hooks/reqspec_gate.py || exit 0"
           }
         ]
       }
