@@ -27,7 +27,8 @@ def main():
             sys.stdin.reconfigure(encoding="utf-8")
         except Exception:
             pass
-        data = json.load(sys.stdin)
+        raw = sys.stdin.buffer.read()
+        data = json.loads(raw.decode("utf-8", "replace"))
         ti = data.get("tool_input") or {}
         if ti.get("limit") or ti.get("offset") or ti.get("pages"):
             return

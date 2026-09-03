@@ -19,7 +19,8 @@ def main():
         pass
 
     try:
-        data = json.load(sys.stdin)
+        raw = sys.stdin.buffer.read()
+        data = json.loads(raw.decode("utf-8", "replace"))
         fp = (data.get("tool_input") or {}).get("file_path") or ""
         p = fp.replace("/", "\\").lower()
         if "\\desktop\\" in p:

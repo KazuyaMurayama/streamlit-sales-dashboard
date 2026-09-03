@@ -20,7 +20,8 @@ def main():
         pass
 
     try:
-        data = json.load(sys.stdin)
+        raw = sys.stdin.buffer.read()
+        data = json.loads(raw.decode("utf-8", "replace"))
         cmd = (data.get("tool_input") or {}).get("command") or ""
         if re.search(r"git\s+push\b", cmd) and "--delete" not in cmd:
             print(json.dumps({
