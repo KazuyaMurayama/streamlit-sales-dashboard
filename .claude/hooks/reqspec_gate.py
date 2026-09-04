@@ -47,6 +47,11 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    from firing_log import record as _record_firing
+except Exception:
+    def _record_firing(*_a, **_k):
+        return False
 
 # Kept deliberately short — this is paid on every non-trivial prompt.
 REQSPEC = (
@@ -128,6 +133,8 @@ def main():
             "additionalContext": REQSPEC,
         }
     }, ensure_ascii=True)
+    # 発火記録: 無反応と故障を区別するため(CLAUDE.md §14 F2)。ledger が読む
+    _record_firing("reqspec_gate", ev)
     sys.stdout.buffer.write(payload.encode("ascii"))
     sys.stdout.buffer.flush()
 

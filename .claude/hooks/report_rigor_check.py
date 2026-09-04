@@ -14,6 +14,16 @@ ANCHOR : 未検証/対象外/スコープ外/限界/留保/前提/除外/サン�
 
 A claim is a finding only when NO anchor appears within WINDOW lines of it.
 Regression-only usage (see hook) means pre-existing debt never blocks work.
+
+CALIBRATION (measured 2026-09-04, not chosen)
+---------------------------------------------
+This module is a judgment function only and does not run as a hook itself,
+so it has no firing rate of its own. Correctness is covered by
+`test_report_rigor_check.py`, which passes 9/9. The caller,
+pre_report_quality_guard.py, has test coverage of 18/18 PASS, but its
+PRODUCTION FIRING RATE HAS NOT BEEN MEASURED. Whether it fires often enough
+to cause warning fatigue is therefore unknown, not "fine" — the next batch
+of .md Write/Edit calls should be used as the denominator to measure it.
 """
 import re
 

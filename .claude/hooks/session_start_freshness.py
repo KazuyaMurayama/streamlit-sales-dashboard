@@ -13,11 +13,30 @@ of never. Cost: a single fetch per session.
 
 Fail-open: any error -> exit 0 (never breaks a session).
 Deployed from claude-governance/templates/hooks/ — edit there, not here.
+
+CALIBRATION (measured 2026-09-04, not chosen)
+---------------------------------------------
+Logged invocations show 0/20 (0.0%) actually surfaced a staleness warning.
+As with any zero-rate result, replay alone cannot tell a dead hook from one
+that is correctly silent (CLAUDE.md §14 F2), so a forced-firing check was
+run separately: a disposable clone was pointed at a bare repo as its
+`origin`, deliberately left one commit behind origin/main, and the hook was
+invoked directly. It returned `additionalContext` stating the working tree
+was 1 commit behind origin/main. That confirms the 0.0% reflects "every
+logged session's clone was already current," not a broken or unreachable
+hook.
 """
 import json
 import os
 import subprocess
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    from firing_log import record as _record_firing
+except Exception:
+    def _record_firing(*_a, **_k):
+        return False
 
 
 def git(*args, timeout=30):
@@ -57,6 +76,8 @@ def main():
 
         d = git("log", "-1", "--format=%cr", f"origin/{base}")
         age = d.stdout.strip() if d.returncode == 0 else "unknown"
+        # 発火記録: 無反応と故障を区別するため(CLAUDE.md §14 F2)。ledger が読む
+        _record_firing("session_start_freshness", {})
         print(json.dumps({
             "hookSpecificOutput": {
                 "hookEventName": "SessionStart",

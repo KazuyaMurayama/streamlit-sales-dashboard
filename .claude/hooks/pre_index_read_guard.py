@@ -18,12 +18,41 @@ origin/main and therefore cannot go stale. No subprocess, no network.
 
 Fail-open: any error -> exit 0. JSON deny only (never exit 2).
 Deployed from claude-governance/templates/hooks/ — edit there, not here.
+
+CALIBRATION (measured 2026-09-04, not chosen)
+---------------------------------------------
+Fired on 0 of 600 real Grep/Read/Bash calls replayed from 27 production
+transcripts = 0.00%. Zero firings in the replay -- which on its own is
+NOT evidence that the guard works. Per CLAUDE.md §14 F2 (「無反応は故障と
+区別がつかない」), silence cannot be told apart from a hook that early-
+returns on every payload, which is exactly how a guard died unnoticed on
+2026-08-04.
+
+RESOLVED by forcing a firing (2026-09-04): planted an index whose build
+timestamp was 200h old (MAX_AGE_HOURS = 48) in a scratch directory and
+sent a Read of index/REPORT_INDEX.md. The guard returned
+permissionDecision "deny" reporting 「index が 8.3 日前のビルドで古い」.
+So the 0.00% is the first reading (the index was fresh in all 27
+transcripts), not the second (dead code). The replay measures how often
+this fires in ordinary work; the forced firing is what proves it can.
+
+Both numbers are needed. A rate alone would have left the ambiguity in
+place, and this hook is precisely the kind that should almost never fire
+-- the index is rebuilt daily, so a stale one is an exception, not a
+routine event.
 """
 import datetime as dt
 import json
 import os
 import re
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    from firing_log import record as _record_firing
+except Exception:
+    def _record_firing(*_a, **_k):
+        return False
 
 MAX_AGE_HOURS = 48  # workflow runs daily; >48h means the working copy is behind
 INDEX_NAMES = ("report_index.md", "reports.json")
@@ -74,6 +103,8 @@ def main():
         age = index_age_hours()
         if age is None or age <= MAX_AGE_HOURS:
             return
+        # 発火記録: 無反応と故障を区別するため(CLAUDE.md §14 F2)。ledger が読む
+        _record_firing("pre_index_read_guard", data)
         print(json.dumps({
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",

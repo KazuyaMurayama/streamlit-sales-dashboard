@@ -22,10 +22,26 @@ QC on 2026-07-14: the old check deferred on file existence alone, which
 deactivated the hook layer in exactly the 44 deployed repos.
 
 Deployed from claude-governance/templates/hooks/ — edit there, not here.
+
+CALIBRATION (measured 2026-09-04, not chosen)
+---------------------------------------------
+Fired on 1 of 600 real Write/Edit calls replayed from 27 production
+transcripts = 0.17%. Very low, as expected for a regression-only guard
+that denies only when an edit INCREASES header/delimiter column-count
+mismatches versus the pre-edit file -- most Write/Edit calls are not even
+against .md tables, and among those that are, most do not worsen an
+existing mismatch.
 """
 import json
 import os
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    from firing_log import record as _record_firing
+except Exception:
+    def _record_firing(*_a, **_k):
+        return False
 
 
 def _registered_local_copy_exists():
@@ -78,6 +94,8 @@ def main():
             criticals, _warnings = md_table_check.analyze_text(content)
             if criticals:
                 c = criticals[0]
+                # 発火記録: 無反応と故障を区別するため(CLAUDE.md §14 F2)。ledger が読む
+                _record_firing("pre_md_table_guard", data)
                 _deny(c)
             return
 
@@ -106,6 +124,8 @@ def main():
             if len(criticals_after) > len(criticals_before):
                 # find a finding present after but not clearly before (best-effort: just report first)
                 c = criticals_after[0]
+                # 発火記録: 無反応と故障を区別するため(CLAUDE.md §14 F2)。ledger が読む
+                _record_firing("pre_md_table_guard", data)
                 _deny(c)
             return
     except Exception:

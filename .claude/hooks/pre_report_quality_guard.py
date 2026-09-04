@@ -37,6 +37,13 @@ import os
 import re
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    from firing_log import record as _record_firing
+except Exception:
+    def _record_firing(*_a, **_k):
+        return False
+
 REPORT_NAME = re.compile(r"_\d{8}(?:-v\d+)?\.md$", re.I)
 DEFAULT_DIRS = ("outputs/", "reports/", "docs/", "output/", "report/")
 # Directories holding generated or third-party material, not our own analysis.
@@ -176,6 +183,8 @@ def main():
 
         seen = set(f_before)
         added = [x for x in f_after if x not in seen] or f_after[-1:]
+        # 発火記録: 無反応と故障を区別するため(CLAUDE.md §14 F2)。ledger が読む
+        _record_firing("pre_report_quality_guard", data)
         _emit(added, cfg.get("mode", "warn"))
     except Exception:
         pass

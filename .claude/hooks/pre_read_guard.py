@@ -4,10 +4,26 @@ Prevents auto-compact churn from loading huge files into context.
 Allows: partial reads (limit/offset/pages), files <=50KB, images/PDF/notebooks.
 Fail-open: any error -> exit 0. JSON deny only (never exit 2).
 Deployed from claude-governance/templates/hooks/ — edit there, not here.
+
+CALIBRATION (measured 2026-09-04, not chosen)
+---------------------------------------------
+Fired on 12 of 600 real Read calls replayed from 27 production transcripts
+= 2.00%. A low, occasional-deny rate is consistent with the 50KB threshold
+being sized for genuinely large files rather than routine reads; of the
+2356 real Read calls across all transcripts, 1092 lacked limit/offset,
+so most large-file reads elsewhere were presumably already under 50KB or
+already used partial reads.
 """
 import json
 import os
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    from firing_log import record as _record_firing
+except Exception:
+    def _record_firing(*_a, **_k):
+        return False
 
 MAX_BYTES = 50_000
 SKIP_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".pdf", ".ipynb"}
@@ -39,6 +55,8 @@ def main():
             return
         size = os.path.getsize(fp)
         if size > MAX_BYTES:
+            # 発火記録: 無反応と故障を区別するため(CLAUDE.md §14 F2)。ledger が読む
+            _record_firing("pre_read_guard", data)
             print(json.dumps({
                 "hookSpecificOutput": {
                     "hookEventName": "PreToolUse",

@@ -28,6 +28,13 @@ import os
 import sys
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    from firing_log import record as _record_firing
+except Exception:
+    def _record_firing(*_a, **_k):
+        return False
+
 # 1セッション内の Read 台帳。session_id ごとに1ファイル。
 STATE_DIR = os.path.join(os.environ.get("TEMP") or os.environ.get("TMP") or ".",
                          "claude_reinject_guard")
@@ -114,6 +121,8 @@ def main():
         ) % (n, fp)
         ledger[key] = {"fp": fingerprint, "n": n + 1, "t": int(time.time())}
         save(ledger_path, ledger)
+        # 発火記録: 無反応と故障を区別するため(CLAUDE.md §14 F2)。ledger が読む
+        _record_firing("pre_reinject_guard", ev)
         sys.stderr.write(msg)
         return 2
 

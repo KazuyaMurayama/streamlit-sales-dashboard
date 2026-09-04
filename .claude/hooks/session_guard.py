@@ -7,12 +7,30 @@ so this can never loop.
 
 Fail-open by design: any error -> exit 0 (never breaks a session).
 Deployed from claude-governance/templates/hooks/ — edit there, not here.
+
+CALIBRATION (measured 2026-09-04, not chosen)
+---------------------------------------------
+Replaying 28 real transcripts fired this guard 0/28 times (0.00%). Replay
+alone cannot distinguish a dead guard from one that is correctly silent
+(CLAUDE.md §14 F2), so a forced-firing check was also run: a disposable git
+repo was switched to a `feature-x` branch and a Stop payload was sent to the
+hook directly, which returned `{"decision":"block"}` with the remediation
+text citing rule 1 (branch must be main before completion). That confirms
+the 0.00% reflects "every replayed session was already on main" rather than
+a broken or unreachable guard.
 """
 import json
 import os
 import re
 import subprocess
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    from firing_log import record as _record_firing
+except Exception:
+    def _record_firing(*_a, **_k):
+        return False
 
 
 # A table that GitHub does NOT render (blank line between the delimiter row and
@@ -231,6 +249,8 @@ def main():
         problems.extend(_md_table_problems(git))
 
         if problems:
+            # 発火記録: 無反応と故障を区別するため(CLAUDE.md §14 F2)。ledger が読む
+            _record_firing("session_guard", data)
             print(json.dumps({
                 "decision": "block",
                 "reason": "【完了前チェック（自動ガード・1回のみ）】 " + " / ".join(problems)

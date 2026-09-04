@@ -52,6 +52,11 @@ import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    from firing_log import record as _record_firing
+except Exception:
+    def _record_firing(*_a, **_k):
+        return False
 
 STATE_DIR = os.path.join(os.environ.get("TEMP") or os.environ.get("TMP") or ".",
                          "claude_review_gate")
@@ -270,6 +275,8 @@ def main():
         "decision": "block",
         "reason": _prompt(tier, request, files, answer),
     }, ensure_ascii=True)
+    # 発火記録: 無反応と故障を区別するため(CLAUDE.md §14 F2)。ledger が読む
+    _record_firing("review_gate", ev)
     sys.stdout.buffer.write(payload.encode("ascii"))
     sys.stdout.buffer.flush()
 

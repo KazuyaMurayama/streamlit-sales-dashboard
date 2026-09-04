@@ -25,6 +25,14 @@ False-positive avoidance is the priority:
     followed by a delimiter row (the header+delimiter pairing GFM requires).
 
 Deployed from claude-governance/templates/hooks/ — edit there, not here.
+
+CALIBRATION (measured 2026-09-04, not chosen)
+---------------------------------------------
+This module is a pure judgment function (analyze_text) and does not itself
+run as a hook, so it has no firing rate of its own. The effective firing
+rate was measured at the caller, pre_md_table_guard.py: 1/600 Write/Edit
+invocations (0.17%), measured 2026-09-04. Correctness is covered by
+`test_md_table_check.py`, which passes 12/12.
 """
 import io
 import os

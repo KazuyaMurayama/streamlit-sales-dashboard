@@ -54,6 +54,13 @@ import re
 import sys
 from datetime import date, timedelta
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    from firing_log import record as _record_firing
+except Exception:
+    def _record_firing(*_a, **_k):
+        return False
+
 # Report-style names and doc trees. Mirrors pre_report_quality_guard.py so the
 # two guards agree on what "a report" is.
 REPORT_NAME = re.compile(r"_\d{8}(?:-v\d+)?\.md$", re.I)
@@ -255,6 +262,8 @@ def main():
 
         body = "\n".join("・" + x for x in (fails + warns)[:5])
         if fails and cfg.get("mode", "deny") == "deny":
+            # 発火記録: 無反応と故障を区別するため(CLAUDE.md §14 F2)。ledger が読む
+            _record_firing("md_date_guard", data)
             print(json.dumps({"hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
                 "permissionDecision": "deny",
@@ -265,6 +274,8 @@ def main():
                     "意図的な過去日付なら .claude/md_date_guard.json で調整可。"
                     % (today.isoformat(), body))}}))
         else:
+            # 発火記録: 無反応と故障を区別するため(CLAUDE.md §14 F2)。ledger が読む
+            _record_firing("md_date_guard", data)
             print(json.dumps({"hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
                 "additionalContext": (

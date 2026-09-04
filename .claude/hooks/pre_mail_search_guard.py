@@ -32,11 +32,30 @@ Deliberately NOT blocked:
 
 Fail-open: any error -> exit 0. JSON deny only (never exit 2).
 Deployed from claude-governance/templates/hooks/ -- edit there, not here.
+
+CALIBRATION (measured 2026-09-04, not chosen)
+---------------------------------------------
+Fired on 14 of 40 real Gmail calls replayed from 27 production
+transcripts = 35.00%. The denominator of 40 is small, so the confidence
+interval around this rate is wide and the point estimate should not be
+over-trusted. Gmail search volume overall is low relative to other tools
+(40 calls vs. thousands of Bash/Edit/Read calls across the same
+transcripts), which limits the real-world blast radius of a high rate,
+but re-measurement against a larger sample of Gmail calls is needed
+before treating 35.00% as a stable estimate of this guard's true firing
+rate.
 """
 import json
 import os
 import re
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    from firing_log import record as _record_firing
+except Exception:
+    def _record_firing(*_a, **_k):
+        return False
 
 # A from:/to: clause, including the grouped form  from:(a@x OR b@y OR c@z).
 # The whole group must be captured -- matching only the first address made an
@@ -152,6 +171,8 @@ def main():
         # term therefore survives sender changes, outsourced senders, and
         # forwards, which a from: filter of any width does not.
         if not has_content:
+            # 発火記録: 無反応と故障を区別するため(CLAUDE.md §14 F2)。ledger が読む
+            _record_firing("pre_mail_search_guard", data)
             print(
                 json.dumps(
                     {
@@ -212,6 +233,8 @@ def main():
             "'no mail from THESE senders -- others unchecked', never 'no change'."
         )
 
+        # 発火記録: 無反応と故障を区別するため(CLAUDE.md §14 F2)。ledger が読む
+        _record_firing("pre_mail_search_guard", data)
         print(
             json.dumps(
                 {
