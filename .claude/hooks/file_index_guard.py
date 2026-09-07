@@ -54,6 +54,13 @@ import re
 import subprocess
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    from firing_log import record as _record_firing
+except Exception:
+    def _record_firing(*_a, **_k):
+        return False
+
 INDEX_NAMES = ("FILE_INDEX.md", "file_index.md")
 
 # Paths never expected in a curated index.
@@ -204,10 +211,12 @@ def main():
         sys.exit(0)
 
     cwd = os.getcwd()
+    _payload = {}
     try:
         raw = sys.stdin.buffer.read()
         if raw:
             data = json.loads(raw.decode("utf-8", "replace"))
+            _payload = data if isinstance(data, dict) else {}
             cwd = data.get("cwd") or cwd
     except Exception:
         pass
@@ -221,6 +230,11 @@ def main():
         sys.exit(0)
     if not miss:
         sys.exit(0)
+
+    # 発火記録: 無反応と故障を区別するため(CLAUDE.md §14 F2)。ledger が読む。
+    # `data` is bound inside the try above and may not exist if stdin was
+    # empty, so pass the payload explicitly rather than via locals().
+    _record_firing("file_index_guard", _payload)
 
     sample = ", ".join(os.path.basename(m) for m in miss[:3])
     more = "" if len(miss) <= 3 else " ほか%d件" % (len(miss) - 3)
