@@ -63,6 +63,15 @@
             "command": "python .claude/hooks/post_bash_guard.py || python3 .claude/hooks/post_bash_guard.py || exit 0"
           }
         ]
+      },
+      {
+        "matcher": "Write|Edit|Bash|PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .claude/hooks/mermaid_figure_guard.py || python3 .claude/hooks/mermaid_figure_guard.py || exit 0"
+          }
+        ]
       }
     ],
     "Stop": [
@@ -87,6 +96,14 @@
           {
             "type": "command",
             "command": "python .claude/hooks/countermeasure_gate.py || python3 .claude/hooks/countermeasure_gate.py || exit 0"
+          },
+          {
+            "type": "command",
+            "command": "python .claude/hooks/mermaid_figure_guard.py || python3 .claude/hooks/mermaid_figure_guard.py || exit 0"
+          },
+          {
+            "type": "command",
+            "command": "python .claude/hooks/file_index_guard.py || python3 .claude/hooks/file_index_guard.py || exit 0"
           }
         ]
       }
