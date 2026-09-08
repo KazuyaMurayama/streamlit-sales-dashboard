@@ -72,6 +72,15 @@
             "command": "python .claude/hooks/mermaid_figure_guard.py || python3 .claude/hooks/mermaid_figure_guard.py || exit 0"
           }
         ]
+      },
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .claude/hooks/external_write_guard.py || python3 .claude/hooks/external_write_guard.py || exit 0"
+          }
+        ]
       }
     ],
     "Stop": [
@@ -104,6 +113,10 @@
           {
             "type": "command",
             "command": "python .claude/hooks/file_index_guard.py || python3 .claude/hooks/file_index_guard.py || exit 0"
+          },
+          {
+            "type": "command",
+            "command": "python .claude/hooks/external_write_guard.py || python3 .claude/hooks/external_write_guard.py || exit 0"
           }
         ]
       }
