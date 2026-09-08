@@ -326,11 +326,132 @@ def main():
         pass
 
 
+def _selftest():
+    """Three directions (see CALIBRATION in the module docstring).
+
+    Lives INSIDE the hook, not in a separate tests/ module, because deploy
+    copies only this file: a selftest that imports tests/ passes in
+    claude-governance and raises ModuleNotFoundError in all 44 deployed
+    copies (found 2026-09-08 by running the deployed copy). A selftest that
+    cannot run where the guard runs verifies nothing.
+    """
+    import io
+    import shutil
+    import tempfile
+    from datetime import timedelta
+
+    def _g(root, *args):
+        return subprocess.run(["git"] + list(args), cwd=root,
+                              capture_output=True, text=True, timeout=30)
+
+    def _make_repo():
+        tmp = tempfile.mkdtemp(prefix="ewg_selftest_")
+        subprocess.run(["git", "init", "-q", tmp], check=True, timeout=30)
+        _g(tmp, "config", "user.email", "t@t")
+        _g(tmp, "config", "user.name", "t")
+        os.makedirs(os.path.join(tmp, "outputs"))
+        return tmp
+
+    def _write(root, rel, text):
+        p = os.path.join(root, rel.replace("/", os.sep))
+        d = os.path.dirname(p)
+        if d and not os.path.isdir(d):
+            os.makedirs(d)
+        with io.open(p, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    def _capture_stop(root, session_id):
+        payload = {"hook_event_name": "Stop", "session_id": session_id,
+                   "stop_hook_active": False}
+        old_cwd, old_err = os.getcwd(), sys.stderr
+        buf = io.StringIO()
+        try:
+            os.chdir(root)
+            sys.stderr = buf
+            handle_stop(payload)
+        finally:
+            sys.stderr = old_err
+            os.chdir(old_cwd)
+        return buf.getvalue()
+
+    today = date.today()
+    stale = (today - timedelta(days=7)).isoformat()
+    good = today.isoformat()
+    rel = "outputs/TRIAL_NOTE_%s.md" % today.strftime("%Y%m%d")
+    results = []
+
+    # (a) BROKEN FIXTURE: external write with a week-old date must be reported.
+    root = _make_repo()
+    try:
+        _write(root, rel, "# Trial\n\n最終更新日: %s\n\n本文。\n" % good)
+        _g(root, "add", "-A")
+        _g(root, "commit", "-qm", "base")
+        _write(root, rel, "# Trial\n\n最終更新日: %s\n\n本文。追記。\n" % stale)
+        err = _capture_stop(root, "sess_a")
+        ok = ("最終更新日" in err) and (stale in err) and (rel in err)
+        results.append(("(a) broken fixture reported", ok))
+        first = (err.strip().splitlines() or [""])[0]
+        print("selftest 1/3 %s: %s" % ("PASS" if ok else "FAIL", first[:80]))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+    # (b) SUPPRESSION: same defect, recorded as Claude-touched -> silent.
+    root = _make_repo()
+    try:
+        _write(root, rel, "# Trial\n\n最終更新日: %s\n\n本文。\n" % good)
+        _g(root, "add", "-A")
+        _g(root, "commit", "-qm", "base")
+        _write(root, rel, "# Trial\n\n最終更新日: %s\n\n本文。追記。\n" % stale)
+        post = {"hook_event_name": "PostToolUse", "session_id": "sess_b",
+                "tool_name": "Write",
+                "tool_input": {"file_path": os.path.join(root, rel)}}
+        old_cwd = os.getcwd()
+        try:
+            os.chdir(root)
+            handle_post_tool_use(post)
+        finally:
+            os.chdir(old_cwd)
+        err = _capture_stop(root, "sess_b")
+        ok = (err.strip() == "")
+        results.append(("(b) claude-touched suppressed", ok))
+        print("selftest 2/3 %s: stderr=%r" % ("PASS" if ok else "FAIL", err[:80]))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+    # (c) CLEAN: no changed .md -> silent.
+    root = _make_repo()
+    try:
+        _write(root, rel, "# Trial\n\n最終更新日: %s\n\n本文。\n" % good)
+        _g(root, "add", "-A")
+        _g(root, "commit", "-qm", "base")
+        err = _capture_stop(root, "sess_c")
+        ok = (err.strip() == "")
+        results.append(("(c) clean tree silent", ok))
+        print("selftest 3/3 %s: stderr=%r" % ("PASS" if ok else "FAIL", err[:80]))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+    passed = sum(1 for _, ok in results if ok)
+    print("\n%d/%d passed" % (passed, len(results)))
+    for name, ok in results:
+        if not ok:
+            print("  FAILED: %s" % name)
+    if passed == len(results):
+        print("SELFTEST OK")
+    return 0 if passed == len(results) else 1
+
+
 if __name__ == "__main__":
     if "--selftest" in sys.argv:
-        sys.path.insert(0, os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "tests"))
-        from test_external_write_guard import main as _run
-        sys.exit(_run())
+        # Piped stdout (CI, Claude Code's Bash tool) is cp932 on this host and
+        # cannot encode ⚠ or many symbols -> UnicodeEncodeError masqueraded as
+        # a selftest failure (2026-09-08). A real console is unaffected.
+        for _s in (sys.stdout, sys.stderr):
+            try:
+                if not _s.isatty():
+                    _s.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+        sys.exit(_selftest())
     main()
     sys.exit(0)
