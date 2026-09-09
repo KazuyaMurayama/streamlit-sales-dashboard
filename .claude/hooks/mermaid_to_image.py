@@ -41,8 +41,31 @@ from mermaid_overlay_check import FENCE_RE, IMG_FIG_RE, RENDER_JS, NODE, PANEL, 
 def render_pngs(blocks, out_dir):
     os.makedirs(out_dir, exist_ok=True)
     payload = {"blocks": blocks, "viewports": [], "panel": PANEL, "export_dir": out_dir}
-    p = subprocess.run([NODE, RENDER_JS], input=json.dumps(payload), capture_output=True, text=True, timeout=300)
-    data = json.loads(p.stdout)
+    # encoding/errors are REQUIRED, not cosmetic: text=True decodes with
+    # the locale codec (cp932 here). The renderer's error message is
+    # Japanese UTF-8, so cp932 raised UnicodeDecodeError inside
+    # subprocess's reader THREAD -- which surfaces as stderr="" rather
+    # than an exception. The diagnostic silently vanished and a missing
+    # playwright looked like a code bug (measured 2026-09-09).
+    p = subprocess.run([NODE, RENDER_JS], input=json.dumps(payload),
+                       capture_output=True, text=True, timeout=300,
+                       encoding="utf-8", errors="replace")
+    # The renderer reports WHY it failed on stderr and leaves stdout empty --
+    # a missing playwright install is the common case. Calling json.loads on
+    # that empty stdout raised "JSONDecodeError: Expecting value: line 1
+    # column 1", which hid the real cause and made a missing dependency look
+    # like broken code (measured 2026-09-09; three suites failed this way).
+    # mermaid_overlay_check.render() already surfaced rc+stderr; this path did
+    # not. Diagnose before parsing.
+    if p.returncode != 0 or not (p.stdout or "").strip():
+        raise RuntimeError(
+            "mermaid renderer failed: rc=%s stderr=%s"
+            % (p.returncode, (p.stderr or "")[-400:].strip() or "(empty)"))
+    try:
+        data = json.loads(p.stdout)
+    except ValueError:
+        raise RuntimeError("mermaid renderer output was not JSON: %s"
+                            % (p.stdout or "")[:200])
     if data.get("fatal"):
         raise RuntimeError(data["fatal"][:400])
     return {r["id"]: r for r in data["results"]}

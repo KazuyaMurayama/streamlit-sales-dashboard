@@ -102,7 +102,15 @@ def extract_blocks(md_path):
 def render(blocks, preview_dir=None):
     payload = {"blocks": blocks, "viewports": VIEWPORTS, "panel": PANEL, "preview_dir": preview_dir}
     try:
-        p = subprocess.run([NODE, RENDER_JS], input=json.dumps(payload), capture_output=True, text=True, timeout=180)
+        # encoding/errors are REQUIRED, not cosmetic: text=True decodes with
+        # the locale codec (cp932 here). The renderer's error message is
+        # Japanese UTF-8, so cp932 raised UnicodeDecodeError inside
+        # subprocess's reader THREAD -- which surfaces as stderr="" rather
+        # than an exception. The diagnostic silently vanished and a missing
+        # playwright looked like a code bug (measured 2026-09-09).
+        p = subprocess.run([NODE, RENDER_JS], input=json.dumps(payload),
+                           capture_output=True, text=True, timeout=180,
+                           encoding="utf-8", errors="replace")
     except (OSError, subprocess.TimeoutExpired) as e:
         return None, f"renderer unavailable: {e}"
     if p.returncode != 0 or not p.stdout.strip():

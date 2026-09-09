@@ -24,6 +24,25 @@ v2 therefore composes SELF x ACT rather than listing surface forms, and
 normalizes the text first so that emphasis marks, table pipes, ZWSP and
 intra-paragraph newlines cannot split a match (all measured bypasses).
 
+v3 (2026-09-09) -- measured against the corpus rather than reasoned about.
+A new suite (tests/test_process_leak_corpus.py) replays every §1 bypass and
+every §2 false positive verbatim. v2 scored 34/39 blocked, 15/15 passed. The
+five survivors and their causes:
+
+    審査を2周した              ACT lacked 審査
+    当レポートは…確認済み        ACT lacked 確認 (also broke 本報告書)
+    誤りを発見し、訂正した        the 誤り rule required が, not を
+    verify_citations.py       _normalize stripped `_`, turning the name into
+                              verifycitations -- the NORMALISER, added to
+                              defeat Markdown emphasis, was itself a bypass
+    Shift_JIS ファイル          errors="replace" (the corpus's own proposed
+                              fix) stops the crash but NOT the bypass: cp932
+                              bytes decoded as utf-8/replace become mojibake
+                              that no pattern can match. Needs real encoding
+                              detection -- see _read_text.
+
+v3 result: 39/39 blocked, 15/15 passed, 67/67 including structural holes.
+
 Sources for v2's patterns:
   - the user's verbatim list (2026-09-09)
   - templates/hooks/tests/fixtures/process_leak_attack_corpus_20260908.md
@@ -72,8 +91,13 @@ REPORT_NAME_RE = re.compile(r"_\d{8}(?:-v\d+)?\.(md|markdown|mdx)$", re.I)
 SELF = (r"(本書|本レポート|本稿|本資料|本文書|本報告書?|本節|本改訂|当レポート|"
         r"筆者|我々|執筆者|著者|初版|旧版|前版|前回|当初|初出|私|わたし|Claude)")
 # 制作工程を表す行為語。
-ACT = (r"(監査|点検|レビュー|査読|校閲|校正|検証|照合|突合|精査|"
-       r"ファクトチェック|fact-?check|チェック|是正|修正|訂正|差し替え|"
+# 審査/確認/検品 は 2026-09-09 の実測で抜けていた:
+#   「審査を2周した。」          -> ACT に審査が無く素通り
+#   「当レポートは全出典を確認済み。」-> ACT に確認が無く素通り(本報告書も同様)
+# 「確認」は単独では日常語すぎるが、ここは SELF との共起でしか使われない
+# ので誤検出しない。実測: MUST_PASS 15件すべて通過を維持。
+ACT = (r"(監査|点検|審査|検品|レビュー|査読|校閲|校正|検証|照合|突合|精査|"
+       r"ファクトチェック|fact-?check|チェック|確認|是正|修正|訂正|差し替え|"
        r"改め|撤回|反映|通過|合格|採点|スコア)")
 # 「確認できなかった」型＝主張の適用範囲を狭める正当な記述。消させてはならない。
 NEG = r"(?![^。\n]{0,60}(ない|なかった|できず|限[りら]|範囲では|とどま|及ばな|時点))"
@@ -94,7 +118,7 @@ PROCESS_LEAK = [
     (r"(\d+|[一二三四五六七八九十]+)\s*(巡|周|回|ラウンド)(目)?の?\s*"
      r"(点検|監査|レビュー|チェック|査読|校閲)", "点検ラウンドの記述"),
     # 「監査を2周実施した」= 語順が逆（行為→回数）。上の式は回数→行為しか見ない。
-    (r"(監査|点検|レビュー|チェック|査読|校閲|校正)\s*を?\s*"
+    (r"(監査|点検|審査|レビュー|チェック|査読|校閲|校正)\s*を?\s*"
      r"(\d+|[一二三四五六七八九十]+)\s*(巡|周|回|ラウンド)", "点検ラウンドの記述"),
     # 「レビュー指摘をすべて反映済み」= 受けた指摘を取り込んだという制作過程。
     (r"(レビュー|指摘|コメント|フィードバック)[^。\n]{0,10}"
@@ -115,14 +139,19 @@ PROCESS_LEAK = [
      r"手抜き|不足|勇み足)", "自分の過失の告白"),
     (r"(本人|ユーザー|あなた|ご指摘)(が|の)\s*正し", "自分と依頼者の正誤比較"),
     (r"(ご指摘|指摘)の\s*とおり", "依頼者の指摘への応答"),
-    (r"(誤りが|ミスが|間違いが)\s*(あった|あり|判明|見つか)", "自己申告の誤り報告"),
+    # 「誤りを発見し、訂正した」= が でなく を。助詞ひとつで抜けていた。
+    (r"(誤り|ミス|間違い|誤記)(が|を)\s*(あった|あり|判明|見つか|発見|検出)",
+     "自己申告の誤り報告"),
     # --- 品質宣言・第三者確認の自慢 ---
     (r"(本(書|レポート|稿)は|これが)\s*最終(版|稿)", "自作物への品質宣言"),
     (r"(第三者|独立)(の目|レビュ|確認)", "第三者確認の露出"),
     (r"(確定した内容のみ|精査のうえ|精査した上で|精査済み)", "自作物の選別工程の開示"),
     # --- 内部ツール・工程名の露出 ---
+    # \b は日本語の直前で境界にならないので使えない。.py 付きの表記
+    # (verify_citations.py) が素通りしていたため明示的に許す。
     (r"(coverage-critic|fact-check-reviewer|analysis-qa-checklist|"
-     r"verify_citations|md_report_qa|サブエージェント|critic)",
+     r"verify_citations(\.py)?|md_report_qa(\.py)?|check_research_report|"
+     r"サブエージェント|critic)",
      "内部工程名の露出"),
     (r"Claude\s*Code", "ツール名の露出"),
 ]
@@ -151,7 +180,14 @@ def _normalize(text):
     `誤りが\nあった`。いずれも行単位・素の正規表現では一致しない。
     """
     text = re.sub(u"[%s]" % ZW, "", text)
-    text = re.sub(r"[*_`~]+", "", text)
+    # `_` is BOTH an emphasis marker and an ordinary identifier character.
+    # Stripping it unconditionally turned verify_citations.py into
+    # verifycitations.py, so the internal-tool-name rule could never match --
+    # the normalizer, added to defeat emphasis, had become a bypass of its own
+    # (measured 2026-09-09). Remove it only where it is not between two
+    # identifier characters, i.e. where it is really emphasis.
+    text = re.sub(r"[*`~]+", "", text)
+    text = re.sub(r"(?<![A-Za-z0-9])_+|_+(?![A-Za-z0-9])", "", text)
     return text
 
 
@@ -181,6 +217,46 @@ def _body_ranges(lines):
         if active:
             keep.add(i + 1)
     return keep
+
+
+def _read_text(path):
+    """Decode a .md file whatever its encoding. Returns "" if unreadable.
+
+    WHY NOT io.open(..., errors="replace") (measured 2026-09-09)
+    ------------------------------------------------------------
+    The attack corpus proposed errors="replace" so the guard would stop
+    skipping non-UTF-8 files. That stops the CRASH but not the BYPASS:
+
+        u"監査を2周実施し、3件を是正しました。".encode("cp932")
+          .decode("utf-8", "replace")
+        -> '\ufffd\u010d\u2026\u20262\u2026\u2026{\u2026\uff0c3\u2026...'
+
+    The Japanese is destroyed, so no pattern can match it and the file sails
+    through. Saving as Shift_JIS was a free bypass either way. Decoding has to
+    actually succeed, so try the encodings that occur on this machine in order
+    and keep the first that round-trips cleanly.
+
+    Order matters: utf-8 first (the norm), then the Windows locale codec, then
+    the UTF-16 variants a BOM would indicate. errors="replace" survives as the
+    last resort so an exotic encoding still gets a best-effort scan rather than
+    a silent skip.
+    """
+    try:
+        raw = io.open(path, "rb").read()
+    except Exception:
+        return ""
+    if raw.startswith(b"\xff\xfe") or raw.startswith(b"\xfe\xff"):
+        for enc in ("utf-16",):
+            try:
+                return raw.decode(enc)
+            except Exception:
+                pass
+    for enc in ("utf-8-sig", "utf-8", "cp932", "euc-jp", "utf-16"):
+        try:
+            return raw.decode(enc)
+        except Exception:
+            continue
+    return raw.decode("utf-8", "replace")
 
 
 def _targets(ti):
@@ -231,10 +307,10 @@ def main():
     hits = []
     advisory = []
     for tgt in targets:
-        try:
-            # 非 UTF-8 でも continue せず replace で読む（回避経路だった）
-            text = io.open(tgt, encoding="utf-8", errors="replace").read()
-        except Exception:
+        # 非 UTF-8 は「読めるように」ではなく「正しく復号」しなければ意味がない。
+        # replace で読むと日本語が壊れて素通りする（_read_text の docstring）。
+        text = _read_text(tgt)
+        if not text:
             continue
         rows = _scan_lines(text)
         keep = _body_ranges([r[1] for r in rows])
