@@ -11,10 +11,24 @@ THE RULE (user, 2026-09-11)
 WHY A Stop HOOK AND NOT PreToolUse
 -----------------------------------
 PreToolUse(Write|Edit) cannot see the write at all when the file is produced by
-a Bash heredoc or sed. Measured in one real session: 0 of 3 report writes went
-through Write|Edit. A guard that only watches the tool the model happens to use
-is not a guard. This one diffs the DISK at end of turn, so every write path --
-Write, Edit, MultiEdit, heredoc, sed, a script -- is covered by construction.
+a Bash heredoc or sed. This one diffs the DISK at end of turn, so a write is
+caught regardless of which tool made it.
+
+HONEST CORRECTION (adversarial QC, 2026-09-11). This docstring used to say
+"0 of 3 report writes went through Write|Edit" and "every write path is covered
+by construction". Both were wrong:
+
+  * The 0-of-3 figure was one session. Across 770 real transcripts the .md
+    writes are Write 916 / Edit 3,614 / Bash 621 -- Bash is ~12%, not 100%.
+  * "Covered by construction" was false because coverage depends on the
+    SNAPSHOT seeing the path, and it was resolving relative paths against the
+    hook's own cwd. 63% of Bash .md writes are relative-after-`cd` and 6% are
+    MSYS `/c/...`; the path regex also stopped at ァ-ヶ, so 「投資・不動産」 --
+    the user's main tree -- was 100% invisible. Fixed in the snapshot; see its
+    _bases()/_msys_to_win()/PATH_RE.
+
+A guard's own docstring overstating its coverage is the exact failure this
+repo exists to prevent, so the numbers above are the measured ones.
 
 The cost of Stop is that it reports after the fact rather than blocking the
 write. That is the right trade here: the invariant is about the SHAPE OF THE
@@ -43,14 +57,15 @@ clean week -- the same path post_bash_guard and pre_report_quality_guard took.
 CALIBRATION, on git history as ground truth (337 real report updates, 43 repos):
 
     the bare diff invariant, K=5        107/337 (31.8%)
-    + document must HAVE a summary       26/337 ( 7.7%)  <- SHIPPED
+    + document must HAVE a summary       26/337 ( 7.7%)
+    + date-bump bypass closed            29/337 ( 8.6%)  <- SHIPPED
     + late change must add a heading     14/337 ( 4.2%)  <- rejected
 
-7.7% is what this hook is held to; precision there is ~18 of 26 by reading all
-of them. An earlier 30-file sample claimed 20.0% for the bare invariant and was
-simply wrong -- the full corpus says 31.8%. The 4.2% variant was rejected for
-reopening three bypasses (a bolded verdict line, a blockquote, a table row)
-that match how this author actually appends findings. See
+8.6% is what this hook is held to; precision is ~18 of 26 by reading every
+flagged section. An earlier 30-file sample claimed 20.0% for the bare invariant
+and was simply wrong -- the full corpus says 31.8%. The 4.2% variant was
+rejected for reopening three bypasses (a bolded verdict line, a blockquote, a
+table row) that match how this author actually appends findings. See
 summary_freshness_check.py for the full tables, the worked examples, and why
 the vocabulary-based design that preceded all of this died at precision ~3/10.
 
@@ -62,6 +77,7 @@ import json
 import os
 import re
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 try:
@@ -100,16 +116,81 @@ def _turn_key(ev):
     return re.sub(r"[^A-Za-z0-9_.-]", "_", raw)[:80]
 
 
-def _load_snapshot(key):
-    if not key:
-        return {}
+def _read(path):
     try:
-        with io.open(os.path.join(STATE_DIR, key + ".json"),
-                     encoding="utf-8") as f:
+        with io.open(path, encoding="utf-8") as f:
             d = json.load(f)
         return d if isinstance(d, dict) else {}
     except Exception:
         return {}
+
+
+# A turn's snapshots may be spread over several keys, and older ones are junk.
+SNAPSHOT_MAX_AGE_S = 6 * 3600
+
+
+def _load_snapshot(key):
+    """Baselines for this turn, merged across every key written recently.
+
+    ⛔ WHY NOT JUST key + ".json" (adversarial QC, 2026-09-11). prompt_id is
+    NOT stable for the length of a turn: a single agent run produced three
+    distinct values (4e960105 -> ca11b6ce -> dc3aee1d), because it changes per
+    injected user-role message, not per user utterance. So the snapshot written
+    at PreToolUse could sit under a different key than the one Stop looks up,
+    and the guard would find nothing and stay silent -- the "無反応は故障と区別
+    がつかない" failure (CLAUDE.md §14 F2). It also broke subagent-written
+    reports, which CLAUDE.md §8b C4 actively encourages.
+
+    Whether Stop's prompt_id matches PreToolUse's was NOT verifiable here, so
+    this does not depend on it either way: take the exact key if present, then
+    merge in any other snapshot file written in the last few hours. Merging is
+    safe because a stale entry can only mean "compared against an older
+    baseline", and each file's own first-touch rule still holds. Consumed files
+    are deleted so the next turn starts clean.
+    """
+    out = {}
+    if key:
+        out.update(_read(os.path.join(STATE_DIR, key + ".json")))
+    now = time.time()
+    try:
+        names = os.listdir(STATE_DIR)
+    except Exception:
+        return out
+    for n in names:
+        if not n.endswith(".json"):
+            continue
+        p = os.path.join(STATE_DIR, n)
+        try:
+            age = now - os.path.getmtime(p)
+        except Exception:
+            continue
+        if age > SNAPSHOT_MAX_AGE_S:
+            try:
+                os.remove(p)            # garbage-collect abandoned turns
+            except Exception:
+                pass
+            continue
+        for k, v in _read(p).items():
+            out.setdefault(k, v)        # earliest baseline wins
+    return out
+
+
+def _consume(key):
+    """Delete this turn's snapshots so the next turn is not judged against them."""
+    now = time.time()
+    try:
+        names = os.listdir(STATE_DIR)
+    except Exception:
+        return
+    for n in names:
+        if not n.endswith(".json"):
+            continue
+        p = os.path.join(STATE_DIR, n)
+        try:
+            if now - os.path.getmtime(p) <= SNAPSHOT_MAX_AGE_S:
+                os.remove(p)
+        except Exception:
+            pass
 
 
 def main():
@@ -137,7 +218,9 @@ def main():
     if cfg.get("mode") == "off":
         return
 
-    snap = _load_snapshot(_turn_key(ev))
+    key = _turn_key(ev)
+    snap = _load_snapshot(key)
+    _consume(key)                   # one turn, one judgement
     if not snap:
         return                      # nothing touched this turn
 

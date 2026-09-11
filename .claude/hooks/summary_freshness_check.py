@@ -98,8 +98,14 @@ restructure is the definition of a guard that gets muted.
 FINAL SHIPPED CONFIGURATION -- K=5 plus the has_conclusion() gate
 
     raw K=5                      107/337 (31.8%)
-    + has 結論 (SHIPPED)          26/337 ( 7.7%)
-    + has 結論 AND new heading    14/337 ( 4.2%)   rejected, see analyze()
+    + has 結論                    26/337 ( 7.7%)
+    + date-bump bypass CLOSED     29/337 ( 8.6%)  <- SHIPPED
+    + has 結論 AND new heading    14/337 ( 4.2%)  rejected, see analyze()
+
+The +3 between 7.7% and 8.6% are updates that were INVISIBLE until
+_opening_signature() stopped counting a mandatory 最終更新日 bump as "the
+opening was refreshed". One of them, Soulful-Content 70b23868, is a plan
+RETRACTION appended as a new final chapter -- the user's complaint verbatim.
 
 7.7% is the number to hold this module to. For scale, this codebase already
 ruled that 35.9% meant 形骸化確実 and narrowed that hook to 1.8%. The 4.2%
@@ -131,8 +137,11 @@ and touched nothing else -> fires, outside=33, opening_end=14) while letting a
 typo-fix pass. K is configurable per repo via .claude/report_quality.json.
 
 NOT A HOOK BY ITSELF. summary_freshness_guard.py drives it at Stop, because
-PreToolUse(Write|Edit) cannot see a file written by a Bash heredoc -- measured
-0 of 3 report writes in one real session went through Write|Edit.
+PreToolUse(Write|Edit) cannot see a file written by a Bash heredoc. (An earlier
+version of this line claimed "0 of 3 report writes went through Write|Edit" --
+that was a single session. Corpus-wide across 770 transcripts it is Write 916 /
+Edit 3,614 / Bash 621, so Bash is ~12%. The Stop design is still right, but for
+the weaker reason that SOME writes bypass the tool, not all of them.)
 """
 import io
 import os
@@ -184,10 +193,10 @@ def in_scope(path):
 
 
 FRONTMATTER_RE = re.compile(
-    r"^\s*(?:[-*>|]|\d+\.)?\s*"
+    r"^\s*(?:[-*>|]|\d+\.|\*\*|__)*\s*"
     u"(?:作成日|最終更新日|更新日|日付|作成者|著者|バージョン|版|対象|"
     u"Date|Author|Version|Updated|Created|Status|Tags?)"
-    r"\s*[:：]")
+    r"\**\s*[:：]")
 
 
 def _has_prose(lines):
@@ -248,6 +257,48 @@ def _norm(lines):
     return [l.rstrip() for l in lines]
 
 
+def _opening_signature(lines):
+    """The part of the opening block that carries MEANING.
+
+    ⛔ THE BUG THIS EXISTS FOR (found by adversarial QC, 2026-09-11, and it was
+    already live in git history). The first version compared the opening block
+    byte-for-byte. But CLAUDE.md §10b REQUIRES bumping 最終更新日 on every
+    update, and that line lives inside the opening block. So:
+
+        follow the documented rule  ->  the opening block differs
+                                    ->  analyze() returns None
+                                    ->  the guard is silent
+
+    Obeying the rules disabled the guard. The known true positive (COCONALA
+    363da05) was caught ONLY because that update also forgot the date bump.
+
+    Not hypothetical -- Soulful-Content 70b23868 is the shape verbatim:
+
+        -**作成日**: 2026-09-02 ／ **最終更新日**: 2026-09-02
+        +**作成日**: 2026-09-02 ／ **最終更新日**: 2026-09-04
+        +## §10 本人検証の結果と訂正（2026-09-04 追記）
+
+    A plan RETRACTION ("14日プラン撤回") appended as a new final chapter, the
+    opening otherwise untouched -- the user's complaint word for word, and the
+    shipped guard said nothing.
+
+    So the comparison drops what cannot carry a conclusion: metadata lines,
+    blank lines, and horizontal rules; and normalises whitespace so that a
+    stray space or a full-width space cannot be used to dodge the check.
+    """
+    out = []
+    for l in lines:
+        t = l.strip()
+        if not t:
+            continue                        # blank-line churn is not content
+        if RULE_RE.match(t):
+            continue
+        if FRONTMATTER_RE.match(t):
+            continue                        # 最終更新日 etc -- REQUIRED to change
+        out.append(re.sub(r"[\s　]+", " ", t))
+    return out
+
+
 def analyze(before_text, after_text, k=5):
     """Return a finding dict, or None.
 
@@ -268,7 +319,15 @@ def analyze(before_text, after_text, k=5):
         return None                     # brand-new file: nothing to compare
 
     oend = opening_end(after)
-    if before[:oend] != after[:oend]:
+    # Compare MEANING, not bytes -- a 最終更新日 bump is mandatory and must not
+    # count as "the opening was refreshed". See _opening_signature().
+    #
+    # Each side's opening block is located independently: inserting one blank
+    # line near the top shifts opening_end by one, so slicing BEFORE at AFTER's
+    # index compares misaligned regions and the signatures differ for a reason
+    # that has nothing to do with the conclusion (adversarial QC case A2).
+    before_sig = _opening_signature(before[:opening_end(before)])
+    if before_sig != _opening_signature(after[:oend]):
         return None                     # the opening WAS refreshed -- correct
 
     import difflib
