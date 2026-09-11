@@ -126,6 +126,10 @@
           {
             "type": "command",
             "command": "P=$(command -v python3 || command -v python) || exit 0; exec \"$P\" .claude/hooks/external_write_guard.py"
+          },
+          {
+            "type": "command",
+            "command": "P=$(command -v python3 || command -v python) || exit 0; exec \"$P\" .claude/hooks/premise_recommendation_guard.py"
           }
         ]
       }
