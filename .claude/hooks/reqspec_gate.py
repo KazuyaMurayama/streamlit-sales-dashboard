@@ -44,6 +44,7 @@ Deployed from claude-governance/templates/hooks/ — edit there, not here.
 """
 import json
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -86,6 +87,67 @@ def _has_imperative(text):
         text or ""))
 
 
+# ---------------------------------------------------------------------------
+# COUNTERMEASURE REQSPEC (added 2026-09-11)
+#
+# WHY A SECOND, SPECIFIC BLOCK
+# countermeasure_gate.py enforces the 5-defect rule -- but it fires at STOP,
+# after the plan has been written and shown to the user. On 2026-09-11 the user
+# asked for a countermeasure and the plan that came back had NO adversarial
+# verification and NO independent QC, both of which the user's own rule
+# requires. Nothing stated those requirements AT THE MOMENT THE PLAN WAS BEING
+# FORMED. Enforcement at the end cannot prevent a bad plan; it can only reject
+# one. This block is the front half.
+#
+# IS A PROMPT KEYWORD SCAN SAFE HERE?
+# This module's own docstring warns that prompt scans misfire because 56% of
+# prompts are pasted prose -- and the countermeasure RULE TEXT itself contains
+# 再発防止, so a pasted CLAUDE.md would match a naive scan. Measured on 2,857
+# real prompts:
+#     naive 「再発防止」 anywhere        40  (1.40%)
+#     ask + FIX VERB, typed-only       36  (1.26%)
+#     naive fires, typed-only does not  4   <- pasted rule text, skipped
+# 21 distinct; all but two are genuine requests. Requiring a FIX VERB next to
+# the topic, evaluated on the TYPED body with pasted blocks stripped, is what
+# makes it safe. Do not loosen to the topic word alone.
+CM_ASK_RE = re.compile(
+    u"(?:再発防止|恒久対策|再発を?防|二度と(?:起こ|同じ|繰り返)"
+    u"|同じ(?:ミス|問題|失敗)を?(?:繰り返|起こ)さな"
+    u"|同様の(?:問題|ミス|失敗)[^。\n]{0,10}(?:防|起こ)"
+    u"|(?:何回|何度|複数回|繰り返し)[^。\n]{0,16}(?:ミス|失敗|発生|起こ)"
+    u"|毎回必ず[^。\n]{0,16}(?:防|起動))",
+    re.IGNORECASE)
+
+CM_FIX_RE = re.compile(
+    # ⚠️ Built from REAL phrasings, not invented ones. The first draft
+    # required 「更新して」 and therefore missed the user's actual words
+    # 「更新をかけてください」 (2026-09-11) -- the very message this block
+    # exists for. Accept a particle between the noun and the verb, and
+    # accept かけて/くわえて which this user uses often.
+    u"(?:立てて|計画して|実行して|対策して|考えて|作って|やって|防いで|直して"
+    u"|修正|改善|反映|更新|検討|対応)(?:を?(?:かけて|くわえて|加えて|して))?"
+    u"(?:ください|下さい|ほしい|欲しい)"
+    u"|(?:修正|改善|反映|更新|検討|対応|変更)(?:を)?(?:かけて|くわえて|加えて|して)"
+    u"|防ぐように|防止して"
+    u"|お願いし|してください|して下さい|してほしい|して欲しい"
+    u"|せよ|しろ|してくれ|できますか|ないでください"
+    u"|(?:不十分|甘い|できていない|意味が(?:ほぼ)?無|意味がない|応えな"
+    u"|終わったこと|限定すぎ|ほとんど発火|繰り返して)")
+
+# Kept deliberately short: this is injected on ~1.3% of prompts, and a wall of
+# text at prompt time is how an injection gets skimmed instead of read.
+CM_BLOCK = u"""【再発防止 REQSPEC — 着手前に必須。ルール文章の追記だけで終えてはならない】
+これは再発防止の依頼である。対策そのものを成果物とみなし、下記を計画に含めてから着手すること:
+・クラス化: 指摘された1件でなく「不変条件」を1文で定義する（固有文字列で塞がない＝類似問題も防ぐ）
+・機械化: 散文でなくフック/スクリプトで強制する。全リポ＋グローバルへ配布する
+・攻撃的検証: 自作テストの合格は証拠にならない。回避文面を別モデル(Fable)に生成させ逐語でケース化する
+・赤緑: 当時の欠陥版に当てて FAIL することを確認する（直した版で PASS しても何も証明しない）
+・較正: 実データで発火率を実測する（高すぎれば形骸化、0%なら死んでいる）
+・独立QC: 自分の計画を自分でQCしない。最終チェックは Fable に反証させる
+・完了条件: python scripts/countermeasure_ledger.py と scripts/audit_countermeasures.py を実行し実出力を貼る
+正典: ~/.claude/CLAUDE.md の「再発防止策の実効性」ブロック"""
+
+
 def main():
     # Defer to a registered repo-local copy (existing convention).
     try:
@@ -122,7 +184,14 @@ def main():
     # Without it the gate injected 326 chars onto 「このファイル何？」, which is
     # precisely the crying-wolf behaviour that gets a guard switched off.
     body = tc.strip_pasted(tc.strip_wrappers(prompt)).strip()
-    if len(body) <= 60 and not _has_imperative(body):
+
+    # A countermeasure request gets the specific block INSTEAD of the generic
+    # one, and is exempt from the short-question early return: 「どのようにして
+    # 再発防止し、二度と起こらないようにできますか？」 is a question in form and
+    # a commission in substance.
+    is_cm = bool(CM_ASK_RE.search(body) and CM_FIX_RE.search(body))
+
+    if not is_cm and len(body) <= 60 and not _has_imperative(body):
         return
 
     # ensure_ascii + binary write: several kanji end in byte 0x5C under CP932
@@ -130,7 +199,7 @@ def main():
     payload = json.dumps({
         "hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit",
-            "additionalContext": REQSPEC,
+            "additionalContext": (CM_BLOCK if is_cm else REQSPEC),
         }
     }, ensure_ascii=True)
     # 発火記録: 無反応と故障を区別するため(CLAUDE.md §14 F2)。ledger が読む

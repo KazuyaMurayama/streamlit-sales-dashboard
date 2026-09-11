@@ -147,6 +147,26 @@ IMPERATIVE_RE = re.compile(
 AUDIT_RE = re.compile(
     r"audit_countermeasures\.py|countermeasure_ledger\.py")
 
+# A countermeasure mentioned in the PAST, as background to something else:
+# 「前回の再発防止でフックを入れましたが…」. Past tense plus a retrospective
+# time word; a live request does not describe its own countermeasure as
+# already installed.
+BACKGROUND_RE = re.compile(
+    u"(?:前回|前の|先ほど|さっき|以前|昨日|この前|先週)[^。\n]{0,24}"
+    u"(?:再発防止|恒久対策|対策|ガード|フック)"
+    u"[^。\n]{0,24}(?:入れ|導入し|作っ|やっ|実施し|し)(?:まし|た|てい)")
+
+# Verbs that commission actual remediation. If any of these is present the
+# turn is a countermeasure turn even when a past one is also mentioned --
+# 「前回の再発防止では不十分なので直して」 must still fire.
+FIX_VERB_RE = re.compile(
+    u"(?:立てて|計画して|実行して|対策して|考えて|作って|やって|防いで|直して"
+    u"|修正して|改善して|反映して|更新して|検討して"
+    u"|お願いし|してください|して下さい|してほしい|して欲しい"
+    u"|せよ|しろ|してくれ)"
+    u"|(?:不十分|甘い|できていない|意味が(?:ほぼ)?無|意味がない|応えな"
+    u"|終わったこと|限定すぎ|ほとんど発火|繰り返して)")
+
 # Deploying is not a substitute for auditing, but a turn that deployed AND
 # audited is the intended shape; deploy alone is explicitly not enough, because
 # "I shipped it" was the claim that kept turning out to be false.
@@ -277,25 +297,37 @@ def main():
         return
 
     # ...but not when 再発防止 is merely BACKGROUND to a different request.
-    # Measured false positive: 「前回の再発防止でフックを入れましたが、いまの
-    # NASDAQ のベスト戦略の CAGR を教えてください」 -- the topic word and an
-    # imperative both appear, yet the commissioned work is a lookup.
+    # The false positive to avoid: 「前回の再発防止でフックを入れましたが、いまの
+    # NASDAQ のベスト戦略の CAGR を教えてください」 -- topic and imperative both
+    # present, yet the commissioned work is a lookup.
     #
-    # Discriminator: distance. In a real countermeasure request the topic and
-    # the imperative sit in the same clause (「再発防止を計画して」). When the
-    # mention is background, the imperative belongs to a later, unrelated
-    # clause. Anything past ~40 chars is treated as a different sentence.
+    # ⚠️ DISTANCE WAS THE WRONG DISCRIMINATOR (measured 2026-09-11).
+    # This used to require the imperative within 40 characters of the topic
+    # word, reasoning that a real request keeps them in one clause. Its own
+    # docstring warned that "a false negative here silently exempts a real
+    # countermeasure turn, which is the failure this whole hook exists to
+    # prevent" -- and then it did exactly that. Replayed over 1,770 real user
+    # messages from 29 transcripts:
     #
-    # Deliberately generous (40, not 15): a false negative here silently
-    # exempts a real countermeasure turn, which is the failure this whole hook
-    # exists to prevent. A false positive merely costs one extra audit run.
-    near = False
-    for m in ASK_RE.finditer(ask):
-        window = ask[m.start():m.start() + 40]
-        if IMPERATIVE_RE.search(window):
-            near = True
-            break
-    if not near:
+    #     ask + imperative present        33 messages
+    #     window  40 chars -> fires on     9   (27%)   73% of real asks MISSED
+    #     window 200 chars -> fires on    14   (42%)
+    #     no window        -> fires on    14   (42%)
+    #
+    # Cost of removing it entirely: 0.51% -> 0.79% of all user messages. It
+    # bought nothing and lost almost everything. The user's real request of
+    # 2026-09-11 put 再発防止 in sentence one and the imperative 179 characters
+    # later -- the ordinary shape of a real request, not an exception.
+    #
+    # Worse, the FP it was built for never occurred once in those 1,770
+    # messages: it was hypothetical, and it was traded against a measured
+    # failure. Of 19 deduped ask+imperative messages, 17 were genuine requests.
+    #
+    # The real signal is not distance but GRAMMAR: a background mention is
+    # PAST TENSE about an already-installed countermeasure, and what it
+    # commissions is a LOOKUP. Both must hold to stay silent -- so a message
+    # that mentions a past countermeasure and then asks for a FIX still fires.
+    if BACKGROUND_RE.search(ask) and not FIX_VERB_RE.search(ask):
         return
 
     # Condition 2: the audit was never run this turn.

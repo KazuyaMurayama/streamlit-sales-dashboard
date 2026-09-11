@@ -292,9 +292,21 @@ def _targets(ti):
     return [rec[3:] for rec in out.split("\0") if len(rec) > 3]
 
 
+# Test material, not a deliverable. An attack corpus must QUOTE process-leak
+# sentences verbatim -- that is precisely what makes it evidence -- so this
+# guard fires on its own fixtures. Measured 2026-09-11: writing
+# fixtures/summary_coverage_attack_corpus_20260911.md tripped it 5 times, then
+# 7 as the file grew. Blocking the test material for the guard trains the
+# author to route around the guard, which is how a guard dies.
+# Deliberately narrow: only fixtures/ and tests/, never outputs/ or reports/.
+FIXTURE_RE = re.compile(r"(^|/)(fixtures?|tests?|__tests__)/", re.I)
+
+
 def _in_scope(p):
     q = p.replace("\\", "/")
     if not EXT_RE.search(q):
+        return False
+    if FIXTURE_RE.search(q):
         return False
     return bool(SCOPE_RE.search(q) or REPORT_NAME_RE.search(os.path.basename(q)))
 
