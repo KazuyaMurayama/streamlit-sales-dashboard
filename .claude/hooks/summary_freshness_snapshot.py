@@ -60,9 +60,24 @@ CD_RE = re.compile(r"""(?:^|[;&|]|\bthen\b)\s*cd\s+(?:-P\s+)?"""
                    r"""(?:(['"])(.+?)\1|([^\s;&|]+))""")
 
 
+def _sid(ev):
+    """Session id -- the filename PREFIX, so a session only ever sees its own.
+
+    ⛔ session_id first, prompt_id second (2026-09-15). prompt_id is not stable
+    within a turn, so the guard has to merge several files; but merging across
+    SESSIONS was a real defect: with two Claude sessions running at once, the
+    first one to reach Stop deleted the other's baselines and the second went
+    permanently silent. Measured, not theorised. Prefixing by session keeps the
+    merge inside one session.
+    """
+    raw = str(ev.get("session_id") or ev.get("prompt_id") or "nosession")
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", raw)[:60]
+
+
 def _turn_key(ev):
+    sid = _sid(ev)
     raw = str(ev.get("prompt_id") or ev.get("session_id") or "")
-    return re.sub(r"[^A-Za-z0-9_.-]", "_", raw)[:80]
+    return sid + "__" + re.sub(r"[^A-Za-z0-9_.-]", "_", raw)[:60]
 
 
 def _msys_to_win(p):

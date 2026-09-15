@@ -99,15 +99,24 @@ FINAL SHIPPED CONFIGURATION -- K=5 plus the has_conclusion() gate
 
     raw K=5                      107/337 (31.8%)
     + has 結論                    26/337 ( 7.7%)
-    + date-bump bypass CLOSED     29/337 ( 8.6%)  <- SHIPPED
+    + date-bump bypass CLOSED     30/342 ( 8.8%)
+    + bulk-sweep exemption         27/342 ( 7.9%)  <- SHIPPED
     + has 結論 AND new heading    14/337 ( 4.2%)  rejected, see analyze()
 
-The +3 between 7.7% and 8.6% are updates that were INVISIBLE until
+The bulk exemption lives in the guard, not here (it needs the whole turn, not
+one file). Measured: it suppresses 3 findings across 1 commit -- the
+"Improve Priority Matrix visualization" sweep that rewrote the same late
+section in every generated enterprise report. Adversarial QC predicted ~40
+suppressions; that estimate was taken on the UNFILTERED K=5 set, where most of
+those files had no 結論 section and are already excluded here. Both must-keep
+true positives (COCONALA 363da05, ADVISOR_REVIEW 70b23868) survive.
+
+The +4 between 7.7% and 8.8% are updates that were INVISIBLE until
 _opening_signature() stopped counting a mandatory 最終更新日 bump as "the
 opening was refreshed". One of them, Soulful-Content 70b23868, is a plan
 RETRACTION appended as a new final chapter -- the user's complaint verbatim.
 
-7.7% is the number to hold this module to. For scale, this codebase already
+7.9% is the number to hold this module to. For scale, this codebase already
 ruled that 35.9% meant 形骸化確実 and narrowed that hook to 1.8%. The 4.2%
 variant was tighter still but bought that tightness by reopening three bypasses
 in the author's own writing style, which is the wrong side of the one

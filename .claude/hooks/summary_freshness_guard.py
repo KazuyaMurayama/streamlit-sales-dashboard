@@ -58,10 +58,11 @@ CALIBRATION, on git history as ground truth (337 real report updates, 43 repos):
 
     the bare diff invariant, K=5        107/337 (31.8%)
     + document must HAVE a summary       26/337 ( 7.7%)
-    + date-bump bypass closed            29/337 ( 8.6%)  <- SHIPPED
+    + date-bump bypass closed            30/342 ( 8.8%)
+    + bulk-sweep exemption (bulk_min=3)  27/342 ( 7.9%)  <- SHIPPED
     + late change must add a heading     14/337 ( 4.2%)  <- rejected
 
-8.6% is what this hook is held to; precision is ~18 of 26 by reading every
+7.9% is what this hook is held to; precision is ~18 of 26 by reading every
 flagged section. An earlier 30-file sample claimed 20.0% for the bare invariant
 and was simply wrong -- the full corpus says 31.8%. The 4.2% variant was
 rejected for reopening three bypasses (a bolded verdict line, a blockquote, a
@@ -96,7 +97,7 @@ STATE_DIR = os.path.join(os.path.expanduser("~"), ".claude", "state",
 
 
 def _cfg():
-    cfg = {"mode": "warn", "k": 5}
+    cfg = {"mode": "warn", "k": 5, "bulk_min": 3}
     try:
         p = os.path.join(os.getcwd(), ".claude", "report_quality.json")
         with io.open(p, encoding="utf-8-sig") as f:
@@ -106,14 +107,23 @@ def _cfg():
                 cfg["mode"] = user["summary_mode"]
             if isinstance(user.get("summary_k"), int):
                 cfg["k"] = user["summary_k"]
+            if isinstance(user.get("summary_bulk_min"), int):
+                cfg["bulk_min"] = user["summary_bulk_min"]
     except Exception:
         pass
     return cfg
 
 
+def _sid(ev):
+    """Session id -- must match summary_freshness_snapshot._sid()."""
+    raw = str(ev.get("session_id") or ev.get("prompt_id") or "nosession")
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", raw)[:60]
+
+
 def _turn_key(ev):
+    sid = _sid(ev)
     raw = str(ev.get("prompt_id") or ev.get("session_id") or "")
-    return re.sub(r"[^A-Za-z0-9_.-]", "_", raw)[:80]
+    return sid + "__" + re.sub(r"[^A-Za-z0-9_.-]", "_", raw)[:60]
 
 
 def _read(path):
@@ -129,7 +139,7 @@ def _read(path):
 SNAPSHOT_MAX_AGE_S = 6 * 3600
 
 
-def _load_snapshot(key):
+def _load_snapshot(key, sid=None):
     """Baselines for this turn, merged across every key written recently.
 
     ⛔ WHY NOT JUST key + ".json" (adversarial QC, 2026-09-11). prompt_id is
@@ -156,6 +166,8 @@ def _load_snapshot(key):
         names = os.listdir(STATE_DIR)
     except Exception:
         return out
+    prefix = (sid or "") + "__"
+    unowned = []
     for n in names:
         if not n.endswith(".json"):
             continue
@@ -170,13 +182,36 @@ def _load_snapshot(key):
             except Exception:
                 pass
             continue
+        if sid and not n.startswith(prefix):
+            unowned.append(p)           # another session's -- or an unkeyed one
+            continue
         for k, v in _read(p).items():
             out.setdefault(k, v)        # earliest baseline wins
+
+    # Fall back only if this session owns NOTHING. PreToolUse and Stop do not
+    # necessarily carry the same identifiers -- a payload may omit session_id
+    # entirely, in which case the snapshot is prefixed by its prompt_id and no
+    # session prefix can ever match it. Staying silent there would be the
+    # failure this module exists to prevent, so prefer a possibly-wrong
+    # baseline over no check at all. A wrong baseline can only mis-measure how
+    # much changed; it cannot invent a stale opening.
+    if not out:
+        for p in unowned:
+            for k, v in _read(p).items():
+                out.setdefault(k, v)
     return out
 
 
-def _consume(key):
-    """Delete this turn's snapshots so the next turn is not judged against them."""
+def _consume(key, sid=None):
+    """Delete THIS SESSION's snapshots so the next turn starts clean.
+
+    ⛔ Scoped by session prefix (2026-09-15). The first version deleted every
+    file younger than 6h, so with two sessions running concurrently the first
+    to reach Stop wiped the other's baselines and that session never fired
+    again. Reproduced: A fires, B silent. Same "guard does not fire" class the
+    whole module exists to prevent -- introduced by the fix for F3.
+    """
+    prefix = (sid or "") + "__"
     now = time.time()
     try:
         names = os.listdir(STATE_DIR)
@@ -185,6 +220,8 @@ def _consume(key):
     for n in names:
         if not n.endswith(".json"):
             continue
+        if sid and not n.startswith(prefix):
+            continue                    # never touch another session's state
         p = os.path.join(STATE_DIR, n)
         try:
             if now - os.path.getmtime(p) <= SNAPSHOT_MAX_AGE_S:
@@ -219,8 +256,9 @@ def main():
         return
 
     key = _turn_key(ev)
-    snap = _load_snapshot(key)
-    _consume(key)                   # one turn, one judgement
+    sid = _sid(ev)
+    snap = _load_snapshot(key, sid)
+    _consume(key, sid)              # one turn, one judgement -- this session only
     if not snap:
         return                      # nothing touched this turn
 
@@ -238,6 +276,18 @@ def main():
         findings.append((path, f, unref))
 
     if not findings:
+        return
+
+    # BULK-EDIT EXEMPTION (adversarial QC, measured: the single largest false
+    # positive class -- 40 of 76). A turn that rewrites the same late section
+    # across many generated reports is a mechanical sweep, not a buried
+    # finding: "全レポートの未説明の専門語を一括是正", an ASCII diagram replaced
+    # by a table across 24 files, a citation-tag pass. Asking the author to
+    # restate each of those in each opening is noise, and noise is how a guard
+    # gets muted. One or two reports in a turn is normal authoring; three is a
+    # sweep. Configurable, and set to 0 to disable.
+    bulk = cfg.get("bulk_min", 3)
+    if bulk and len(findings) >= bulk:
         return
 
     # 発火記録: 無反応と故障を区別するため(CLAUDE.md §14 F2)。ledger が読む
