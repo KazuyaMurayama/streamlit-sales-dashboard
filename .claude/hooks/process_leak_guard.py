@@ -313,7 +313,9 @@ def _in_scope(p):
 
 def main():
     try:
-        payload = json.load(sys.stdin)
+        # stdin はバイトで読んで UTF-8 復号する（Windows 既定 cp932 で日本語パスの
+        # payload が UnicodeDecodeError → exit 0 素通り。実測 2026-09-15、asr_term_guard）。
+        payload = json.loads(sys.stdin.buffer.read().decode("utf-8", "replace"))
     except Exception:
         return 0
     ti = payload.get("tool_input") or {}

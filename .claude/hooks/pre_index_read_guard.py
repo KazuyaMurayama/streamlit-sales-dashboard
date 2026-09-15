@@ -97,7 +97,8 @@ def main():
         pass
 
     try:
-        data = json.load(sys.stdin)
+        # stdin はバイトで読んで UTF-8 復号する（cp932 既定で日本語 payload が落ちる。2026-09-15）
+        data = json.loads(sys.stdin.buffer.read().decode("utf-8", "replace"))
         if not targets_index(data):
             return
         age = index_age_hours()

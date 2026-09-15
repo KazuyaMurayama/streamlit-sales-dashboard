@@ -102,9 +102,21 @@ def analyze(ti, terms):
     return hits_all
 
 
+def _read_payload():
+    """stdin を UTF-8 バイトとして読む。
+
+    実測 2026-09-15: `json.load(sys.stdin)` は Windows の既定 stdin 符号化（cp932）で
+    復号するため、content に日本語を含むペイロードで UnicodeDecodeError → 外側の
+    except で exit 0 → **誤変換入りの書き込みが黙って通った**。この hook は日本語の
+    content を見るのが仕事なので、バイトで読んで UTF-8 で復号する。
+    """
+    raw = sys.stdin.buffer.read() if hasattr(sys.stdin, "buffer") else sys.stdin.read().encode("utf-8", "replace")
+    return json.loads(raw.decode("utf-8", "replace"))
+
+
 def main():
     try:
-        payload = json.load(sys.stdin)
+        payload = _read_payload()
     except Exception:
         return 0
     terms = load_glossary(payload.get("cwd"))

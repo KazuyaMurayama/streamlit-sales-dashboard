@@ -52,10 +52,15 @@ NETWORK: PubMed E-utilities と Crossref。識別子ごとに1回、結果は
        思想: 合格記録が無いものは通さない）。内部例外は FAIL-OPEN。
 
 CALIBRATION (実測 2026-09-15): 本物の表（decks/CREATOR_BRAIN_40S_20260915-v2.md、
-       主張18行・エビデンス18行・識別子15件）で走らせ、FAIL 0 / REVIEW の内訳を
-       docstring 末尾に記録。欠陥版フィクスチャ（Bowlby DOI・404 DOI・要旨に無い
-       d=0.26・主張の欠落）で FAIL することを tests/test_evidence_table_guard.py
-       が確認する。直した版で PASS しても何も証明しない（CLAUDE.md 絶対ルール 8）。
+       主張 18 行・エビデンス 19 行・識別子 23 件）に対し、初版は FAIL 8（うち本物 0、
+       偽陽性 8: URL/DOI 内の数字と「20代」「2019年」を検証キーにしていた）、
+       2 版は FAIL 9（偽陽性: 補助 PMID を要点セルに書くと代表論文の取り違え）、
+       3 版は FAIL 2（偽陽性: 「PMID 1923」を著者年と誤読、コロン無し DOI 未抽出）、
+       4 版は FAIL 1（偽陽性: 全角括弧まで DOI に含めて 404）、5 版で FAIL 0 / REVIEW 0。
+       偽陽性を 4 回潰して初めて本番で使える。欠陥版フィクスチャ（Bowlby DOI・404 DOI・
+       要旨に無い d=0.26・主張の欠落・語彙外・年ずれ）で FAIL することを
+       tests/test_evidence_table_guard.py が確認する（8/8）。直した版で PASS しても
+       何も証明しない（CLAUDE.md 絶対ルール 8）。
 
 ⚠ WIRING: `python hook.py || python3 hook.py || exit 0` は exit 2 を 0 に変える。
        deploy_all.py が生成する `P=$(command -v python3 || command -v python) ||
@@ -89,12 +94,20 @@ CONF_VOCAB = {"高", "中", "低"}
 EFFECT_VOCAB = {"大", "中", "小", "ほぼゼロ", "不明", "不適用"}
 EXEMPT_RE = re.compile(r"該当なし|検証対象外|に同じ")
 PMID_RE = re.compile(r"pubmed\.ncbi\.nlm\.nih\.gov/(\d+)|\bPMID\s*[:：]?\s*(\d{6,9})", re.I)
-DOI_RE = re.compile(r"doi\.org/(10\.\d{4,9}/[^\s\)\]\|>]+)|\bDOI\s*[:：]\s*(10\.\d{4,9}/[^\s\)\]\|>]+)", re.I)
+# 「DOI: 10.…」だけでなく「DOI 10.…」（コロン無し）も識別子として拾う。
+# 実測 2026-09-15: コロン無しで書いた Haber 1979 の DOI が抽出されず、
+# 「識別子なし」の偽 FAIL になった。
+# 終端は半角だけでなく全角の括弧・読点でも止める（実測 2026-09-15: 「DOI 10.…）も成人での」
+# まで DOI として拾い、Crossref 404 の偽 FAIL になった）。
+DOI_RE = re.compile(r"doi\.org/(10\.\d{4,9}/[^\s\)\]\|>）」』、。]+)|\bDOI\s*[:：]?\s*(10\.\d{4,9}/[^\s\)\]\|>）」』、。]+)", re.I)
 CLAIM_ID_RE = re.compile(r"^\s*(C\d+'?)\s*$")
 YEAR_RE = re.compile(r"\b(19|20)\d{2}\b")
 # 第一著者姓 + 年 の並び（「Zell 2020」「von der Embse 2018」「Bangert-Drowns 2004」）
-AUTHOR_YEAR_RE = re.compile(r"([A-Z][A-Za-z'\-]+(?:\s+(?:von|van|de|der|den|la|le)\s+[A-Z][A-Za-z'\-]+)?"
-                            r"|(?:von|van|de)\s+(?:der\s+)?[A-Z][A-Za-z'\-]+)\s+((?:19|20)\d{2})")
+# 年の後ろに数字が続くもの（PMID 19231028 → 「PMID 1923」）は年ではない。
+# 実測 2026-09-15: この取り違えで偽 FAIL 1 件。識別子ラベルは著者名から除外する。
+AUTHOR_YEAR_RE = re.compile(r"(?<![A-Za-z])(?!(?:PMID|PMC|PMCID|DOI|ISBN)\b)"
+                            r"([A-Z][A-Za-z'\-]+(?:\s+(?:von|van|de|der|den|la|le)\s+[A-Z][A-Za-z'\-]+)?"
+                            r"|(?:von|van|de)\s+(?:der\s+)?[A-Z][A-Za-z'\-]+)\s+((?:19|20)\d{2})(?!\d)")
 # 行内の「原著に存在すべき数値」。年・タイムスタンプ・C番号は除外する。
 NUM_RE = re.compile(r"(?<![\d.:\[])(\d{1,3}(?:,\d{3})+|\d+\.\d+|\.\d+|\d+)(?![\d:\]])")
 
@@ -491,9 +504,17 @@ def _targets(ti):
     return out
 
 
+def _read_payload():
+    """stdin を UTF-8 バイトとして読む（cp932 既定で日本語ペイロードが落ちるのを防ぐ。
+    実測 2026-09-15: asr_term_guard で content に日本語を含む payload が json.load で
+    落ち、exit 0 で素通りした。同じ構造なのでここも同じ読み方にする）。"""
+    raw = sys.stdin.buffer.read() if hasattr(sys.stdin, "buffer") else sys.stdin.read().encode("utf-8", "replace")
+    return json.loads(raw.decode("utf-8", "replace"))
+
+
 def main():
     try:
-        payload = json.load(sys.stdin)
+        payload = _read_payload()
     except Exception:
         return 0
     ti = payload.get("tool_input") or {}
