@@ -161,6 +161,9 @@ CONCLUSION_RE = re.compile(
     u"(結論|サマリー|要約|概要|まとめ|Executive|TL;?DR|Summary)",
     re.IGNORECASE)
 HEADING_RE = re.compile(r"^#{1,3}\s")
+# Every space-like character, including the zero-width ones. Used to REMOVE
+# whitespace from an opening-block signature -- see _opening_signature().
+WS_RE = re.compile(r"[\s　​‌‍⁠﻿]+")
 RULE_RE = re.compile(r"^---+\s*$")
 REPORT_NAME_RE = re.compile(r"_\d{8}(?:-v\d+)?\.(md|markdown|mdx)$", re.I)
 SCOPE_DIRS = ("outputs/", "reports/", "docs/", "output/", "report/", "_meta/")
@@ -304,7 +307,14 @@ def _opening_signature(lines):
             continue
         if FRONTMATTER_RE.match(t):
             continue                        # 最終更新日 etc -- REQUIRED to change
-        out.append(re.sub(r"[\s　]+", " ", t))
+        # REMOVE whitespace, do not collapse it. Collapsing left round-1's
+        # own case A3 open: inserting ONE half-width space into the conclusion
+        # still changed the signature, so the guard went silent -- and the
+        # docstring above claimed it could not. Zero-width characters
+        # (U+200B/FEFF and friends) are the same dodge with no visible trace.
+        # Measured: removing instead of collapsing changes 0 of 424 verdicts
+        # on real history.
+        out.append(WS_RE.sub(u"", t))
     return out
 
 

@@ -139,7 +139,7 @@ def _read(path):
 SNAPSHOT_MAX_AGE_S = 6 * 3600
 
 
-def _load_snapshot(key, sid=None):
+def _load_snapshot(key, sid=None, ev_has_session=False):
     """Baselines for this turn, merged across every key written recently.
 
     ⛔ WHY NOT JUST key + ".json" (adversarial QC, 2026-09-11). prompt_id is
@@ -195,7 +195,20 @@ def _load_snapshot(key, sid=None):
     # failure this module exists to prevent, so prefer a possibly-wrong
     # baseline over no check at all. A wrong baseline can only mis-measure how
     # much changed; it cannot invent a stale opening.
-    if not out:
+    # ...but ONLY when this Stop has no session_id of its own to match against.
+    #
+    # ⛔ The unconditional version was a new defect (adversarial QC round 2,
+    # reproduced 2/2). A session that touched no report at all would adopt
+    # ANOTHER session's snapshots and warn about a file it never opened --
+    # including a file the other session was still mid-edit on. An abandoned
+    # snapshot (Ctrl+C, no Stop) made every other session warn once per
+    # report-free turn for six hours. Noise like that is how a guard gets
+    # muted, and it was introduced by the fix for the opposite problem.
+    #
+    # With a session_id present, an empty result is the honest answer: this
+    # session touched nothing. Without one, we cannot tell whose snapshot is
+    # whose, and staying silent would be the worse failure.
+    if not out and not ev_has_session:
         for p in unowned:
             for k, v in _read(p).items():
                 out.setdefault(k, v)
@@ -257,7 +270,7 @@ def main():
 
     key = _turn_key(ev)
     sid = _sid(ev)
-    snap = _load_snapshot(key, sid)
+    snap = _load_snapshot(key, sid, bool(ev.get("session_id")))
     _consume(key, sid)              # one turn, one judgement -- this session only
     if not snap:
         return                      # nothing touched this turn

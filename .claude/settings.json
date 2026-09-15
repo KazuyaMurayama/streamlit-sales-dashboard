@@ -61,6 +61,15 @@
             "command": "P=$(command -v python3 || command -v python) || exit 0; exec \"$P\" .claude/hooks/summary_freshness_snapshot.py"
           }
         ]
+      },
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "P=$(command -v python3 || command -v python) || exit 0; exec \"$P\" .claude/hooks/asr_term_guard.py"
+          }
+        ]
       }
     ],
     "PostToolUse": [
@@ -97,6 +106,15 @@
           {
             "type": "command",
             "command": "P=$(command -v python3 || command -v python) || exit 0; exec \"$P\" .claude/hooks/process_leak_guard.py"
+          }
+        ]
+      },
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "P=$(command -v python3 || command -v python) || exit 0; exec \"$P\" .claude/hooks/evidence_table_guard.py"
           }
         ]
       }
