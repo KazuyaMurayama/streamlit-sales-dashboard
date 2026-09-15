@@ -147,6 +147,30 @@ IMPERATIVE_RE = re.compile(
 AUDIT_RE = re.compile(
     r"audit_countermeasures\.py|countermeasure_ledger\.py")
 
+# --- Did a DIFFERENT model actually attack it? ----------------------------
+#
+# ⛔ THE GAP THIS CLOSES (2026-09-15, found by the user, not by me).
+# The rules have always said 「攻撃的検証: 自作テストの合格は証拠にならない」 and
+# 「独立QC: 自分の計画を自分でQCしない」. But nothing CHECKED it: reqspec_gate
+# injects that sentence as prose at prompt time, and this gate only verified
+# that the audit script ran. Prose plus an unverified intention is exactly the
+# 「散文追記で終わる」 defect (欠陥③) the whole countermeasure meta-rule names.
+#
+# The cost was measured, on this very feature. I shipped summary_freshness
+# reporting "PASS, 違反なし" with THREE fatal bypasses in it, including one
+# where following CLAUDE.md §10b (bump 最終更新日) silenced the guard entirely.
+# They were found only because I happened to run Fable by hand afterwards. Had
+# I not, the audit would still have said PASS and the guard would have been
+# decorative. Then the FIX for those introduced two more silent-failure paths.
+#
+# So: a countermeasure turn must show that a different model was actually
+# dispatched to break the thing. A Task/Agent call naming a non-Opus model, or
+# a written adversarial-findings fixture, both count. What does NOT count is
+# saying the words -- this matches TOOL CALLS in the transcript, not prose.
+ADVERSARIAL_RE = re.compile(
+    r"claude-fable|model[\"'\s:=]+fable|subagent_type"
+    r"|adversarial\w*\.md|_adversarial_|攻撃コーパス|attack_corpus")
+
 # A countermeasure mentioned in the PAST, as background to something else:
 # 「前回の再発防止でフックを入れましたが…」. Past tense plus a retrospective
 # time word; a live request does not describe its own countermeasure as
@@ -257,6 +281,30 @@ zero hooks and zero CI」）。**少なくとも2回再発したクラス**で�
 """
 
 
+MISSING_ADVERSARIAL = u"""⛔ 監査は実行済みだが、**独立した攻撃的検証を行っていない**。
+
+「自作テストの合格は証拠にならない」「自分の計画を自分でQCしない」は
+ルールに明記されているが、守られたことが一度も検査されていなかった。
+その代償は実測済みである——2026-09-11、summary_freshness を
+「監査 PASS・違反なし」として出荷したが、致命的な発火漏れが3件あった。
+うち1件は **CLAUDE.md §10b（最終更新日の更新）を守るとガードが沈黙する**
+というもので、ルール遵守者ほど検査されない構造だった。
+後から手動で別モデルに当てたから見つかっただけで、やらなければ
+監査は PASS のまま、ガードは飾りのままだった。
+
+いま行うこと（どちらか）:
+  1. Task/Agent で **model: claude-fable-5** のサブエージェントを起動し、
+     「この対策を壊せ。回避経路を逐語の再現ケースで出せ」と指示する。
+     戻ってきた回避経路を **テストケースに逐語で追加**し、
+     **当時の欠陥版に当てて FAIL することを確認**する。
+  2. 既存の攻撃コーパス（tests/fixtures/*_adversarial_*.md 等）に対して
+     今回の対策を実際に走らせ、実出力を貼る。
+
+「攻撃的検証を行いました」と書くだけでは通らない。
+本ゲートはツール呼び出しを見ており、文章は見ていない。
+"""
+
+
 def main():
     # Defer to a registered repo-local copy, matching the existing convention.
     try:
@@ -330,13 +378,22 @@ def main():
     if BACKGROUND_RE.search(ask) and not FIX_VERB_RE.search(ask):
         return
 
-    # Condition 2: the audit was never run this turn.
-    if AUDIT_RE.search(tools):
+    # Condition 2: BOTH proofs must be present in this turn's tool calls.
+    #   - the audit ran (the five defects were measured, not asserted)
+    #   - a different model was dispatched to break it (self-testing is not
+    #     evidence; see ADVERSARIAL_RE for what this cost when it was missing)
+    if AUDIT_RE.search(tools) and ADVERSARIAL_RE.search(tools):
         return
 
     _record_fired(ev)
 
-    out = {"decision": "block", "reason": REASON}
+    reason = REASON
+    if AUDIT_RE.search(tools):
+        # The audit ran but nothing attacked it -- name that specifically, so
+        # the block is actionable instead of repeating the generic checklist.
+        reason = MISSING_ADVERSARIAL
+
+    out = {"decision": "block", "reason": reason}
     # ensure_ascii=True + buffer.write: CP932 consoles mangle kanji whose
     # second byte is 0x5C (「表」= 0x95 0x5C) through a text stream, which
     # corrupts the JSON. Learned on md_date_guard.py.
