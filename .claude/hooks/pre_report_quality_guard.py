@@ -88,6 +88,15 @@ def _load_config():
     return cfg
 
 
+try:
+    import summary_freshness_check as _SFC
+except Exception:                                    # pragma: no cover
+    class _SFC(object):                              # fail-open stub
+        @staticmethod
+        def structure_regression(_b, _a):
+            return []
+
+
 def _in_scope(fp, cfg):
     """Only analyse our own report prose."""
     if not fp.lower().endswith(".md"):
@@ -178,16 +187,53 @@ def main():
 
         f_before = _analyze(before, cfg, mods)
         f_after = _analyze(after, cfg, mods)
-        if len(f_after) <= len(f_before):
+
+        # 冒頭構成の検査（2026-09-15 追加）。ユーザー規則の
+        # 「初回作成時や更新、常に、結論が各章の重要事項を含む」に対応する。
+        # summary_freshness_guard は UPDATE の差分しか見られないため、
+        # 新規作成レポートは原理的に対象外だった。ここで補う。
+        # regression-only は既存と同じ方針（実測: 802本中596本=74%が
+        # 結論節を持たない。全部止めれば初日で無効化される）。
+        struct = []
+        if cfg.get("structure", True):
+            try:
+                struct = _SFC.structure_regression(before, after)
+            except Exception:
+                struct = []
+
+        if len(f_after) <= len(f_before) and not struct:
             return  # regression-only: pre-existing debt never blocks
 
         seen = set(f_before)
-        added = [x for x in f_after if x not in seen] or f_after[-1:]
+        added = [x for x in f_after if x not in seen]
+        added += [("structure", d) for _c, d in struct]
+        if not added:
+            added = f_after[-1:]
         # 発火記録: 無反応と故障を区別するため(CLAUDE.md §14 F2)。ledger が読む
         _record_firing("pre_report_quality_guard", data)
         _emit(added, cfg.get("mode", "warn"))
     except Exception:
         pass
+
+
+def _struct_hint(findings):
+    """Extra guidance when a finding is about the opening's STRUCTURE.
+
+    Deliberately states what the check cannot see. A message implying the
+    machine had verified 「結論が各章の重要事項を含む」 would be false: it knows
+    only whether a summary section exists and whether the opening names the
+    later chapters. Whether the summary states each chapter's point is a human
+    judgement, and saying otherwise is how a guard teaches people to trust it
+    for something it does not do.
+    """
+    if not any(k == "structure" for k, _v in findings):
+        return ""
+    return ("\n【冒頭構成】レポートは初回作成時も更新時も、冒頭の結論が全章の"
+            "重要事項を含み、重要なものが前半に来る構成にすること"
+            "（冒頭20%で全体の価値の80%をカバーする）。"
+            "\n※本検査が見ているのは「結論節の有無」と「冒頭が各章に触れて"
+            "いるか」までで、要点が実際に書けているかは判定していない。"
+            "そこは自分で確認すること。")
 
 
 def _emit(findings, mode):
@@ -196,7 +242,8 @@ def _emit(findings, mode):
     if mode == "deny":
         reason = ("レポート品質ルール違反をこの編集で新規に追加しています:\n" + body +
                   "\n有効数字は4桁（表示値のみ・引用実測値/法定定数は対象外）。"
-                  "網羅主張には根拠か留保（未検証/対象外/前提 等）を近傍に添える。")
+                  "網羅主張には根拠か留保（未検証/対象外/前提 等）を近傍に添える。"
+                  + _struct_hint(findings))
         print(json.dumps({"hookSpecificOutput": {
             "hookEventName": "PreToolUse",
             "permissionDecision": "deny",
@@ -206,6 +253,7 @@ def _emit(findings, mode):
             "hookEventName": "PreToolUse",
             "additionalContext": (
                 "⚠ レポート品質チェック（warn・ブロックはしない）:\n" + body +
+                _struct_hint(findings) +
                 "\n※誤検知なら .claude/report_quality.json で調整可。")}}))
 
 

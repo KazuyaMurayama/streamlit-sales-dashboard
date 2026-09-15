@@ -456,3 +456,85 @@ def unreferenced_sections(text):
             continue
         out.append((num, l.strip()[:60]))
     return out
+
+
+# ---------------------------------------------------------------------------
+# STRUCTURE CHECK -- the other half of the user's rule
+# ---------------------------------------------------------------------------
+# analyze() above only judges an UPDATE ("you changed the late body and left
+# the opening stale"). The user asked for more than that:
+#
+#   「レポートは初回作成時や更新、常に、結論がそのレポート全体の各章の重要事項を
+#     含めており、前半の章により重要なものが来る構成にしておくべきです。
+#     冒頭の２０％で全体の価値の８０％がカバーできるようなイメージです」
+#
+# Two requirements in there are NOT about a diff at all, so a diff-shaped test
+# can never reach them, and reporting them as "done" would have been false:
+#
+#   (2) 初回作成時も  -- a brand-new report has no "before" to compare.
+#   (3) 冒頭20%で価値の80%  -- about CONTENT, not about what changed.
+#
+# What is honestly machine-checkable here, and what is not:
+#
+#   checkable : the report HAS an opening summary section at all
+#   checkable : that section REFERENCES the chapters that follow
+#   NOT       : whether the summary states each chapter's important point
+#   NOT       : whether more important material comes earlier
+#
+# The last two require reading for meaning. Naming a section is not
+# summarising it -- 「詳細は §8」 passes any reference test and says nothing.
+# So this reports the first two and leaves the rest to review_gate and the
+# human, and the message says so rather than implying full coverage.
+#
+# MEASURED ON THE REAL CORPUS (802 in-scope reports >= 60 lines, 2026-09-15):
+#     no 結論/サマリー section at all            : 596 (74%)
+#     opening block < 5% of the document        : 344 (43%)
+#     opening ignores >= 60% of its chapters    : 369 (46%)
+#
+# Those numbers are why this is REGRESSION-ONLY, following the pattern
+# pre_report_quality_guard established for exactly this situation: fire only
+# when an edit makes the structure WORSE than it already was on disk. Blocking
+# on the standing 74% would stop nearly every report edit in the archive on
+# day one, and a guard that does that gets switched off within a week.
+
+def structure_findings(text):
+    """What is structurally missing from this report's opening. May be empty.
+
+    Returns a list of (code, human-readable detail).
+      NO_SUMMARY   -- no 結論/サマリー/要約/概要/まとめ/Executive/TL;DR section
+      UNREFERENCED -- the opening never mentions most of the later chapters
+    """
+    if not text:
+        return []
+    lines = text.split("\n")
+    if len(lines) < 60:
+        return []                       # too short for this to mean anything
+    out = []
+    if not has_conclusion(lines):
+        out.append(("NO_SUMMARY",
+                    u"冒頭に結論/サマリー節が無い"))
+    oend = opening_end(lines)
+    chapters = [l for l in lines[oend:] if re.match(r"^##\s", l)]
+    unref = unreferenced_sections(text)
+    if len(chapters) >= 3 and len(unref) >= max(2, int(len(chapters) * 0.6)):
+        out.append(("UNREFERENCED",
+                    u"冒頭が %d 章中 %d 章に触れていない"
+                    % (len(chapters), len(unref))))
+    return out
+
+
+def structure_regression(before_text, after_text):
+    """Did this edit make the opening structure WORSE? Returns [] or findings.
+
+    Regression-only by design: a report that already lacked a summary before
+    the edit is pre-existing debt (74% of the archive) and must not block
+    unrelated work. A NEW file (no before) is judged on its own, because
+    creating a report without a summary is the 初回作成時 case the user named.
+    """
+    after = structure_findings(after_text)
+    if not after:
+        return []
+    if not before_text:
+        return after                    # brand-new report: judge it as-is
+    had = set(c for c, _d in structure_findings(before_text))
+    return [(c, d) for c, d in after if c not in had]
