@@ -496,6 +496,12 @@ def unreferenced_sections(text):
 # when an edit makes the structure WORSE than it already was on disk. Blocking
 # on the standing 74% would stop nearly every report edit in the archive on
 # day one, and a guard that does that gets switched off within a week.
+#
+# CALIBRATED on the same git history as analyze() (343 real updates):
+#     regression-only (SHIPPED)                 :   7/343 ( 2.0%)
+#     judging every file as if new              : 257/343 (74.9%)
+# The second row is the pre-existing debt, and it is what "just check every
+# report has a summary" would actually have cost.
 
 def structure_findings(text):
     """What is structurally missing from this report's opening. May be empty.
