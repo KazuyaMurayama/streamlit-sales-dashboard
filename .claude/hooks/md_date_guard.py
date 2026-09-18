@@ -61,6 +61,12 @@ except Exception:
     def _record_firing(*_a, **_k):
         return False
 
+try:
+    from codex_adapter import normalize as _codex_normalize
+except Exception:
+    def _codex_normalize(d):
+        return d
+
 # Report-style names and doc trees. Mirrors pre_report_quality_guard.py so the
 # two guards agree on what "a report" is.
 REPORT_NAME = re.compile(r"_\d{8}(?:-v\d+)?\.md$", re.I)
@@ -223,7 +229,7 @@ def main():
         # uses the Windows locale encoding (CP932), which mojibakes every
         # Japanese payload — the checks then silently find nothing.
         raw = sys.stdin.buffer.read()
-        data = json.loads(raw.decode("utf-8", "replace"))
+        data = _codex_normalize(json.loads(raw.decode("utf-8", "replace")))
         tool = data.get("tool_name") or ""
         ti = data.get("tool_input") or {}
         fp = ti.get("file_path") or ""

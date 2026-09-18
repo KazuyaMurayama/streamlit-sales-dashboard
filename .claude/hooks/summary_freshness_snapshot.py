@@ -36,6 +36,11 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 try:
+    from codex_adapter import normalize as _codex_normalize
+except Exception:
+    def _codex_normalize(d):
+        return d
+try:
     import summary_freshness_check as SFC
 except Exception:
     SFC = None
@@ -166,7 +171,7 @@ def main():
         return
 
     try:
-        ev = json.loads(sys.stdin.buffer.read().decode("utf-8", "replace"))
+        ev = _codex_normalize(json.loads(sys.stdin.buffer.read().decode("utf-8", "replace")))
     except Exception:
         return
 

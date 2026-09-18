@@ -23,6 +23,17 @@ except Exception:
     def _record_firing(*_a, **_k):
         return False
 
+try:
+    from codex_adapter import normalize as _codex_normalize
+    from codex_adapter import codex_paths as _codex_paths
+except Exception:
+    def _codex_normalize(d):
+        return d
+
+    def _codex_paths(d):
+        fp = ((d or {}).get("tool_input") or {}).get("file_path")
+        return [fp] if fp else []
+
 
 def main():
     try:
@@ -35,25 +46,31 @@ def main():
 
     try:
         raw = sys.stdin.buffer.read()
-        data = json.loads(raw.decode("utf-8", "replace"))
-        fp = (data.get("tool_input") or {}).get("file_path") or ""
-        p = fp.replace("/", "\\").lower()
-        if "\\desktop\\" in p:
-            allowed = ("\\desktop\\repos\\", "\\desktop\\投資・不動産\\")
-            if not any(a in p for a in allowed):
-                # 発火記録: 無反応と故障を区別するため(CLAUDE.md §14 F2)。ledger が読む
-                _record_firing("pre_write_guard", data)
-                print(json.dumps({
-                    "hookSpecificOutput": {
-                        "hookEventName": "PreToolUse",
-                        "permissionDecision": "deny",
-                        "permissionDecisionReason": (
-                            "ルール3: Desktop へのファイル生成は禁止。"
-                            "成果物はリポ内、使い捨ては OS temp へ。"
-                            "ユーザーが明示的に Desktop 保存を指示した場合のみ例外。"
-                        ),
-                    }
-                }))
+        data = _codex_normalize(json.loads(raw.decode("utf-8", "replace")))
+        # A single Codex apply_patch can touch several files. Reading file_path
+        # alone would check only the first and let a Desktop write in the 2nd..nth
+        # through, so every path in the patch is checked (QC 2026-09-18).
+        allowed = ("\\desktop\\repos\\", "\\desktop\\投資・不動産\\")
+        bad = ""
+        for fp in _codex_paths(data):
+            p = (fp or "").replace("/", "\\").lower()
+            if "\\desktop\\" in p and not any(a in p for a in allowed):
+                bad = fp
+                break
+        if bad:
+            # 発火記録: 無反応と故障を区別するため(CLAUDE.md §14 F2)。ledger が読む
+            _record_firing("pre_write_guard", data)
+            print(json.dumps({
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": (
+                        "ルール3: Desktop へのファイル生成は禁止。"
+                        "成果物はリポ内、使い捨ては OS temp へ。"
+                        "ユーザーが明示的に Desktop 保存を指示した場合のみ例外。"
+                    ),
+                }
+            }))
     except Exception:
         pass
 

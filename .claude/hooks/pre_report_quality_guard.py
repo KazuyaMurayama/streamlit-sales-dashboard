@@ -44,6 +44,12 @@ except Exception:
     def _record_firing(*_a, **_k):
         return False
 
+try:
+    from codex_adapter import normalize as _codex_normalize
+except Exception:
+    def _codex_normalize(d):
+        return d
+
 REPORT_NAME = re.compile(r"_\d{8}(?:-v\d+)?\.md$", re.I)
 DEFAULT_DIRS = ("outputs/", "reports/", "docs/", "output/", "report/")
 # Directories holding generated or third-party material, not our own analysis.
@@ -161,7 +167,7 @@ def main():
         # nothing. Caught 2026-08-04 by running the deployed hook end-to-end;
         # the subprocess unit tests passed because they pipe UTF-8 bytes.
         raw = sys.stdin.buffer.read()
-        data = json.loads(raw.decode("utf-8", "replace"))
+        data = _codex_normalize(json.loads(raw.decode("utf-8", "replace")))
         tool_name = data.get("tool_name") or ""
         ti = data.get("tool_input") or {}
         fp = ti.get("file_path") or ""

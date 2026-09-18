@@ -45,6 +45,12 @@ except Exception:
     def _record_firing(*_a, **_k):
         return False
 
+try:
+    from codex_adapter import normalize as _codex_normalize
+except Exception:
+    def _codex_normalize(d):
+        return d
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 CACHE = os.path.join(tempfile.gettempdir(), "mermaid_figure_guard_cache.json")
 RECENT_SEC = 180
@@ -162,7 +168,7 @@ def run_check(files):
 def main():
     try:
         raw = sys.stdin.buffer.read()
-        ev = json.loads(raw.decode("utf-8", "replace"))
+        ev = _codex_normalize(json.loads(raw.decode("utf-8", "replace")))
     except Exception:
         return
     try:

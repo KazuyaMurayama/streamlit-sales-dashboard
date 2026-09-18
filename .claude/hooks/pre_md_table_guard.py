@@ -43,6 +43,12 @@ except Exception:
     def _record_firing(*_a, **_k):
         return False
 
+try:
+    from codex_adapter import normalize as _codex_normalize
+except Exception:
+    def _codex_normalize(d):
+        return d
+
 
 def _registered_local_copy_exists():
     """True only if a DIFFERENT repo-local copy exists AND is registered in
@@ -81,7 +87,7 @@ def main():
 
     try:
         raw = sys.stdin.buffer.read()
-        data = json.loads(raw.decode("utf-8", "replace"))
+        data = _codex_normalize(json.loads(raw.decode("utf-8", "replace")))
         tool_name = data.get("tool_name") or ""
         tool_input = data.get("tool_input") or {}
         fp = tool_input.get("file_path") or ""

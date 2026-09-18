@@ -69,6 +69,17 @@ except Exception:
     def _record_firing(*_a, **_k):
         return False
 
+try:
+    from codex_adapter import normalize as _codex_normalize
+    from codex_adapter import codex_paths as _codex_paths
+except Exception:
+    def _codex_normalize(d):
+        return d
+
+    def _codex_paths(d):
+        fp = ((d or {}).get("tool_input") or {}).get("file_path")
+        return [fp] if fp else []
+
 STATE_DIRNAME = os.path.join(".claude", ".external_write_guard")
 MAX_REPORTED = 6
 
@@ -272,14 +283,18 @@ def external_paths(root, ev):
 
 
 def handle_post_tool_use(data):
-    ti = data.get("tool_input") or {}
-    fp = ti.get("file_path") or ""
-    if not fp.lower().endswith(".md"):
+    # Record EVERY path the tool touched. A Codex apply_patch can carry several
+    # files; recording only the first leaves the rest looking like writes that
+    # happened outside the session, which this guard would later report as
+    # external edits -- a false positive rather than a miss (QC 2026-09-18).
+    paths = [p for p in _codex_paths(data) if p and p.lower().endswith(".md")]
+    if not paths:
         return
     root = _repo_root(os.getcwd())
     if not root:
         return
-    record_touch(root, data, _norm(root, fp))
+    for fp in paths:
+        record_touch(root, data, _norm(root, fp))
 
 
 def handle_stop(data):
@@ -313,7 +328,7 @@ def handle_stop(data):
 def main():
     try:
         raw = sys.stdin.buffer.read()
-        data = json.loads(raw.decode("utf-8", "replace"))
+        data = _codex_normalize(json.loads(raw.decode("utf-8", "replace")))
     except Exception:
         return
     try:

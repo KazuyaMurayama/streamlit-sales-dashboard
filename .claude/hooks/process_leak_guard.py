@@ -75,6 +75,11 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 try:
+    from codex_adapter import normalize as _codex_normalize
+except Exception:
+    def _codex_normalize(d):
+        return d
+try:
     from firing_log import record as _record_fired
 except Exception:  # firing_log 未配備でも本体は動く
     def _record_fired(name, ev):
@@ -339,7 +344,7 @@ def main():
     try:
         # stdin はバイトで読んで UTF-8 復号する（Windows 既定 cp932 で日本語パスの
         # payload が UnicodeDecodeError → exit 0 素通り。実測 2026-09-15、asr_term_guard）。
-        payload = json.loads(sys.stdin.buffer.read().decode("utf-8", "replace"))
+        payload = _codex_normalize(json.loads(sys.stdin.buffer.read().decode("utf-8", "replace")))
     except Exception:
         return 0
     ti = payload.get("tool_input") or {}

@@ -45,6 +45,11 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 try:
+    from codex_adapter import normalize as _codex_normalize
+except Exception:
+    def _codex_normalize(d):
+        return d
+try:
     from firing_log import record as _record_fired
 except Exception:
     def _record_fired(name, ev):
@@ -140,7 +145,7 @@ def _read_payload():
     content を見るのが仕事なので、バイトで読んで UTF-8 で復号する。
     """
     raw = sys.stdin.buffer.read() if hasattr(sys.stdin, "buffer") else sys.stdin.read().encode("utf-8", "replace")
-    return json.loads(raw.decode("utf-8", "replace"))
+    return _codex_normalize(json.loads(raw.decode("utf-8", "replace")))
 
 
 def main():

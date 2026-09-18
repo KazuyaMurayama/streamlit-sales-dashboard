@@ -85,6 +85,11 @@ import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 try:
+    from codex_adapter import normalize as _codex_normalize
+except Exception:
+    def _codex_normalize(d):
+        return d
+try:
     from firing_log import record as _record_fired
 except Exception:
     def _record_fired(name, ev):
@@ -580,7 +585,7 @@ def _read_payload():
     実測 2026-09-15: asr_term_guard で content に日本語を含む payload が json.load で
     落ち、exit 0 で素通りした。同じ構造なのでここも同じ読み方にする）。"""
     raw = sys.stdin.buffer.read() if hasattr(sys.stdin, "buffer") else sys.stdin.read().encode("utf-8", "replace")
-    return json.loads(raw.decode("utf-8", "replace"))
+    return _codex_normalize(json.loads(raw.decode("utf-8", "replace")))
 
 
 def main():
