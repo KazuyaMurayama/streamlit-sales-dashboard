@@ -68,12 +68,41 @@ def load_glossary(cwd=None):
     return terms
 
 
+# 対訳表記（「誤→正」「正→誤」「誤 → 正」）は *defect ではなく documentation* である。
+# README / CLAUDE.md / SKILL.md は誤変換の実例を挙げて仕組みを説明しており、
+# それを deny すると「ガードが自分の説明文書の保守をブロックする」状態になる。
+# 2026-09-16 実測: README.md 5 語・SKILL.md 3 語・CLAUDE.md 1 語が、実害ゼロで deny されていた。
+_ARROW = u"(?:→|->|=>|＞)"
+
+
+def _pair_spans(text, wrong):
+    """`wrong` が対訳表記の一部として現れる位置を返す。"""
+    import re as _re
+    w = _re.escape(wrong)
+    pats = (
+        u"%s\\s*%s\\s*\\S" % (w, _ARROW),      # 誤→正
+        u"\\S\\s*%s\\s*%s" % (_ARROW, w),      # 正→誤
+    )
+    spans = []
+    for pat in pats:
+        for m in _re.finditer(pat, text):
+            spans.append((m.start(), m.end()))
+    return spans
+
+
 def find_hits(text, terms):
-    """[(誤, 正, 件数)] を出現順で返す。"""
+    """[(誤, 正, 件数)] を出現順で返す。対訳表記の出現は数えない。"""
     hits = []
     for wrong, right in terms.items():
         n = text.count(wrong)
-        if n:
+        if not n:
+            continue
+        # 対訳表記として現れている分を差し引く
+        exempt = 0
+        for st, en in _pair_spans(text, wrong):
+            exempt += text.count(wrong, st, en)
+        n -= exempt
+        if n > 0:
             hits.append((wrong, right, n))
     return hits
 

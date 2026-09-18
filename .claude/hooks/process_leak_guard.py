@@ -110,6 +110,30 @@ THIRD_PARTY = re.compile(
     r"[A-Z][a-z]+\s+\d{4}|\(\d{4}\)|（\d{4}）|によれば|とされる|"
     r"命じた|勧告|された。|されている)")
 
+# 主題としての言及は制作過程の露出ではない（2026-09-16 実測で追加）。
+# youtube-to-presentation は「AI ツールの解説デッキ」を成果物にするため、
+# サブエージェント / Claude Code が *説明対象* として本文に現れる。
+# 実測: decks/AI_USAGE_CACHE_20260916.md が 13 件発火。中核主張が
+# 「サブエージェントはキャッシュを分断する」であり、語を消すと成果物が成立しない。
+# 不変条件: その行が用語を「説明・定義・引用・帰属」していれば主題であり、
+#           「自分が使った」と報告していれば露出である。
+TOOLNAME_LABELS = (u"\u5185部工程名の露出", u"ツール名の露出")
+SUBJECT_MATTER = re.compile(
+    u"(とは|というのは|と呼ば|を指す|仕組み|機能|性質|実装|仕様|を使うと|を使えば|"
+    u"を接続|を有効|が別|が分断|を切り替え|について|に関する|"
+    u"[（(][^）)]{6,}[）)]|"
+    u"動画|話者|講師|氏は|さんは|解説|紹介|主張|指摘|述べ)")
+
+# 外部出典を宣言する文書は「他人の内容の報告」であり、ツール名は説明対象であって
+# 制作過程の露出ではない（2026-09-16 実測）。行単位の SUBJECT_MATTER だけでは
+# H1 タイトルと要約箇条書き（修飾語を伴わない素の主張文）が残る。実測 13 件 → 3 件。
+# そこを拾うために行パターンをさらに広げると本物の露出まで飲み込むため、
+# 文書単位の信号を併用する。適用はツール名ラベルのみで、是正件数・前版への言及・
+# 過失の告白といった本物の制作過程クラスは一切免除しない。
+SOURCE_DOC = re.compile(
+    u"\\*\\*(元動画|出典|元記事|原典|ソース)\\*\\*\\s*[:：]")
+
+
 PROCESS_LEAK = [
     # --- 件数・スコアの自己申告（助数詞・漢数字・語順逆転に対応） ---
     (r"(\d+|[一二三四五六七八九十]+|[０-９]+)\s*(件|か所|箇所|ヶ所|項目|点)"
@@ -333,6 +357,8 @@ def main():
         text = _read_text(tgt)
         if not text:
             continue
+        # 文書が外部出典を宣言しているか（ツール名ラベルの判定にのみ使う）。
+        is_source_doc = bool(SOURCE_DOC.search(text))
         rows = _scan_lines(text)
         keep = _body_ranges([r[1] for r in rows])
         for lineno, line, joined in rows:
@@ -351,6 +377,10 @@ def main():
                     continue
                 # 第三者の行為を述べた文は制作過程ではない（ツール名の露出は別枠）。
                 if label not in ADVISORY_LABELS and THIRD_PARTY.search(hit_text):
+                    continue
+                # ツール名が *説明対象* として現れる行は露出ではない。
+                if label in TOOLNAME_LABELS and (
+                        is_source_doc or SUBJECT_MATTER.search(hit_text)):
                     continue
                 rec = "%s L%d %s: %s" % (tgt, lineno, label,
                                          hit_text.strip()[:60])
