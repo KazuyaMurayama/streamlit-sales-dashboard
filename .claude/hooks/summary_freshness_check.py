@@ -67,6 +67,37 @@ now treated as a front-matter terminator whenever nothing but the title, blank
 lines and metadata precedes it -- see _has_prose(). The earlier `i > 3` cutoff
 assumed YAML at lines 1-3 and caught none of these.
 
+RECALL -- MEASURED 2026-09-18 (it had never been measured before)
+-----------------------------------------------------------------
+Firing rate and precision were both calibrated at build time; RECALL was not.
+That was the wrong omission to make: a guard built because "発火しない" is the
+recurring failure mode must be judged first on what it MISSES.
+
+Replaying the most recent real update of all 325-326 in-scope report pairs:
+
+    BEFORE this fix : recall  22.2%  (28 of 126 rule-positive updates caught)
+    AFTER  this fix : recall  63.2%  by the opening_end-based gold label
+                      recall  85.0%  by an independent fixed-20%% gold label
+
+Two gold labels are quoted deliberately, because neither is authoritative and
+they disagree. Both are proxies for a human judgement ("did the opening go
+stale?"). The honest summary is: recall was roughly one in five, and is now
+roughly two in three, +/- how you define the front of a document.
+
+Where the remaining misses are: EVERY one is a file with no summary section,
+because has_conclusion() gates analyze(). That gate is a precision device, not
+part of the user's rule, and it is the entire remaining recall gap. Those
+documents are the 600-of-820 (73%%) pre-existing debt; firing on them on every
+future edit would re-report a defect the author is not fixing this turn. The
+new-file structure check (structure_regression) is what addresses that class.
+
+WHAT THE 22%% -> 63%% FIX ACTUALLY WAS: one regex anchor. See CONCLUSION_RE.
+Precision did not degrade (hand-read a random sample of 12 firings: the added
+material was a strategy matrix, a 反証 finding, or a dated correction that
+contradicted the stale opening -- i.e. exactly the target class). Firing rate
+rose 8.6%% -> 22.2%%, which is close to the 35.9%% that was previously judged
+形骸化確実; if it proves noisy in practice the lever to pull is K, not the regex.
+
 CALIBRATION (git history as ground truth, not invented cases)
 --------------------------------------------------------------
 Replayed the most recent real update of every in-scope report across 43 repos.
