@@ -79,6 +79,14 @@ def running_under_codex():
 def emit_deny(reason, event="PreToolUse", _exit=True):
     """Block the tool call in whichever runtime is executing this hook.
 
+    NOTE (independent QC 2026-09-18): no hook calls this yet -- the eight
+    existing guards were converted with an atexit translator instead, because
+    several of their deny sites sit inside `try/except: pass`, which would
+    swallow the SystemExit this raises. This function is the recommended API
+    for NEW blocking hooks, where the deny site can be written outside such a
+    handler. Kept deliberately rather than deleted, and documented as such so
+    it does not read as dead code someone should "clean up".
+
     Always prints the Claude Code JSON decision. Under Codex, also writes the
     reason to stderr and exits 2, which is the only form Codex honours.
 

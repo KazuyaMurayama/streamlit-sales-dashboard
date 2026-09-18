@@ -208,6 +208,8 @@ HEADING_RE = re.compile(r"^#{1,3}\s")
 WS_RE = re.compile(r"[\s　​‌‍⁠﻿]+")
 RULE_RE = re.compile(r"^---+\s*$")
 REPORT_NAME_RE = re.compile(r"_\d{8}(?:-v\d+)?\.(md|markdown|mdx)$", re.I)
+# The other dated convention in this corpus: 2026-09-07-<slug>.md
+DATED_DOC_RE = re.compile(r"^\d{4}-\d{2}-\d{2}[-_]", re.I)
 # A numbered pipeline stage, e.g. 01_search_plan.md / 03_screening.md /
 # 04_synthesis.md / 05_report.md. These are intermediate artefacts emitted by
 # a research pipeline, one run producing a numbered set. 36 of the 74
@@ -215,27 +217,31 @@ REPORT_NAME_RE = re.compile(r"_\d{8}(?:-v\d+)?\.(md|markdown|mdx)$", re.I)
 # the next run regenerates the same shape, so the fix belongs in the emitting
 # template. Excluded by NAME rather than by directory because they sit
 # directly under outputs/<run-id>/, which must stay in scope for real reports.
-PIPELINE_STAGE_RE = re.compile(r"^\d{2}_[a-z0-9_\-]+\.(md|markdown|mdx)$", re.I)
+# ONLY the true intermediates of a research run. 05_report.md is deliberately
+# NOT here: adversarial review (Fable, 2026-09-18) established it is the
+# pipeline's FINAL DELIVERABLE -- README Phase 5 emits it and the cross-repo
+# REPORT_INDEX links 23 of them as レポート. An earlier version of this regex
+# matched ^\d{2}_ANYTHING and so excluded the single most important file in
+# the corpus, plus 79 unrelated ones. That is the exact "発火しない" failure
+# this module exists to prevent.
+PIPELINE_STAGE_RE = re.compile(
+    r"^(?:0[0-4])_(?:search_plan|search|screening|synthesis|plan|extract|collect|dedup|rank)[a-z0-9_\-]*\.(md|markdown|mdx)$", re.I)
 SCOPE_DIRS = ("outputs/", "reports/", "docs/", "output/", "report/", "_meta/")
 # Never our own analysis prose: generated data, third-party material, and the
 # test fixtures that must quote violations verbatim to be evidence.
-EXCLUDE_DIRS = ("data/", "materials/", "drafts/", "node_modules/", "session/",
-                ".git/", "vendor/", "fixtures/", "tests/", "_archived",
-                "_archive/", ".venv/",
-                # --- added 2026-09-18 after profiling the remediation backlog ---
-                # These hold documents that are not reports, so "put the
-                # conclusion first" does not apply to them. Leaving them in
-                # scope is not a harmless over-reach: they were 59 of the 74
-                # hand-written backlog files, i.e. the guard would nag forever
-                # about documents nobody should restructure. A guard that is
-                # mostly wrong gets muted -- the same failure recorded for the
-                # vocabulary design (precision 3/10) and for the 35.9% firing
-                # rate judged 形骸化確実.
-                "plans/", "specs/", "superpowers/",   # plan & spec documents
-                "prompts/", "skills/", "agents/",     # prompt / skill definitions
-                "parts/", "_tmp/", "tmp/",            # fragments of a document
-                "rules/",                             # operating rules, not analysis
-                "retros/")                            # retrospective logs
+# HARD exclusions: generated data, third-party material, and the test fixtures
+# that must quote violations verbatim to be evidence. A dated report NAME does
+# NOT override these -- fixtures/a_20260911.md is a fixture, not a report, and
+# letting the name win re-broke three existing tests (caught 2026-09-18).
+HARD_EXCLUDE_DIRS = ("data/", "materials/", "drafts/", "node_modules/",
+                     "session/", ".git/", "vendor/", "fixtures/", "tests/",
+                     "_archived", "_archive/", ".venv/")
+# SOFT exclusions: these say "this KIND of document is not a report". A file
+# that names itself a dated report overrides them -- see in_scope().
+SOFT_EXCLUDE_DIRS = ("plans/", "specs/", "superpowers/", "prompts/", "skills/",
+                     "agents/", "parts/", "_tmp/", "tmp/", "rules/", "retros/")
+EXCLUDE_DIRS = HARD_EXCLUDE_DIRS + SOFT_EXCLUDE_DIRS
+                            # retrospective logs
 
 
 def _has_dir(path_lower, name):
@@ -252,22 +258,47 @@ def _has_dir(path_lower, name):
 
 
 def in_scope(path):
+    """Is this one of OUR reports?
+
+    ORDER MATTERS, and there are two kinds of exclusion:
+
+      HARD_EXCLUDE_DIRS  generated data, vendored material, test fixtures.
+                         Nothing overrides these.
+      SOFT_EXCLUDE_DIRS  "this KIND of document is not a report" (plans,
+                         specs, prompts, skills, rules, retros, fragments).
+                         A dated report NAME overrides these.
+
+    Adversarial review (Fable, 2026-09-18) found that excluding by directory
+    alone silenced real reports that merely lived under such a directory --
+    NASDAQ-strategy-gas/docs/superpowers/plans/2026-09-07-ops-chain-c1-c6-qc-
+    opus.md is a 709-line dated QC report -- and handed anyone an evasion:
+    writing to reports/_tmp/ or outputs/parts/ hid a report forever. Letting
+    the NAME override everything was the opposite error: it pulled fixtures
+    and generated data back in. Hence two tiers.
+    """
     q = (path or "").replace("\\", "/")
     if not re.search(r"\.(md|markdown|mdx)$", q, re.I):
         return False
     low = "/" + q.lower()
-    for d in EXCLUDE_DIRS:
-        # "_archived" is a prefix marker, not a full segment name.
+    base = os.path.basename(q)
+
+    for d in HARD_EXCLUDE_DIRS:            # absolute
         if d.endswith("/"):
             if _has_dir(low, d):
                 return False
         elif d.lower() in low:
             return False
-    base = os.path.basename(q)
-    if PIPELINE_STAGE_RE.match(base):
-        return False        # 01_/03_/04_/05_ pipeline stage -- fix the template
-    if REPORT_NAME_RE.search(base):
+
+    # A document that names itself a dated report IS a report, wherever it sits.
+    if REPORT_NAME_RE.search(base) or DATED_DOC_RE.match(base):
         return True
+
+    for d in SOFT_EXCLUDE_DIRS:            # overridable by the name check above
+        if _has_dir(low, d):
+            return False
+
+    if PIPELINE_STAGE_RE.match(base):
+        return False        # true intermediate (01_/03_/04_) -- fix the template
     return any(_has_dir(low, d) for d in SCOPE_DIRS)
 
 

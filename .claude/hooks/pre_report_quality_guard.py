@@ -62,7 +62,11 @@ except Exception:  # adapter missing: say so, do not fail silently
 REPORT_NAME = re.compile(r"_\d{8}(?:-v\d+)?\.md$", re.I)
 # Numbered pipeline stage (01_search_plan.md, 04_synthesis.md, ...): an
 # intermediate artefact of a research run, regenerated wholesale next run.
-PIPELINE_STAGE = re.compile(r"^\d{2}_[a-z0-9_\-]+\.md$", re.I)
+# True intermediates only. 05_report.md is the pipeline's FINAL deliverable
+# (README Phase 5; 23 of them are indexed as レポート) and must stay in scope.
+PIPELINE_STAGE = re.compile(
+    r"^(?:0[0-4])_(?:search_plan|search|screening|synthesis|plan|extract|collect|dedup|rank)[a-z0-9_\-]*\.md$", re.I)
+DATED_DOC = re.compile(r"^\d{4}-\d{2}-\d{2}[-_]", re.I)
 DEFAULT_DIRS = ("outputs/", "reports/", "docs/", "output/", "report/")
 # Directories holding generated or third-party material, not our own analysis.
 # Kept in step with summary_freshness_check.EXCLUDE_DIRS (2026-09-18): plan,
@@ -70,11 +74,14 @@ DEFAULT_DIRS = ("outputs/", "reports/", "docs/", "output/", "report/")
 # reports, so the "conclusion first" rule does not apply to them. They were
 # 59 of 74 files in the measured backlog; nagging about them is how a guard
 # gets muted.
-DEFAULT_EXCLUDE = ("data/", "materials/", "drafts/", "node_modules/",
-                   "session/", ".git/", "vendor/", "fixtures/",
-                   "plans/", "specs/", "superpowers/",
-                   "prompts/", "skills/", "agents/",
-                   "parts/", "_tmp/", "tmp/", "rules/", "retros/")
+# Two tiers, mirroring summary_freshness_check (2026-09-18).
+# HARD: generated data / vendored / fixtures -- nothing overrides.
+# SOFT: "not a report KIND" -- a dated report name overrides.
+HARD_EXCLUDE = ("data/", "materials/", "drafts/", "node_modules/",
+                "session/", ".git/", "vendor/", "fixtures/")
+SOFT_EXCLUDE = ("plans/", "specs/", "superpowers/", "prompts/", "skills/",
+                "agents/", "parts/", "_tmp/", "tmp/", "rules/", "retros/")
+DEFAULT_EXCLUDE = HARD_EXCLUDE + SOFT_EXCLUDE
 
 
 # --- Codex blocking contract (F10g, 2026-09-18) -----------------------------
@@ -210,17 +217,37 @@ def _in_scope(fp, cfg):
     if norm.startswith("../"):          # outside the project
         norm = os.path.basename(norm)
 
-    for ex in (cfg.get("exclude") or DEFAULT_EXCLUDE):
+    bn = os.path.basename(norm)
+    inc = cfg.get("include")
+
+    # A repo's own "exclude" ADDS to the built-in hard list; it never replaces
+    # it. Measured 2026-09-19: 4 repos set exclude (data/, session/,
+    # data/drafts/ ...). Treating their list as the whole hard list would have
+    # re-admitted node_modules/ and fixtures/ in exactly those repos.
+    for ex in tuple(HARD_EXCLUDE) + tuple(cfg.get("exclude") or ()):
         if ex.lower().rstrip("/") + "/" in "/" + norm:
             return False
 
-    if PIPELINE_STAGE.match(os.path.basename(norm)):
+    # "include" is a repo saying "only these trees are reports". It must bound
+    # everything, including the dated-name shortcut -- 20 repos set it
+    # (include: ["docs/"], ["outputs/"] ...), and letting a dated name escape it
+    # would silently widen every one of them.
+    if inc and not any(i.lower().rstrip("/") + "/" in "/" + norm for i in inc):
         return False
-    inc = cfg.get("include")
-    if inc:
-        return any(i.lower().rstrip("/") + "/" in "/" + norm for i in inc)
-    if REPORT_NAME.search(os.path.basename(norm)):
+
+    # Within the allowed trees: a dated report name beats a SOFT (document-kind)
+    # exclusion, never a HARD one. See summary_freshness_check.in_scope().
+    if REPORT_NAME.search(bn) or DATED_DOC.match(bn):
         return True
+
+    for ex in SOFT_EXCLUDE:
+        if ex.lower().rstrip("/") + "/" in "/" + norm:
+            return False
+
+    if PIPELINE_STAGE.match(bn):
+        return False
+    if inc:
+        return True                    # already inside an allowed tree
     return any(d in "/" + norm for d in DEFAULT_DIRS)
 
 
