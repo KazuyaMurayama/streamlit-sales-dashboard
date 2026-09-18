@@ -86,6 +86,12 @@ def parse_apply_patch(command):
         added, removed, new_ctx, old_ctx = [], [], [], []
         for line in chunk.splitlines():
             if not line:
+                # A bare empty line carries no +/-/space marker, so which side
+                # of the diff it belongs to cannot be known. Properly encoded
+                # blank lines ARE preserved: an added blank is "+" and a blank
+                # context line is " ", both handled below. Whether real Codex
+                # ever emits a bare empty line inside a hunk is UNVERIFIED
+                # (no sample captured as of 2026-09-18).
                 continue
             head, rest = line[0], line[1:]
             if head == "+":

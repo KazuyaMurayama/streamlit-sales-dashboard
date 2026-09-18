@@ -26,8 +26,17 @@ except Exception:
 try:
     from codex_adapter import normalize as _codex_normalize
     from codex_adapter import codex_paths as _codex_paths
-except Exception:
+except Exception:  # adapter missing: say so, do not fail silently
     def _codex_normalize(d):
+        # A hook that cannot convert Codex payloads reads empty values and
+        # returns early -- silence indistinguishable from "no violation".
+        # One line on stderr keeps a broken deployment visible (QC
+        # 2026-09-18). stderr does not affect the hook's decision.
+        if isinstance(d, dict) and d.get("tool_name") == "apply_patch":
+            sys.stderr.write(
+                "[%s] codex_adapter.py not found next to this hook; "
+                "Codex apply_patch payloads are NOT being checked."
+                % os.path.basename(__file__) + chr(10))
         return d
 
     def _codex_paths(d):

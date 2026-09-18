@@ -46,8 +46,18 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 try:
     from codex_adapter import normalize as _codex_normalize
-except Exception:
+except Exception:  # adapter missing: say so, do not fail silently
     def _codex_normalize(d):
+        # A hook that cannot convert Codex payloads reads empty values and
+        # returns early -- silence that is indistinguishable from "no
+        # violation". One line on stderr keeps a broken deployment visible
+        # (QC 2026-09-18). stderr does not affect the hook's decision.
+        if isinstance(d, dict) and d.get("tool_name") == "apply_patch":
+            sys.stderr.write(
+                "[%s] codex_adapter.py not found next to this hook; "
+                "Codex apply_patch payloads are NOT being checked.
+"
+                % os.path.basename(__file__))
         return d
 try:
     from firing_log import record as _record_fired
