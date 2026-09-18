@@ -48,7 +48,8 @@ CHECKS (per evidence row)
                   R8 は対象外。行順は有望順（判定→信頼度→効果量）で、
                   C 番号は本文参照用の ID として残す。
 
-SCOPE: 書き込まれた .md に「信頼度」と「効果量」を両方ヘッダに持つ表がある場合のみ。
+SCOPE: 書き込まれた .md に、①「信頼度」＋「効果量」（科学系）または
+       ②「判定」＋「独自性」（製品・実務系。2026-09-18 追加）をヘッダに持つ表がある場合。
        パスは問わない（全リポ配布しても、表が無ければ何もしない）。
 
 NETWORK: PubMed E-utilities と Crossref。識別子ごとに1回、結果は
@@ -96,6 +97,12 @@ UA = {"User-Agent": "evidence_table_guard/1.0 (mailto:kazuya.murayama.21@gmail.c
 EUTILS = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/"
 
 CONF_VOCAB = {"高", "中", "低"}
+# 2026-09-18 追加: 二軸化（判定＋独自性）。独自性は「効く」ことを含意せず、証拠の代わりにならない。
+# 未検証 = 検証可能だが当たる研究が無い（自己申告・逸話のみ）。検証対象外 = 原理的に実証不能。
+VERDICT_VOCAB = {"支持", "部分支持", "反証", "未検証", "検証対象外"}
+NOVELTY_VOCAB = {"通説", "再構成", "独自"}
+VERDICT_RANK = {"支持": 0, "部分支持": 1, "反証": 2, "未検証": 3, "検証対象外": 4}
+VERDICT_RANK_NAME = dict((v, k) for k, v in VERDICT_RANK.items())
 EFFECT_VOCAB = {"大", "中", "小", "ほぼゼロ", "不明", "不適用"}
 EXEMPT_RE = re.compile(r"該当なし|検証対象外|に同じ")
 PMID_RE = re.compile(r"pubmed\.ncbi\.nlm\.nih\.gov/(\d+)|\bPMID\s*[:：]?\s*(\d{6,9})", re.I)
@@ -182,7 +189,14 @@ def find_tables(text):
     claims = evidence = None
     for header, body in _tables(text):
         h = "".join(header)
-        if "信頼度" in h and "効果量" in h and evidence is None:
+        # 科学系（信頼度＋効果量）に加え、2026-09-18 から製品系（判定＋独自性）も対象にする。
+        # 理由: 製品系の表は 信頼度／効果量 を持たないため従来は完全に不可視で、
+        # R9（判定・独自性の語彙）が一度も走らなかった（実測: R9 追加直後に 0 件発火）。
+        # 論文照合系（R1〜R4・R6・R7）は識別子を持つ行だけが対象なので、
+        # 製品系の表を通しても偽 FAIL は増えない（R1 は「検証対象外」等で免除される）。
+        is_science = "信頼度" in h and "効果量" in h
+        is_product = "判定" in h and "独自性" in h
+        if (is_science or is_product) and evidence is None:
             evidence = (header, body)
         elif "主張" in h and header and header[0].strip() == "#" and claims is None:
             claims = (header, body)
@@ -318,6 +332,11 @@ def analyze(text, cache, resolver_pm=resolve_pmids, resolver_doi=resolve_doi):
     header, body = evidence
     i_id = 0
     i_conf, i_eff = _col(header, "信頼度"), _col(header, "効果量")
+    i_verdict, i_novel = _col(header, "判定"), _col(header, "独自性")
+    # 科学系＝信頼度／効果量を持つ表。論文照合（R1 識別子必須・R5 語彙）はここだけに課す。
+    # 製品・実務系の表は突き合わせ先が公式ドキュメントであり PMID/DOI を持たないため、
+    # R1 を課すと全行が偽 FAIL になる（2026-09-18 実測で確認したうえでこの分岐を入れた）。
+    is_science_table = i_conf is not None and i_eff is not None
 
     # 全識別子を先に集めて一括解決
     all_pm, all_doi = [], []
@@ -330,6 +349,7 @@ def analyze(text, cache, resolver_pm=resolve_pmids, resolver_doi=resolve_doi):
         resolver_doi(d, cache)
 
     seen_ids = set()
+    verdict_seq = []          # R9b（バンド順）用: 行の並び順に判定を控える
     for row in body:
         if len(row) <= max(i_conf or 0, i_eff or 0):
             continue
@@ -337,9 +357,28 @@ def analyze(text, cache, resolver_pm=resolve_pmids, resolver_doi=resolve_doi):
         seen_ids.add(cid)
         rowtext = " | ".join(row)
         exempt = bool(EXEMPT_RE.search(rowtext))
+        # R9 二軸の語彙（2026-09-18 追加）。判定列を持つ表すべてが対象＝製品系も含む。
+        if i_verdict is not None:
+            # 括弧の注記を先に落としてから強調記号を剥がす。逆順だと
+            # 「**支持**（条件付き）」→「支持**」が残り偽 FAIL になる
+            # （2026-09-18 実測: 実デッキ1本で 10 件の偽陽性）。
+            vd = row[i_verdict] if i_verdict < len(row) else ""
+            vd = re.sub(r"（.*?）|\(.*?\)", "", vd).replace("*", "").strip()
+            if vd and vd not in VERDICT_VOCAB:
+                fails.append("%s R9 判定が語彙外: 「%s」（支持/部分支持/反証/未検証/検証対象外）"
+                             % (cid, vd))
+            elif vd:
+                verdict_seq.append((cid, vd))
+        if i_novel is not None:
+            nv = row[i_novel] if i_novel < len(row) else ""
+            nv = re.sub(r"（.*?）|\(.*?\)", "", nv).replace("*", "").strip()
+            if nv and nv not in ("—", "-") and nv not in NOVELTY_VOCAB:
+                fails.append("%s R9 独自性が語彙外: 「%s」（通説/再構成/独自）" % (cid, nv))
         ids = extract_ids(rowtext)
         if not ids:
-            if not exempt:
+            # R1 は科学系の表だけに課す。製品・実務系は一次資料が公式ドキュメントであり
+            # PMID/DOI を持たない（課すと全行が偽 FAIL になる）。R9 の語彙検査は上で済んでいる。
+            if not exempt and is_science_table:
                 fails.append("%s R1 識別子なし（PubMed/DOI の URL か PMID/DOI を書く。免除は「該当なし」「検証対象外」明記時のみ）" % cid)
             continue
         # R5 vocabulary（免除行以外）
@@ -419,6 +458,29 @@ def analyze(text, cache, resolver_pm=resolve_pmids, resolver_doi=resolve_doi):
             if not any(_is_meta(r) for r in row_recs):
                 reviews.append("%s R7 「メタ分析」と記載だが行内のどの論文も PublicationType/タイトルに meta-analysis が無い『%s』" %
                                (cid, rec.get("title", "")[:70]))
+
+    # R9b バンド順（2026-09-18 追加）。二軸設計の中核の不変条件:
+    # 独自性で判定バンドを越えさせない＝未証拠の行が証明済みの行より上に来てはならない。
+    # VERDICT_RANK は定義だけされて一度も使われておらず、逆転した表が exit 0 で通っていた
+    # （独立QC Fable が実証, 2026-09-18）。規則文書には「逆転は FAIL」と書いてあったため、
+    # 散文が実装していない保証を約束している状態だった。
+    # 独自性列を持つ表＝二軸レポート（book/deck）のみが並び順の規約を持つ。
+    # 判定列だけの表（既存の科学系フィクスチャ等）に課すと正当な表が FAIL する
+    # （2026-09-18 実測: selftest 9/9 → 7/9）。
+    worst = -1
+    worst_cid = None
+    for cid, vd in (verdict_seq if i_novel is not None else []):
+        r = VERDICT_RANK.get(vd)
+        if r is None:
+            continue
+        if r < worst:
+            fails.append(
+                "%s R9b バンド順の逆転: 「%s」が「%s」(%s) より下にある。"
+                "未証拠の行を証明済みの行より上に置かない"
+                % (cid, vd, VERDICT_RANK_NAME.get(worst, "?"), worst_cid))
+            break
+        if r > worst:
+            worst, worst_cid = r, cid
 
     # R8 coverage
     if claims is not None:
