@@ -207,7 +207,7 @@ def main():
         # 「初回作成時や更新、常に、結論が各章の重要事項を含む」に対応する。
         # summary_freshness_guard は UPDATE の差分しか見られないため、
         # 新規作成レポートは原理的に対象外だった。ここで補う。
-        # regression-only は既存と同じ方針（実測: 802本中596本=74%が
+        # regression-only は既存と同じ方針（実測: リモート796本中292本=36.7%が
         # 結論節を持たない。全部止めれば初日で無効化される）。
         struct = []
         if cfg.get("structure", True):

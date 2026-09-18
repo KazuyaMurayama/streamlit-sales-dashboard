@@ -87,7 +87,8 @@ roughly two in three, +/- how you define the front of a document.
 Where the remaining misses are: EVERY one is a file with no summary section,
 because has_conclusion() gates analyze(). That gate is a precision device, not
 part of the user's rule, and it is the entire remaining recall gap. Those
-documents are the 600-of-820 (73%%) pre-existing debt; firing on them on every
+documents are the 292-of-796 (36.7%%) pre-existing debt, re-measured against
+REMOTE refs after the regex fix; firing on them on every
 future edit would re-report a defect the author is not fixing this turn. The
 new-file structure check (structure_regression) is what addresses that class.
 
@@ -527,15 +528,20 @@ def unreferenced_sections(text):
 # So this reports the first two and leaves the rest to review_gate and the
 # human, and the message says so rather than implying full coverage.
 #
-# MEASURED ON THE REAL CORPUS (802 in-scope reports >= 60 lines, 2026-09-15):
-#     no 結論/サマリー section at all            : 596 (74%)
+# MEASURED ON THE REAL CORPUS (796 in-scope reports >= 60 lines on REMOTE
+# refs, re-counted 2026-09-18 after the CONCLUSION_RE fix):
+#     no 結論/サマリー section at all            : 292 (36.7%)
+#   NOTE: this was reported as 596 (74%) until 2026-09-18. That figure was an
+#   ARTEFACT OF THE BUG THIS MODULE HAD: the old CONCLUSION_RE could not see
+#   「エグゼクティブサマリー」 etc, so 287 reports that DO open with a summary
+#   were counted as having none. The debt is real but half the claimed size.
 #     opening block < 5% of the document        : 344 (43%)
 #     opening ignores >= 60% of its chapters    : 369 (46%)
 #
 # Those numbers are why this is REGRESSION-ONLY, following the pattern
 # pre_report_quality_guard established for exactly this situation: fire only
 # when an edit makes the structure WORSE than it already was on disk. Blocking
-# on the standing 74% would stop nearly every report edit in the archive on
+# on the standing 36.7% would stop a large share of report edits in the archive on
 # day one, and a guard that does that gets switched off within a week.
 #
 # CALIBRATED on the same git history as analyze() (343 real updates):
@@ -574,7 +580,7 @@ def structure_regression(before_text, after_text):
     """Did this edit make the opening structure WORSE? Returns [] or findings.
 
     Regression-only by design: a report that already lacked a summary before
-    the edit is pre-existing debt (74% of the archive) and must not block
+    the edit is pre-existing debt (36.7% of the archive) and must not block
     unrelated work. A NEW file (no before) is judged on its own, because
     creating a report without a summary is the 初回作成時 case the user named.
     """
