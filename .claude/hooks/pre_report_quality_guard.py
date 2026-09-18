@@ -235,6 +235,10 @@ except Exception:                                    # pragma: no cover
         def _looks_like_report(_t):
             return False      # no content override when the library is absent
 
+        @staticmethod
+        def read_text(_p):
+            return ""        # caller falls back to utf-8-sig
+
 
 def _in_scope(fp, cfg, text=None, path_only=False):
     """Only analyse our own report prose.
@@ -368,11 +372,22 @@ def main():
         if not _in_scope(fp, cfg, path_only=True):
             return
 
+        # Decode whatever encoding the file is in, not just UTF-8. A cp932 or
+        # UTF-16 report used to read as "" -- and since an Edit is applied as
+        # before.replace(old, new), `after` came out "" too, so the checks found
+        # nothing and the hook was silent (round-5 probe E6/E7). PowerShell's
+        # Set-Content still defaults to ANSI on this machine, so this is
+        # reachable. summary_freshness_check.read_text already handles it.
         try:
-            with open(fp, encoding="utf-8-sig") as f:
-                before = f.read()
+            before = _SFC.read_text(fp)
         except Exception:
             before = ""
+        if not before:
+            try:
+                with open(fp, encoding="utf-8-sig") as f:
+                    before = f.read()
+            except Exception:
+                before = ""
 
         if tool_name == "Write":
             after = ti.get("content") or ""
@@ -393,7 +408,15 @@ def main():
         # freshness check and never the 初回作成時 structure check -- and a NEW
         # undated 結論-report written to prompts/ escaped both, because a new
         # file has no snapshot for the Stop path to compare against.
-        if not _in_scope(fp, cfg, text=after):
+        # Judge on BEFORE or AFTER. An edit that deletes the 作成日/最終更新日
+        # lines in the same call that adds a violation would otherwise erase the
+        # document's own evidence of being a report and go silent -- measured
+        # round-5 against the deployed hook: identical edit WITH the deletion
+        # was silent, WITHOUT it fired. summary_freshness_check is immune
+        # because its snapshot judges the pre-edit text; this is the PreToolUse
+        # equivalent of that.
+        if not (_in_scope(fp, cfg, text=after)
+                or _in_scope(fp, cfg, text=before)):
             return
 
         f_before = _analyze(before, cfg, mods)
