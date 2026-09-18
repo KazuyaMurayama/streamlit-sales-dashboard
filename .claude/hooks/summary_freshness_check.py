@@ -156,9 +156,19 @@ import io
 import os
 import re
 
+# Matched against a HEADING LINE only (the ^#{1,3} anchor), but the keyword
+# may sit anywhere inside it. The earlier version anchored the keyword to the
+# start after an optional number/§ prefix, which silently rejected the
+# author's single most common summary heading: 22 of 326 real report updates
+# head their summary "エグゼクティブサマリー" -- サマリー is present but
+# preceded by katakana, not by [\d.§\s]. Also rejected: "§0 30秒サマリー",
+# "🔑 結論（ます3行）", "第1章　エグゼクティブサマリー", "0. いきなり結論".
+# Measured cost of the miss: has_conclusion() gates analyze(), so all 56 of
+# those updates were SILENT -- 57%% of every miss the guard had. Recall went
+# 22.2%% -> 62.7%% on fixing this one regex (2026-09-18).
 CONCLUSION_RE = re.compile(
-    r"^#{1,3}\s*[\d.§\s]*"
-    u"(結論|サマリー|要約|概要|まとめ|Executive|TL;?DR|Summary)",
+    r"^#{1,3}\s.*?"
+    u"(結論|サマリー|サマリ|要約|概要|まとめ|Executive|TL;?DR|Summary)",
     re.IGNORECASE)
 HEADING_RE = re.compile(r"^#{1,3}\s")
 # Every space-like character, including the zero-width ones. Used to REMOVE
