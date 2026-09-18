@@ -207,8 +207,6 @@ def main():
         for full in resolved:
             if full in snap:
                 break                     # first touch already recorded
-            if not SFC.in_scope(full):
-                continue
             if not os.path.isfile(full):
                 continue                  # wrong base, or a new file
             try:
@@ -216,7 +214,15 @@ def main():
                     break
             except Exception:
                 break
-            snap[full] = SFC.read_text(full)
+            # Read BEFORE the scope test so in_scope() can judge the document
+            # by its content, not just by the folder holding it. Round-2
+            # adversarial review found a 319-line report with 作成日 and
+            # "## 0. 結論" living under _meta/prompts/ -- folder-only scoping
+            # silenced a real true positive (commit 024b0cd4).
+            body = SFC.read_text(full)
+            if not SFC.in_scope(full, body):
+                continue
+            snap[full] = body
             changed = True
             break                         # first base that exists wins
     if not changed:

@@ -58,10 +58,23 @@ if True:
 
         def write(self, s):
             self.buf.append(s)
-            return self._real.write(s)
+            try:
+                return self._real.write(s)
+            except ValueError:
+                # Interpreter shutdown can close the real stream before this
+                # object is finalized. Keep buffering so the exit translator
+                # still sees the decision; never raise from write().
+                return len(s)
 
         def flush(self):
-            self._real.flush()
+            # Called during interpreter finalization too, where the underlying
+            # stream may already be closed. A raise here surfaces as
+            # "Exception ignored in: <_TeeOut object>" noise on stderr, which
+            # under Codex is exactly where a blocking reason is read from.
+            try:
+                self._real.flush()
+            except ValueError:
+                pass
 
     def _under_codex():
         if _os.environ.get("CLAUDE_HOOK_RUNTIME") == "claude":

@@ -79,8 +79,11 @@ DEFAULT_DIRS = ("outputs/", "reports/", "docs/", "output/", "report/")
 # SOFT: "not a report KIND" -- a dated report name overrides.
 HARD_EXCLUDE = ("data/", "materials/", "drafts/", "node_modules/",
                 "session/", ".git/", "vendor/", "fixtures/")
-SOFT_EXCLUDE = ("plans/", "specs/", "superpowers/", "prompts/", "skills/",
-                "agents/", "parts/", "_tmp/", "tmp/", "rules/", "retros/")
+# In step with summary_freshness_check.SOFT_EXCLUDE_DIRS: plans/, specs/ and
+# retros/ were dropped 2026-09-19 after measuring that they excluded nothing
+# (every file under them is date-named and returned via the name rule).
+SOFT_EXCLUDE = ("prompts/", "skills/", "agents/", "parts/", "_tmp/", "tmp/",
+                "rules/")
 DEFAULT_EXCLUDE = HARD_EXCLUDE + SOFT_EXCLUDE
 
 
@@ -113,10 +116,23 @@ if True:
 
         def write(self, s):
             self.buf.append(s)
-            return self._real.write(s)
+            try:
+                return self._real.write(s)
+            except ValueError:
+                # Interpreter shutdown can close the real stream before this
+                # object is finalized. Keep buffering so the exit translator
+                # still sees the decision; never raise from write().
+                return len(s)
 
         def flush(self):
-            self._real.flush()
+            # Called during interpreter finalization too, where the underlying
+            # stream may already be closed. A raise here surfaces as
+            # "Exception ignored in: <_TeeOut object>" noise on stderr, which
+            # under Codex is exactly where a blocking reason is read from.
+            try:
+                self._real.flush()
+            except ValueError:
+                pass
 
     def _under_codex():
         if _os.environ.get("CLAUDE_HOOK_RUNTIME") == "claude":
@@ -228,17 +244,21 @@ def _in_scope(fp, cfg):
         if ex.lower().rstrip("/") + "/" in "/" + norm:
             return False
 
-    # "include" is a repo saying "only these trees are reports". It must bound
-    # everything, including the dated-name shortcut -- 20 repos set it
-    # (include: ["docs/"], ["outputs/"] ...), and letting a dated name escape it
-    # would silently widen every one of them.
-    if inc and not any(i.lower().rstrip("/") + "/" in "/" + norm for i in inc):
-        return False
-
-    # Within the allowed trees: a dated report name beats a SOFT (document-kind)
-    # exclusion, never a HARD one. See summary_freshness_check.in_scope().
+    # A dated report name is scope-bearing on its own, and is NOT bounded by a
+    # repo's "include". Round-2 adversarial review measured the alternative:
+    # gating the name check behind include split the two guards on 75 real
+    # files -- Soulful-Content sets include ["_meta/references/"], so 54 dated
+    # _meta reports got the Stop freshness check but never the 初回作成時
+    # structure check. COCONALA_COPY_20260820.md, the case this whole guard was
+    # built from, was one of them.
+    #
+    # "include" still bounds everything that is NOT a dated report, which is
+    # what the 20 repos setting it actually meant by it.
     if REPORT_NAME.search(bn) or DATED_DOC.match(bn):
         return True
+
+    if inc and not any(i.lower().rstrip("/") + "/" in "/" + norm for i in inc):
+        return False
 
     for ex in SOFT_EXCLUDE:
         if ex.lower().rstrip("/") + "/" in "/" + norm:

@@ -238,8 +238,17 @@ HARD_EXCLUDE_DIRS = ("data/", "materials/", "drafts/", "node_modules/",
                      "_archived", "_archive/", ".venv/")
 # SOFT exclusions: these say "this KIND of document is not a report". A file
 # that names itself a dated report overrides them -- see in_scope().
-SOFT_EXCLUDE_DIRS = ("plans/", "specs/", "superpowers/", "prompts/", "skills/",
-                     "agents/", "parts/", "_tmp/", "tmp/", "rules/", "retros/")
+# SOFT exclusions: these say "this KIND of document is not a report". Both a
+# dated report NAME and report-shaped CONTENT override them -- see in_scope().
+#
+# Measured on the remote corpus 2026-09-19, after round-2 adversarial review:
+# plans/ (12 files), specs/ (2) and retros/ (8) excluded NOTHING -- every file
+# under them is date-named and came straight back through the name rule. They
+# were pure complexity pretending to be policy, so they are gone. What remains
+# actually acts: rules/ 41, agents/ 90, prompts/ 45, parts/ 14, skills/ 614,
+# _tmp/ 2.
+SOFT_EXCLUDE_DIRS = ("prompts/", "skills/", "agents/", "parts/", "_tmp/",
+                     "tmp/", "rules/")
 EXCLUDE_DIRS = HARD_EXCLUDE_DIRS + SOFT_EXCLUDE_DIRS
                             # retrospective logs
 
@@ -257,24 +266,25 @@ def _has_dir(path_lower, name):
     return ("/" + seg + "/") in path_lower
 
 
-def in_scope(path):
+def in_scope(path, text=None):
     """Is this one of OUR reports?
 
-    ORDER MATTERS, and there are two kinds of exclusion:
+    Pass `text` (the file's content) whenever you have it. The folder a file
+    sits in is weak evidence about what it IS; the document itself is strong
+    evidence. Two adversarial rounds both broke folder-only judgement:
 
-      HARD_EXCLUDE_DIRS  generated data, vendored material, test fixtures.
-                         Nothing overrides these.
-      SOFT_EXCLUDE_DIRS  "this KIND of document is not a report" (plans,
-                         specs, prompts, skills, rules, retros, fragments).
-                         A dated report NAME overrides these.
+      round 1: excluding by directory silenced a 709-line dated QC report
+               that merely lived under plans/, and let anyone hide a report
+               forever by writing it to reports/_tmp/.
+      round 2: Soulful-Content/_meta/prompts/dx-article.md is 319 lines with
+               作成日, 最終更新日 and "## 0. 結論" -- written AS a report --
+               and commit 024b0cd4 corrected its conclusion. prompts/ made
+               the guard silent on it. A hand-labelled true positive, lost.
 
-    Adversarial review (Fable, 2026-09-18) found that excluding by directory
-    alone silenced real reports that merely lived under such a directory --
-    NASDAQ-strategy-gas/docs/superpowers/plans/2026-09-07-ops-chain-c1-c6-qc-
-    opus.md is a 709-line dated QC report -- and handed anyone an evasion:
-    writing to reports/_tmp/ or outputs/parts/ hid a report forever. Letting
-    the NAME override everything was the opposite error: it pulled fixtures
-    and generated data back in. Hence two tiers.
+    So: HARD exclusions (generated data, vendored material, fixtures) are
+    absolute. SOFT exclusions only say "this KIND of document is usually not
+    a report", and BOTH a dated report name AND report-shaped content
+    (a 結論/サマリー section) override them.
     """
     q = (path or "").replace("\\", "/")
     if not re.search(r"\.(md|markdown|mdx)$", q, re.I):
@@ -293,8 +303,12 @@ def in_scope(path):
     if REPORT_NAME_RE.search(base) or DATED_DOC_RE.match(base):
         return True
 
-    for d in SOFT_EXCLUDE_DIRS:            # overridable by the name check above
+    for d in SOFT_EXCLUDE_DIRS:
         if _has_dir(low, d):
+            # Content beats the folder: a document carrying a 結論/サマリー
+            # section is a report no matter which directory holds it.
+            if text and has_conclusion(_norm(text.split("\n"))):
+                return True
             return False
 
     if PIPELINE_STAGE_RE.match(base):
