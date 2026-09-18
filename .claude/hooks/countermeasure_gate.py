@@ -65,6 +65,22 @@ import re
 import sys
 from datetime import datetime, timezone
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    from codex_transcript import resolve as _codex_transcript
+except Exception:  # adapter missing: say so, do not fail silently
+    def _codex_transcript(p, *_a, **_k):
+        # Without this, a Codex transcript is walked with Claude's schema,
+        # finds no rows, and the hook concludes "nothing happened this turn"
+        # -- silence indistinguishable from a clean turn (QC 2026-09-18).
+        if p:
+            sys.stderr.write(
+                "[%s] codex_transcript.py not found next to this hook; "
+                "Codex transcripts are NOT being read."
+                % os.path.basename(__file__) + chr(10))
+        return p
+
+
 # --- Firing-log recording (defect 2, 2026-09-03) ----------------------------
 #
 # WHY: the countermeasure ledger's V2_NO_FIRING_LOG check reads
@@ -324,7 +340,7 @@ def main():
     if ev.get("stop_hook_active"):
         return
 
-    tp = ev.get("transcript_path")
+    tp = _codex_transcript(ev.get("transcript_path"))
     if not tp:
         return
     ask, tools = _read_turn(tp)
