@@ -266,6 +266,27 @@ def _has_dir(path_lower, name):
     return ("/" + seg + "/") in path_lower
 
 
+def _looks_like_report(text):
+    """Two independent signals that this document IS a report, not a template.
+
+    Requires BOTH a 結論/サマリー section AND a dated front-matter line
+    (作成日/最終更新日/Date...). One signal alone is not enough: round-3
+    adversarial review showed a skills/ TEMPLATE whose boilerplate
+    "## Summary" heading was enough to clear the SOFT veto, and
+    docs/rules/ documents did the same. Templates carry the heading because
+    they are meant to be filled in; they do not carry a 作成日, because they
+    were never written on a particular day about a particular thing.
+
+    The real report this override exists for --
+    Soulful-Content/_meta/prompts/dx-article.md -- has both.
+    """
+    lines = _norm((text or "").split("\n"))
+    if not has_conclusion(lines):
+        return False
+    head = lines[:max(12, int(len(lines) * 0.15))]
+    return any(FRONTMATTER_RE.match(l) for l in head)
+
+
 def in_scope(path, text=None):
     """Is this one of OUR reports?
 
@@ -305,10 +326,17 @@ def in_scope(path, text=None):
 
     for d in SOFT_EXCLUDE_DIRS:
         if _has_dir(low, d):
-            # Content beats the folder: a document carrying a 結論/サマリー
-            # section is a report no matter which directory holds it.
-            if text and has_conclusion(_norm(text.split("\n"))):
-                return True
+            # Content LIFTS THE SOFT VETO -- it does not grant scope by itself.
+            # Round-3 adversarial review caught the difference: `return True`
+            # here admitted 18 files that were never in scope under ANY rule,
+            # including .claude/skills/time-series-analysis/assets/
+            # ts_report_template.md (a TEMPLATE whose "## Summary" heading is
+            # boilerplate) and .claude/rules/timeout-prevention.md. 13 of them
+            # were >= 60 lines, i.e. eligible to fire -- exactly the class the
+            # SOFT tier exists to keep quiet. So the override only clears the
+            # veto; SCOPE_DIRS below still has to say yes.
+            if text and _looks_like_report(text):
+                break
             return False
 
     if PIPELINE_STAGE_RE.match(base):

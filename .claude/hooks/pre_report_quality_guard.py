@@ -67,7 +67,10 @@ REPORT_NAME = re.compile(r"_\d{8}(?:-v\d+)?\.md$", re.I)
 PIPELINE_STAGE = re.compile(
     r"^(?:0[0-4])_(?:search_plan|search|screening|synthesis|plan|extract|collect|dedup|rank)[a-z0-9_\-]*\.md$", re.I)
 DATED_DOC = re.compile(r"^\d{4}-\d{2}-\d{2}[-_]", re.I)
-DEFAULT_DIRS = ("outputs/", "reports/", "docs/", "output/", "report/")
+# In step with summary_freshness_check.SCOPE_DIRS, which also carries _meta/.
+# Without it the two guards disagreed on every Soulful-Content/_meta report,
+# including COCONALA_COPY_20260820.md -- the case this guard was built from.
+DEFAULT_DIRS = ("outputs/", "reports/", "docs/", "output/", "report/", "_meta/")
 # Directories holding generated or third-party material, not our own analysis.
 # Kept in step with summary_freshness_check.EXCLUDE_DIRS (2026-09-18): plan,
 # spec, prompt, skill, rules, retro documents and document fragments are not
@@ -77,8 +80,16 @@ DEFAULT_DIRS = ("outputs/", "reports/", "docs/", "output/", "report/")
 # Two tiers, mirroring summary_freshness_check (2026-09-18).
 # HARD: generated data / vendored / fixtures -- nothing overrides.
 # SOFT: "not a report KIND" -- a dated report name overrides.
+# Kept in step with summary_freshness_check.HARD_EXCLUDE_DIRS. The three
+# prefix markers at the end are substring, not segment, matches -- an
+# archived tree is archived however it is spelled. Measured 2026-09-19:
+# without them the two guards disagreed on 10 real files, including
+# career_dev/_archived_do_not_reference/ (which the repo name itself asks
+# nobody to reference) and deep-research/_data/paper_pdfs/.
 HARD_EXCLUDE = ("data/", "materials/", "drafts/", "node_modules/",
-                "session/", ".git/", "vendor/", "fixtures/")
+                "session/", ".git/", "vendor/", "fixtures/", "tests/",
+                "_data/", ".venv/",
+                "_archived", "_archive/")
 # In step with summary_freshness_check.SOFT_EXCLUDE_DIRS: plans/, specs/ and
 # retros/ were dropped 2026-09-19 after measuring that they excluded nothing
 # (every file under them is date-named and returned via the name rule).
@@ -220,9 +231,20 @@ except Exception:                                    # pragma: no cover
         def structure_regression(_b, _a):
             return []
 
+        @staticmethod
+        def _looks_like_report(_t):
+            return False      # no content override when the library is absent
 
-def _in_scope(fp, cfg):
-    """Only analyse our own report prose."""
+
+def _in_scope(fp, cfg, text=None, path_only=False):
+    """Only analyse our own report prose.
+
+    `text` is the post-edit content when the caller has it. Like
+    summary_freshness_check.in_scope(), a document carrying a 結論/サマリー
+    section LIFTS a SOFT (document-kind) veto -- but it does not grant scope on
+    its own: the path must still land in an allowed tree. `path_only=True` skips
+    that lift, for a cheap rejection before reading the file.
+    """
     if not fp.lower().endswith(".md"):
         return False
     try:
@@ -241,7 +263,16 @@ def _in_scope(fp, cfg):
     # data/drafts/ ...). Treating their list as the whole hard list would have
     # re-admitted node_modules/ and fixtures/ in exactly those repos.
     for ex in tuple(HARD_EXCLUDE) + tuple(cfg.get("exclude") or ()):
-        if ex.lower().rstrip("/") + "/" in "/" + norm:
+        e = ex.lower()
+        # Entries ending in "/" are whole path SEGMENTS; entries without one
+        # are PREFIX markers matched as substrings. Appending "/" to every
+        # entry (the previous behaviour) turned "_archived" into "_archived/",
+        # which never matched career_dev/_archived_do_not_reference/ -- the
+        # directory whose own name asks nobody to reference it.
+        if e.endswith("/"):
+            if "/" + e.strip("/") + "/" in "/" + norm:
+                return False
+        elif e in norm:
             return False
 
     # A dated report name is scope-bearing on its own, and is NOT bounded by a
@@ -262,6 +293,23 @@ def _in_scope(fp, cfg):
 
     for ex in SOFT_EXCLUDE:
         if ex.lower().rstrip("/") + "/" in "/" + norm:
+            # Content clears the veto only; SCOPE/include below still decides.
+            # Uses the SAME two-signal test as summary_freshness_check (a
+            # 結論 section AND a dated front-matter line), so the two guards
+            # cannot drift on what counts as a report.
+            #
+            # path_only is the CHEAP PRE-PASS run before the file is read. It
+            # must not veto here: a SOFT hit is exactly the case whose answer
+            # depends on content, so vetoing would make the content check
+            # unreachable. Round-4 adversarial review caught precisely that --
+            # piping a real Write payload for _meta/prompts/new_report.md with
+            # 作成日 + ## 結論 + a violation produced SILENCE, while the unit
+            # tests passed because they called _in_scope() directly and never
+            # went through main(). Tests on dead code prove nothing.
+            if path_only:
+                break                      # undecidable without the content
+            if text and _SFC._looks_like_report(text):
+                break
             return False
 
     if PIPELINE_STAGE.match(bn):
@@ -315,7 +363,9 @@ def main():
         tool_name = data.get("tool_name") or ""
         ti = data.get("tool_input") or {}
         fp = ti.get("file_path") or ""
-        if not _in_scope(fp, cfg):
+        # Cheap path-only rejection first: if the path is out of scope no matter
+        # what the file says, do not read anything.
+        if not _in_scope(fp, cfg, path_only=True):
             return
 
         try:
@@ -333,6 +383,17 @@ def main():
             after = (before.replace(old, new) if ti.get("replace_all")
                      else before.replace(old, new, 1))
         else:
+            return
+
+        # Now judge by CONTENT as well. Round-3 adversarial review found the R2
+        # fix was half-applied: summary_freshness_check.in_scope() learned to
+        # read the document, but this guard stayed path-only, so four real
+        # reports under _meta/prompts/ (dx-article 337 lines, book-seed 296,
+        # book-seed-conversion 122, book-article-duel 100) got the Stop
+        # freshness check and never the 初回作成時 structure check -- and a NEW
+        # undated 結論-report written to prompts/ escaped both, because a new
+        # file has no snapshot for the Stop path to compare against.
+        if not _in_scope(fp, cfg, text=after):
             return
 
         f_before = _analyze(before, cfg, mods)
