@@ -208,12 +208,34 @@ HEADING_RE = re.compile(r"^#{1,3}\s")
 WS_RE = re.compile(r"[\s　​‌‍⁠﻿]+")
 RULE_RE = re.compile(r"^---+\s*$")
 REPORT_NAME_RE = re.compile(r"_\d{8}(?:-v\d+)?\.(md|markdown|mdx)$", re.I)
+# A numbered pipeline stage, e.g. 01_search_plan.md / 03_screening.md /
+# 04_synthesis.md / 05_report.md. These are intermediate artefacts emitted by
+# a research pipeline, one run producing a numbered set. 36 of the 74
+# hand-written backlog files were these. Restructuring them by hand is waste:
+# the next run regenerates the same shape, so the fix belongs in the emitting
+# template. Excluded by NAME rather than by directory because they sit
+# directly under outputs/<run-id>/, which must stay in scope for real reports.
+PIPELINE_STAGE_RE = re.compile(r"^\d{2}_[a-z0-9_\-]+\.(md|markdown|mdx)$", re.I)
 SCOPE_DIRS = ("outputs/", "reports/", "docs/", "output/", "report/", "_meta/")
 # Never our own analysis prose: generated data, third-party material, and the
 # test fixtures that must quote violations verbatim to be evidence.
 EXCLUDE_DIRS = ("data/", "materials/", "drafts/", "node_modules/", "session/",
                 ".git/", "vendor/", "fixtures/", "tests/", "_archived",
-                "_archive/", ".venv/")
+                "_archive/", ".venv/",
+                # --- added 2026-09-18 after profiling the remediation backlog ---
+                # These hold documents that are not reports, so "put the
+                # conclusion first" does not apply to them. Leaving them in
+                # scope is not a harmless over-reach: they were 59 of the 74
+                # hand-written backlog files, i.e. the guard would nag forever
+                # about documents nobody should restructure. A guard that is
+                # mostly wrong gets muted -- the same failure recorded for the
+                # vocabulary design (precision 3/10) and for the 35.9% firing
+                # rate judged 形骸化確実.
+                "plans/", "specs/", "superpowers/",   # plan & spec documents
+                "prompts/", "skills/", "agents/",     # prompt / skill definitions
+                "parts/", "_tmp/", "tmp/",            # fragments of a document
+                "rules/",                             # operating rules, not analysis
+                "retros/")                            # retrospective logs
 
 
 def _has_dir(path_lower, name):
@@ -241,7 +263,10 @@ def in_scope(path):
                 return False
         elif d.lower() in low:
             return False
-    if REPORT_NAME_RE.search(os.path.basename(q)):
+    base = os.path.basename(q)
+    if PIPELINE_STAGE_RE.match(base):
+        return False        # 01_/03_/04_/05_ pipeline stage -- fix the template
+    if REPORT_NAME_RE.search(base):
         return True
     return any(_has_dir(low, d) for d in SCOPE_DIRS)
 

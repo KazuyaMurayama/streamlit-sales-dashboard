@@ -60,10 +60,96 @@ except Exception:  # adapter missing: say so, do not fail silently
         return d
 
 REPORT_NAME = re.compile(r"_\d{8}(?:-v\d+)?\.md$", re.I)
+# Numbered pipeline stage (01_search_plan.md, 04_synthesis.md, ...): an
+# intermediate artefact of a research run, regenerated wholesale next run.
+PIPELINE_STAGE = re.compile(r"^\d{2}_[a-z0-9_\-]+\.md$", re.I)
 DEFAULT_DIRS = ("outputs/", "reports/", "docs/", "output/", "report/")
 # Directories holding generated or third-party material, not our own analysis.
+# Kept in step with summary_freshness_check.EXCLUDE_DIRS (2026-09-18): plan,
+# spec, prompt, skill, rules, retro documents and document fragments are not
+# reports, so the "conclusion first" rule does not apply to them. They were
+# 59 of 74 files in the measured backlog; nagging about them is how a guard
+# gets muted.
 DEFAULT_EXCLUDE = ("data/", "materials/", "drafts/", "node_modules/",
-                   "session/", ".git/", "vendor/", "fixtures/")
+                   "session/", ".git/", "vendor/", "fixtures/",
+                   "plans/", "specs/", "superpowers/",
+                   "prompts/", "skills/", "agents/",
+                   "parts/", "_tmp/", "tmp/", "rules/", "retros/")
+
+
+# --- Codex blocking contract (F10g, 2026-09-18) -----------------------------
+# Claude Code blocks on stdout JSON + exit 0. Codex blocks ONLY on exit code 2
+# with the reason on stderr; its binary carries the string "PreToolUse hook
+# exited with code 2 but did not write a blocking reason to stderr", and its
+# TUI shows "Hook failed" (not "Blocked by hook") for anything else.
+#
+# Measured: these guards fired 28 times against a future-dated file under Codex
+# and the file was written anyway. The guard was right; the decision was
+# discarded. So "the hook fired" was never evidence of enforcement.
+#
+# Rather than edit each deny site (several sit inside `try/except: pass`, which
+# would swallow a SystemExit), capture stdout and translate at process exit.
+_CODEX_EXIT2_INSTALLED = True
+if True:
+    import atexit as _atexit
+    import io as _io
+    import json as _json
+    import os as _os
+    import sys as _sys
+
+    class _TeeOut(_io.TextIOBase):
+        """Pass stdout through while keeping a copy for the exit translator."""
+
+        def __init__(self, real):
+            self._real = real
+            self.buf = []
+
+        def write(self, s):
+            self.buf.append(s)
+            return self._real.write(s)
+
+        def flush(self):
+            self._real.flush()
+
+    def _under_codex():
+        if _os.environ.get("CLAUDE_HOOK_RUNTIME") == "claude":
+            return False
+        if _os.environ.get("CODEX_HOOK_RUNTIME") == "codex":
+            return True
+        return bool(_os.environ.get("CODEX_HOME"))
+
+    _tee = _TeeOut(_sys.stdout)
+    _sys.stdout = _tee
+
+    def _codex_exit2():
+        _sys.stdout = _tee._real
+        if not _under_codex():
+            return
+        text = "".join(_tee.buf)
+        reason = None
+        for line in text.splitlines():
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                d = _json.loads(line)
+            except Exception:
+                continue
+            hso = d.get("hookSpecificOutput") or {}
+            if hso.get("permissionDecision") == "deny":
+                reason = hso.get("permissionDecisionReason") or "blocked"
+                break
+        if reason is None:
+            return
+        try:
+            _sys.stderr.write(reason + _os.linesep)
+            _sys.stderr.flush()
+        except Exception:
+            pass
+        _os._exit(2)   # bypass further atexit handlers and any except: pass
+
+    _atexit.register(_codex_exit2)
+# --- end Codex blocking contract -------------------------------------------
 
 
 def _registered_local_copy_exists():
@@ -128,6 +214,8 @@ def _in_scope(fp, cfg):
         if ex.lower().rstrip("/") + "/" in "/" + norm:
             return False
 
+    if PIPELINE_STAGE.match(os.path.basename(norm)):
+        return False
     inc = cfg.get("include")
     if inc:
         return any(i.lower().rstrip("/") + "/" in "/" + norm for i in inc)

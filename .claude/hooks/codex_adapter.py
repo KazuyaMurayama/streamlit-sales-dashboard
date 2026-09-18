@@ -32,7 +32,79 @@ from __future__ import annotations
 
 import re
 
-__all__ = ["normalize", "parse_apply_patch", "is_codex_payload", "codex_paths"]
+__all__ = ["normalize", "parse_apply_patch", "is_codex_payload", "codex_paths",
+           "emit_deny", "running_under_codex"]
+
+
+# --------------------------------------------------------------------------
+# Deny emission: the two runtimes do NOT share a blocking contract.
+#
+# Claude Code blocks on stdout JSON with exit 0:
+#     {"hookSpecificOutput": {"permissionDecision": "deny", ...}}
+#
+# Codex blocks ONLY on **exit code 2 with the reason on stderr**. Its own
+# binary carries the string:
+#     "PreToolUse hook exited with code 2 but did not write a blocking
+#      reason to stderr"
+# and its TUI distinguishes "Blocked by hook" from "Hook failed". A hook that
+# prints the JSON above and exits 0 renders as **Hook failed** and the tool
+# call **proceeds anyway**.
+#
+# Measured 2026-09-18 (F10g): all 8 blocking guards used the JSON form with
+# exit 0, and zero used exit 2. They fired 28 times against a future-dated
+# file under Codex and the file was still written. The guards were correct;
+# the decision was discarded. This is why "the hook fired" was never evidence
+# that anything was enforced.
+#
+# emit_deny() satisfies BOTH runtimes in one call: it prints the JSON (which
+# Codex ignores and Claude Code honours) and, under Codex, additionally exits
+# 2 with the reason on stderr.
+# --------------------------------------------------------------------------
+
+def running_under_codex():
+    """True when this hook was invoked by Codex rather than Claude Code.
+
+    CODEX_HOME is exported by the Codex CLI and the desktop app for every
+    hook process. Checked at call time, not import time, so a test can set
+    it per case.
+    """
+    import os
+    if os.environ.get("CLAUDE_HOOK_RUNTIME") == "claude":
+        return False      # explicit override wins, for tests
+    if os.environ.get("CODEX_HOOK_RUNTIME") == "codex":
+        return True
+    return bool(os.environ.get("CODEX_HOME"))
+
+
+def emit_deny(reason, event="PreToolUse", _exit=True):
+    """Block the tool call in whichever runtime is executing this hook.
+
+    Always prints the Claude Code JSON decision. Under Codex, also writes the
+    reason to stderr and exits 2, which is the only form Codex honours.
+
+    Returns the exit code it used when _exit is False (for tests).
+    """
+    import json as _json
+    import os
+    import sys as _sys
+
+    _sys.stdout.write(_json.dumps({"hookSpecificOutput": {
+        "hookEventName": event,
+        "permissionDecision": "deny",
+        "permissionDecisionReason": reason}}, ensure_ascii=False) + os.linesep)
+    _sys.stdout.flush()
+
+    code = 0
+    if running_under_codex():
+        # Codex reads the reason from stderr; without it the block is dropped
+        # with "did not write a blocking reason to stderr".
+        _sys.stderr.write((reason or "blocked by governance hook") + os.linesep)
+        _sys.stderr.flush()
+        code = 2
+    if _exit:
+        _sys.exit(code)
+    return code
+
 
 _BEGIN = "*** Begin Patch"
 _END = "*** End Patch"

@@ -54,9 +54,25 @@ _APPLY_RE = re.compile(
     r"""tools\.apply_patch\s*\(\s*(["'`])(?P<body>(?:\\.|(?!\1).)*)\1""",
     re.S)
 
-# Anything that looks like a shell command run through the exec tool.
+# Shell commands run through the exec tool.
+#
+# MEASURED 2026-09-18: every real shell call uses the OBJECT form --
+#     tools.exec_command({"cmd": "Get-Content -LiteralPath a.md", "workdir": ...})
+# -- never a bare string. Matching only the string form returned ZERO shell
+# evidence from real sessions. That is not a harmless miss: guards that ask
+# "did this turn verify anything?" conclude no command ran and block a turn
+# that did check itself. An over-block is worse than silence here, because it
+# punishes exactly the behaviour the guard exists to encourage.
 _SHELL_RE = re.compile(
-    r"""tools\.(?:shell|bash|exec_command)\s*\(\s*(["'`])(?P<body>(?:\\.|(?!\1).)*)\1""",
+    r"""tools\.(?:shell|bash|exec_command|run)\s*\(\s*(["'`])(?P<body>(?:\\.|(?!\1).)*)\1""",
+    re.S)
+
+# Object form. Accepts "cmd" or "command", quoted or bare, anywhere in the
+# object literal -- the key order is not guaranteed.
+_SHELL_OBJ_RE = re.compile(
+    r"""tools\.(?:shell|bash|exec_command|run)\s*\(\s*\{"""
+    r"""(?:[^{}]*?)["']?(?:cmd|command)["']?\s*:\s*"""
+    r"""(["'`])(?P<body>(?:\\.|(?!\1).)*)\1""",
     re.S)
 
 
@@ -139,9 +155,14 @@ def _tool_uses_from_exec(src):
                           "new_string": op["new_string"]},
             })
 
-    for m in _SHELL_RE.finditer(src or ""):
-        blocks.append({"type": "tool_use", "name": "Bash",
-                       "input": {"command": _unescape(m.group("body"))}})
+    seen = set()
+    for rx in (_SHELL_RE, _SHELL_OBJ_RE):
+        for m in rx.finditer(src or ""):
+            cmd = _unescape(m.group("body"))
+            if cmd and cmd not in seen:
+                seen.add(cmd)
+                blocks.append({"type": "tool_use", "name": "Bash",
+                               "input": {"command": cmd}})
     return blocks
 
 
