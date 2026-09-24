@@ -57,7 +57,8 @@ except Exception:
 # Kept deliberately short — this is paid on every non-trivial prompt.
 REQSPEC = (
     "【要件定義ゲート】着手前に、ファイル変更や成果物作成を伴うなら "
-    "REQSPEC を数行で述べてから始めること:\n"
+    "REQSPEC を思考内で組み立ててから始めること。回答に書くのは「前提: 〜」の1行だけ"
+    "（途中に数行書くと回答が長くなり、後で覆る。response_length_guard 2026-09-24）:\n"
     "・ゴール: 達成状態を1文で（作業内容ではなく「何がどうなれば完了か」）\n"
     "・明示要件: ユーザーが実際に書いた依頼（逐語）\n"
     "・派生要件: 明示されていないが当然含まれるもの。"
@@ -144,7 +145,7 @@ CM_BLOCK = u"""【再発防止 REQSPEC — 着手前に必須。ルール文章�
 ・赤緑: 当時の欠陥版に当てて FAIL することを確認する（直した版で PASS しても何も証明しない）
 ・較正: 実データで発火率を実測する（高すぎれば形骸化、0%なら死んでいる）
 ・独立QC: 自分の計画を自分でQCしない。最終チェックは Fable に反証させる
-・完了条件: python scripts/countermeasure_ledger.py と scripts/audit_countermeasures.py を実行し実出力を貼る
+・完了条件: python scripts/countermeasure_ledger.py と scripts/audit_countermeasures.py を実行し、回答には VERDICT 行だけを引用する
 正典: ~/.claude/CLAUDE.md の「再発防止策の実効性」ブロック"""
 
 

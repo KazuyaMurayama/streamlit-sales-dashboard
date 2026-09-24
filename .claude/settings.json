@@ -125,6 +125,14 @@
             "command": "P=$(command -v python3 || command -v python) || exit 0; exec \"$P\" .claude/hooks/evidence_table_guard.py"
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "P=$(command -v python3 || command -v python) || exit 0; exec \"$P\" .claude/hooks/response_length_guard.py"
+          }
+        ]
       }
     ],
     "Stop": [
@@ -169,6 +177,10 @@
           {
             "type": "command",
             "command": "P=$(command -v python3 || command -v python) || exit 0; exec \"$P\" .claude/hooks/summary_freshness_guard.py"
+          },
+          {
+            "type": "command",
+            "command": "P=$(command -v python3 || command -v python) || exit 0; exec \"$P\" .claude/hooks/response_length_guard.py"
           }
         ]
       }
@@ -179,6 +191,10 @@
           {
             "type": "command",
             "command": "P=$(command -v python3 || command -v python) || exit 0; exec \"$P\" .claude/hooks/reqspec_gate.py"
+          },
+          {
+            "type": "command",
+            "command": "P=$(command -v python3 || command -v python) || exit 0; exec \"$P\" .claude/hooks/response_length_guard.py"
           }
         ]
       }
