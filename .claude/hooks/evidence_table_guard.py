@@ -29,7 +29,8 @@ SKILL.md「判定できないものは REVIEW にする」）。
 CHECKS (per evidence row)
 -------------------------
   R1 identifier   PubMed URL / doi.org URL / PMID: / DOI: のいずれかが必要。
-                  「該当なし」「検証対象外」を含む行のみ免除。
+                  「検証対象外」を含む行と、探索記録「探索: <検索語> → N件」を持つ行のみ免除
+                  （2026-09-26: 「該当なし」単独の免除を廃止。探さずに済ませる抜け道のため）。
   R2 resolves     PubMed esummary / Crossref works で解決できること。      FAIL
   R3 author       行に書いた第一著者姓が解決結果の著者に含まれること。     FAIL
   R4 year         行に書いた年と解決結果の出版年が ±1 年以内。             FAIL
@@ -118,14 +119,49 @@ NOVELTY_VOCAB = {"通説", "再構成", "独自"}
 VERDICT_RANK = {"支持": 0, "部分支持": 1, "反証": 2, "未検証": 3, "検証対象外": 4}
 VERDICT_RANK_NAME = dict((v, k) for k, v in VERDICT_RANK.items())
 EFFECT_VOCAB = {"大", "中", "小", "ほぼゼロ", "不明", "不適用"}
-EXEMPT_RE = re.compile(r"該当なし|検証対象外|に同じ")
+EXEMPT_RE = re.compile(r"検証対象外|に同じ")
+# 2026-09-26 追加: 識別子の代わりに「探して見つからなかった記録」を認める。
+# 書式「探索: <検索語> → N件」。検索語と件数の両方が要る（「該当なし」とだけ書いて
+# 探さずに済ませる抜け道を塞ぐため、「該当なし」単独は免除しない）。
+# 較正（2026-09-26・全リポの科学系の表 18ファイル 269行）: 識別子なし 235行、
+# 「該当なし」だけで免除されていた行 0、探索記録のある行 0 → 既存ファイルの判定は変わらない。
+SEARCH_LOG_RE = re.compile(r"探索\s*[:：][^|]*?[→>]\s*\d+\s*件")
 PMID_RE = re.compile(r"pubmed\.ncbi\.nlm\.nih\.gov/(\d+)|\bPMID\s*[:：]?\s*(\d{6,9})", re.I)
 # 「DOI: 10.…」だけでなく「DOI 10.…」（コロン無し）も識別子として拾う。
 # 実測 2026-09-15: コロン無しで書いた Haber 1979 の DOI が抽出されず、
 # 「識別子なし」の偽 FAIL になった。
 # 終端は半角だけでなく全角の括弧・読点でも止める（実測 2026-09-15: 「DOI 10.…）も成人での」
 # まで DOI として拾い、Crossref 404 の偽 FAIL になった）。
-DOI_RE = re.compile(r"doi\.org/(10\.\d{4,9}/[^\s\)\]\|>）」』、。]+)|\bDOI\s*[:：]?\s*(10\.\d{4,9}/[^\s\)\]\|>）」』、。]+)", re.I)
+# DOI の境界（2026-09-27 に2回直した。tests/test_doi_extraction_invariant.py が全抽出器を同じ実DOI集で検査する）:
+#   - 本体は ASCII の非空白文字。括弧 ( ) と < > ; : を含みうる
+#     （Elsevier: 10.1016/0148-2963(91)90050-8、Wiley SICI: 10.1002/(SICI)1097-4679(199910)55:10<1243::AID-JCLP6>3.0.CO;2-N）
+#   - 全角文字（（）」、。等）・| ] " で終わる
+#   - 末尾の記号と、対応の取れない ) > は _trim_doi で剥がす（verify_citations.py の trim_url と同じ方針）
+# 旧版は ) と > で止めていたため括弧入り DOI を途中で切り、実在論文を「無い論文」と誤判定していた
+# （実レポート95本で壊れた DOI 69件）。
+_DOI_BODY = r'10\.\d{4,9}/[^\s"|\]\u3000-\uffff]+'
+DOI_RE = re.compile(r"doi\.org/(" + _DOI_BODY + r")|\bDOI\s*[:：]?\s*(" + _DOI_BODY + r")", re.I)
+
+
+def _trim_doi(d):
+    depth = 0
+    for i, ch in enumerate(d):          # 対応する ( の無い ) で切る（「...X)本文」の形）
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            if depth == 0:
+                d = d[:i]
+                break
+            depth -= 1
+    prev = None
+    while prev != d:
+        prev = d
+        d = d.rstrip(".,;:*_`'")
+        if d.endswith(")") and d.count(")") > d.count("("):
+            d = d[:-1]
+        if d.endswith(">") and d.count(">") > d.count("<"):
+            d = d[:-1]
+    return d
 CLAIM_ID_RE = re.compile(r"^\s*(C\d+'?)\s*$")
 YEAR_RE = re.compile(r"\b(19|20)\d{2}\b")
 # 第一著者姓 + 年 の並び（「Zell 2020」「von der Embse 2018」「Bangert-Drowns 2004」）
@@ -229,7 +265,7 @@ def extract_ids(cell_text):
     for m in PMID_RE.finditer(cell_text):
         ids.append(("pmid", m.group(1) or m.group(2)))
     for m in DOI_RE.finditer(cell_text):
-        d = (m.group(1) or m.group(2)).rstrip(".,;")
+        d = _trim_doi(m.group(1) or m.group(2))
         ids.append(("doi", d))
     return ids
 
@@ -370,7 +406,7 @@ def analyze(text, cache, resolver_pm=resolve_pmids, resolver_doi=resolve_doi):
         cid = row[i_id].strip("* ")
         seen_ids.add(cid)
         rowtext = " | ".join(row)
-        exempt = bool(EXEMPT_RE.search(rowtext))
+        exempt = bool(EXEMPT_RE.search(rowtext) or SEARCH_LOG_RE.search(rowtext))
         # R9 二軸の語彙（2026-09-18 追加）。判定列を持つ表すべてが対象＝製品系も含む。
         if i_verdict is not None:
             # 括弧の注記を先に落としてから強調記号を剥がす。逆順だと
@@ -393,7 +429,7 @@ def analyze(text, cache, resolver_pm=resolve_pmids, resolver_doi=resolve_doi):
             # R1 は科学系の表だけに課す。製品・実務系は一次資料が公式ドキュメントであり
             # PMID/DOI を持たない（課すと全行が偽 FAIL になる）。R9 の語彙検査は上で済んでいる。
             if not exempt and is_science_table:
-                fails.append("%s R1 識別子なし（PubMed/DOI の URL か PMID/DOI を書く。免除は「該当なし」「検証対象外」明記時のみ）" % cid)
+                fails.append("%s R1 識別子なし（PubMed/DOI の URL か PMID/DOI を書く。見つからない場合は scripts/evidence_search.py で探し「探索: <検索語> → N件」を書く。免除は「検証対象外」明記時のみ）" % cid)
             continue
         # R5 vocabulary（免除行以外）
         if not exempt:
@@ -454,7 +490,8 @@ def analyze(text, cache, resolver_pm=resolve_pmids, resolver_doi=resolve_doi):
             if r2.get("ok"):
                 row_recs.append(r2)
         # R6 numbers
-        nums = _row_numbers(rowtext)
+        # 行番号のセル（| 13 |）は数値照合の対象外（2026-09-27: 10行目以降だけが偽 FAIL になっていた）
+        nums = _row_numbers(" | ".join(c for j, c in enumerate(row) if j != i_id))
         abstracts = [r.get("abstract", "") or "" for r in row_recs]
         if nums:
             if not any(abstracts):
