@@ -143,16 +143,32 @@ _DOI_BODY = r'10\.\d{4,9}/[^\s"|\]\u3000-\uffff]+'
 DOI_RE = re.compile(r"doi\.org/(" + _DOI_BODY + r")|\bDOI\s*[:：]?\s*(" + _DOI_BODY + r")", re.I)
 
 
-def _trim_doi(d):
-    depth = 0
-    for i, ch in enumerate(d):          # 対応する ( の無い ) で切る（「...X)本文」の形）
+def _clean_doi(d):
+    """取り出した DOI 候補の後始末。3つの抽出器（evidence_table_guard / verify_citations /
+    check_citation_titles）で同一の本文を持ち、claude-governance/tests/test_doi_extraction_invariant.py が
+    同じ実在 DOI 集で検査する（2026-09-27 に Fable の攻撃的検証で6形が破れたため追加）。
+      - %3C 等の符号化を戻す（ブラウザから複写した SICI DOI）
+      - ?utm_source=... のクエリと #abstract のページ内リンクを落とす。
+        ただし Wiley SICI の検査文字 '#' 単独（...;2-#）は DOI の一部なので残す
+      - 対応の無い ) で切り、対応の無い ( の手前で切る（「DOI:10.x/y(注)」「...8(2026-09-27閲覧)」）
+      - 末尾の記号と、対応の取れない ) > を剥がす（<https://doi.org/...> の自動リンク）
+    """
+    d = urllib.parse.unquote(d)
+    d = re.split(r"[^!-~]", d, maxsplit=1)[0]   # 非ASCII（「閲覧」等の本文）の手前で切る。DOI は実用上 ASCII
+    d = re.sub(r"\?[A-Za-z_][\w.-]*=.*$", "", d)
+    d = re.sub(r"#[A-Za-z][\w-]+$", "", d)
+    opens = []
+    for i, ch in enumerate(d):
         if ch == "(":
-            depth += 1
+            opens.append(i)
         elif ch == ")":
-            if depth == 0:
+            if not opens:
                 d = d[:i]
                 break
-            depth -= 1
+            opens.pop()
+    else:
+        if opens:
+            d = d[:opens[0]]
     prev = None
     while prev != d:
         prev = d
@@ -162,6 +178,8 @@ def _trim_doi(d):
         if d.endswith(">") and d.count(">") > d.count("<"):
             d = d[:-1]
     return d
+
+
 CLAIM_ID_RE = re.compile(r"^\s*(C\d+'?)\s*$")
 YEAR_RE = re.compile(r"\b(19|20)\d{2}\b")
 # 第一著者姓 + 年 の並び（「Zell 2020」「von der Embse 2018」「Bangert-Drowns 2004」）
@@ -265,7 +283,7 @@ def extract_ids(cell_text):
     for m in PMID_RE.finditer(cell_text):
         ids.append(("pmid", m.group(1) or m.group(2)))
     for m in DOI_RE.finditer(cell_text):
-        d = _trim_doi(m.group(1) or m.group(2))
+        d = _clean_doi(m.group(1) or m.group(2))
         ids.append(("doi", d))
     return ids
 
