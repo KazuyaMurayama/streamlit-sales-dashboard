@@ -140,7 +140,9 @@ PMID_RE = re.compile(r"pubmed\.ncbi\.nlm\.nih\.gov/(\d+)|\bPMID\s*[:：]?\s*(\d{
 # 旧版は ) と > で止めていたため括弧入り DOI を途中で切り、実在論文を「無い論文」と誤判定していた
 # （実レポート95本で壊れた DOI 69件）。
 _DOI_BODY = r'10\.\d{4,9}/[^\s"|\u3000-\uffff]+'   # ] も本体に入れ、対応の無い ] は _clean_doi で切る
-DOI_RE = re.compile(r"doi\.org/(" + _DOI_BODY + r")|\bDOI\s*[:：]?\s*(" + _DOI_BODY + r")", re.I)
+# 接頭辞（DOI: / doi.org/）を要求しない。**DOI**: や `…` や ＤＯＩ： で接頭辞の照合が外れ、実在の DOI を
+# 「識別子なし」と誤判定していた（2026-09-27 Fable 第3回）。前が英数字・. - の位置からは始めない
+DOI_RE = re.compile(r"(?<![\w.\-])(" + _DOI_BODY + r")")
 
 
 def _prep_text(t):
@@ -149,10 +151,13 @@ def _prep_text(t):
       - Markdown のエスケープ \\( \\) \\[ \\] \\_ \\* を外す
       - %2F 等の符号化を戻す（/ まで符号化された DOI は、戻さないと正規表現に一致しない）
     """
-    t = re.sub(r"</?(?:br|sup|sub|span|b|i|em|strong|a)\b[^>]*>", " ", t, flags=re.I)
+    t = re.sub(r"</?(?:br|sup|sub|span|b|i|em|strong|code|td|th|tr|p|div|li)\b[^>]*>", " ", t, flags=re.I)
     t = re.sub(r"&[a-zA-Z]+;|&#\d+;", " ", t)
     t = re.sub(r"\\([()\[\]_*])", r"\1", t)
-    return urllib.parse.unquote(t)
+    t = re.sub(r"\[\^[^\]]*\]", " ", t)                        # 脚注 [^1]
+    t = urllib.parse.unquote(t)
+    t = re.sub(r"([,;])(?=\s*(?:https?://\S*?)?10\.\d{4,9}/)", r"\1 ", t)   # 「A,B」「A;B」を2つに分ける
+    return t
 
 
 def _clean_doi(d):
@@ -185,12 +190,30 @@ def _clean_doi(d):
     prev = None
     while prev != d:
         prev = d
-        d = d.rstrip(".,;:*_`'?")
+        d = d.rstrip(".,;:*_`'?!~")
         if d.endswith(")") and d.count(")") > d.count("("):
             d = d[:-1]
         if d.endswith(">") and d.count(">") > d.count("<"):
             d = d[:-1]
     return d
+
+
+def _doi_prefixes(d):
+    """照会で見つからなかった DOI 候補から、短い候補を長い順に返す（3つの抽出器で一字一句同じ）。
+    文章側の記号まで取り込んだ候補（…(2009)・…#・…?ref・….PMID:1 等）でも、本当の DOI は必ず先頭部分にある。
+    区切りになりうる記号の手前で切り、後始末してから試す。最大6件。見つかった DOI は元の候補と違うので、
+    呼び出し側は著者・年・題名の照合で別論文への取り違えを検出すること。
+    """
+    out = []
+    head = d.index("/") + 1
+    for i in range(len(d) - 1, head, -1):
+        if d[i] in "()[]<>,;.#?!~*_`'&:":
+            c = _clean_doi(d[:i])
+            if len(c) > head and c != d and c not in out:
+                out.append(c)
+        if len(out) >= 6:
+            break
+    return out
 
 
 CLAIM_ID_RE = re.compile(r"^\s*(C\d+'?)\s*$")
@@ -296,7 +319,7 @@ def extract_ids(cell_text):
     for m in PMID_RE.finditer(cell_text):
         ids.append(("pmid", m.group(1) or m.group(2)))
     for m in DOI_RE.finditer(_prep_text(cell_text)):
-        d = _clean_doi(m.group(1) or m.group(2))
+        d = _clean_doi(m.group(1))
         ids.append(("doi", d))
     return ids
 
@@ -340,8 +363,22 @@ def resolve_doi(doi, cache):
     if k in cache:
         return
     try:
-        m = json.loads(_get("https://api.crossref.org/works/" + urllib.parse.quote(doi)))["message"]
+        try:
+            m = json.loads(_get("https://api.crossref.org/works/" + urllib.parse.quote(doi)))["message"]
+        except urllib.error.HTTPError as e:
+            if e.code != 404:
+                raise
+            m = None
+            for cand in _doi_prefixes(doi):      # 文章側の記号の取り込み過ぎ（2026-09-27）
+                try:
+                    m = json.loads(_get("https://api.crossref.org/works/" + urllib.parse.quote(cand)))["message"]
+                    break
+                except urllib.error.HTTPError:
+                    continue
+            if m is None:
+                raise
         cache[k] = {
+            "doi_resolved": m.get("DOI", doi),
             "ok": True,
             "title": " ".join(m.get("title", [])),
             "year": str((m.get("issued", {}).get("date-parts", [[None]])[0][0]) or ""),
