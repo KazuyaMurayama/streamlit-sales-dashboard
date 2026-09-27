@@ -139,8 +139,20 @@ PMID_RE = re.compile(r"pubmed\.ncbi\.nlm\.nih\.gov/(\d+)|\bPMID\s*[:：]?\s*(\d{
 #   - 末尾の記号と、対応の取れない ) > は _trim_doi で剥がす（verify_citations.py の trim_url と同じ方針）
 # 旧版は ) と > で止めていたため括弧入り DOI を途中で切り、実在論文を「無い論文」と誤判定していた
 # （実レポート95本で壊れた DOI 69件）。
-_DOI_BODY = r'10\.\d{4,9}/[^\s"|\]\u3000-\uffff]+'
+_DOI_BODY = r'10\.\d{4,9}/[^\s"|\u3000-\uffff]+'   # ] も本体に入れ、対応の無い ] は _clean_doi で切る
 DOI_RE = re.compile(r"doi\.org/(" + _DOI_BODY + r")|\bDOI\s*[:：]?\s*(" + _DOI_BODY + r")", re.I)
+
+
+def _prep_text(t):
+    """DOI を探す前の下ごしらえ。3つの抽出器で一字一句同じ（2026-09-27 Fable 再攻撃で破れた形）。
+      - 表セルの HTML（<br> <sup> 等）と &nbsp; 等の実体参照を空白にする。SICI の <1243::AID-...> は残す
+      - Markdown のエスケープ \\( \\) \\[ \\] \\_ \\* を外す
+      - %2F 等の符号化を戻す（/ まで符号化された DOI は、戻さないと正規表現に一致しない）
+    """
+    t = re.sub(r"</?(?:br|sup|sub|span|b|i|em|strong|a)\b[^>]*>", " ", t, flags=re.I)
+    t = re.sub(r"&[a-zA-Z]+;|&#\d+;", " ", t)
+    t = re.sub(r"\\([()\[\]_*])", r"\1", t)
+    return urllib.parse.unquote(t)
 
 
 def _clean_doi(d):
@@ -156,23 +168,24 @@ def _clean_doi(d):
     d = urllib.parse.unquote(d)
     d = re.split(r"[^!-~]", d, maxsplit=1)[0]   # 非ASCII（「閲覧」等の本文）の手前で切る。DOI は実用上 ASCII
     d = re.sub(r"\?[A-Za-z_][\w.-]*=.*$", "", d)
-    d = re.sub(r"#[A-Za-z][\w-]+$", "", d)
-    opens = []
-    for i, ch in enumerate(d):
-        if ch == "(":
-            opens.append(i)
-        elif ch == ")":
-            if not opens:
-                d = d[:i]
-                break
-            opens.pop()
-    else:
-        if opens:
-            d = d[:opens[0]]
+    d = re.sub(r"#[A-Za-z][^#]*$", "", d)   # #page=3・#abstract 等。SICI の検査文字 #（英字が続かない）は残す
+    for op, cl in (("(", ")"), ("[", "]")):   # 角括弧入りの実DOI: 10.1175/1520-0493(1900)28[24:twotm]2.0.co;2
+        opens = []
+        for i, ch in enumerate(d):
+            if ch == op:
+                opens.append(i)
+            elif ch == cl:
+                if not opens:
+                    d = d[:i]
+                    break
+                opens.pop()
+        else:
+            if opens:
+                d = d[:opens[0]]
     prev = None
     while prev != d:
         prev = d
-        d = d.rstrip(".,;:*_`'")
+        d = d.rstrip(".,;:*_`'?")
         if d.endswith(")") and d.count(")") > d.count("("):
             d = d[:-1]
         if d.endswith(">") and d.count(">") > d.count("<"):
@@ -282,7 +295,7 @@ def extract_ids(cell_text):
     ids = []
     for m in PMID_RE.finditer(cell_text):
         ids.append(("pmid", m.group(1) or m.group(2)))
-    for m in DOI_RE.finditer(cell_text):
+    for m in DOI_RE.finditer(_prep_text(cell_text)):
         d = _clean_doi(m.group(1) or m.group(2))
         ids.append(("doi", d))
     return ids
