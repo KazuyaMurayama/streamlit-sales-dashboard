@@ -48,6 +48,10 @@ CHECKS (per evidence row)
                   して戻る往復が起きる）。統合表では各行が主張そのものなので
                   R8 は対象外。行順は有望順（判定→信頼度→効果量）で、
                   C 番号は本文参照用の ID として残す。
+  R9b band order  独自性列を持つ表で、判定バンドの逆転（未証拠の行が証明済みの
+                  行より上）を FAIL。ただし文書に「並び順: 本書の中心命題に近い順」
+                  と宣言した表は対象外（book_summary 2026-09-28 ユーザー指示:
+                  中心命題が検証対象外だと表の下に沈み、何の本か最初の数行で分からない）。
 
 SCOPE: 書き込まれた .md に、①「信頼度」＋「効果量」（科学系）または
        ②「判定」＋「独自性」（製品・実務系。2026-09-18 追加）をヘッダに持つ表がある場合。
@@ -118,6 +122,7 @@ VERDICT_VOCAB = {"支持", "部分支持", "反証", "未検証", "検証対象�
 NOVELTY_VOCAB = {"通説", "再構成", "独自"}
 VERDICT_RANK = {"支持": 0, "部分支持": 1, "反証": 2, "未検証": 3, "検証対象外": 4}
 VERDICT_RANK_NAME = dict((v, k) for k, v in VERDICT_RANK.items())
+CENTRAL_ORDER_RE = re.compile(r"並び順\s*[:：]\s*(?:本書の)?中心命題")
 EFFECT_VOCAB = {"大", "中", "小", "ほぼゼロ", "不明", "不適用"}
 EXEMPT_RE = re.compile(r"検証対象外|に同じ")
 # 2026-09-26 追加: 識別子の代わりに「探して見つからなかった記録」を認める。
@@ -586,9 +591,12 @@ def analyze(text, cache, resolver_pm=resolve_pmids, resolver_doi=resolve_doi):
     # 独自性列を持つ表＝二軸レポート（book/deck）のみが並び順の規約を持つ。
     # 判定列だけの表（既存の科学系フィクスチャ等）に課すと正当な表が FAIL する
     # （2026-09-18 実測: selftest 9/9 → 7/9）。
+    # 「並び順: 本書の中心命題に近い順」を宣言した文書は、判定ではなく本書での重みで並べる
+    # 規約なのでバンド順を課さない（book_summary 2026-09-28 ユーザー指示）。
     worst = -1
     worst_cid = None
-    for cid, vd in (verdict_seq if i_novel is not None else []):
+    band_rows = verdict_seq if (i_novel is not None and not CENTRAL_ORDER_RE.search(text)) else []
+    for cid, vd in band_rows:
         r = VERDICT_RANK.get(vd)
         if r is None:
             continue
@@ -669,6 +677,13 @@ def _selftest():
          "| # | 主張・推奨 | 位置 | 判定 | 代表論文 | 信頼度 | 効果量 | 要点 | URL |\n|---|---|---|---|---|---|---|---|---|\n"
          "| C14 | 自分を頭がいいと思う | [00:22:00] | 支持 | Zell 2020 Psychol Bull（メタ分析） | 高 | 大 | dz=0.78 | [PM](https://pubmed.ncbi.nlm.nih.gov/31789535/) |\n"
          "| C5 | 迷いは設計 | [00:08:00] | 検証対象外 | 該当なし | — | — | 比喩 | — |\n", 0, None),
+    ]
+    T = ("| # | 主張 | 独自性 | 判定 | 信頼度 | 効果量 | 根拠の要点 | 出典 |\n|---|---|---|---|---|---|---|---|\n"
+         "| 1 | 中心命題 | 独自 | 検証対象外 | 低 | 不適用 | 規範 | 著者の主張のみ |\n"
+         "| 2 | 平均以上効果 | 通説 | 支持 | 高 | 大 | dz=0.78 | Zell 2020 [PM](https://pubmed.ncbi.nlm.nih.gov/31789535/) |\n")
+    cases += [
+        ("red R9b: 宣言なしで検証対象外が支持より上", T, 1, "R9b"),
+        ("green R9b: 「並び順: 本書の中心命題に近い順」宣言ありは対象外", "並び順: 本書の中心命題に近い順\n\n" + T, 0, None),
     ]
     bad = 0
     for name, text, want_fail, tag in cases:
