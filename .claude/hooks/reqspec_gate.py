@@ -155,7 +155,7 @@ def main():
         me = os.path.abspath(__file__)
         local = os.path.abspath(os.path.join(
             (os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()), ".claude", "hooks", os.path.basename(__file__)))
-        if me != local and os.path.exists(local):
+        if os.path.normcase(me) != os.path.normcase(local) and os.path.exists(local):
             return
     except Exception:
         pass

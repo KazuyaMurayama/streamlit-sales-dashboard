@@ -273,7 +273,7 @@ def _registered_local_copy_exists():
         me = os.path.abspath(__file__)
         base = os.path.basename(__file__)
         local = os.path.abspath(os.path.join((os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()), ".claude", "hooks", base))
-        if me == local or not os.path.exists(local):
+        if os.path.normcase(me) == os.path.normcase(local) or not os.path.exists(local):
             return False
         for name in ("settings.json", "settings.local.json"):
             try:
