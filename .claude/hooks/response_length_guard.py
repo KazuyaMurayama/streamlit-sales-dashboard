@@ -491,7 +491,7 @@ def main():
     try:
         me = os.path.normcase(os.path.abspath(__file__))
         local = os.path.normcase(os.path.abspath(os.path.join(
-            os.getcwd(), ".claude", "hooks", os.path.basename(__file__))))
+            (os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()), ".claude", "hooks", os.path.basename(__file__))))
         if me != local and os.path.exists(local):
             return  # a repo-local copy is registered; let it run instead
     except Exception:

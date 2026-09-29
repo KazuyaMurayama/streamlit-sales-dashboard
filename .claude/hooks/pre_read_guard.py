@@ -120,7 +120,7 @@ if True:
 def main():
     try:
         me = os.path.abspath(__file__)
-        local = os.path.abspath(os.path.join(os.getcwd(), ".claude", "hooks", os.path.basename(__file__)))
+        local = os.path.abspath(os.path.join((os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()), ".claude", "hooks", os.path.basename(__file__)))
         if me != local and os.path.exists(local):
             return  # repo copy takes over; avoid double-firing with the global copy
     except Exception:

@@ -48,7 +48,7 @@ def main():
     # If a same-named repo-local copy exists and we are the global copy, defer to it.
     try:
         me = os.path.abspath(__file__)
-        local = os.path.abspath(os.path.join(os.getcwd(), ".claude", "hooks",
+        local = os.path.abspath(os.path.join((os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()), ".claude", "hooks",
                                             os.path.basename(__file__)))
         if me != local and os.path.exists(local):
             return

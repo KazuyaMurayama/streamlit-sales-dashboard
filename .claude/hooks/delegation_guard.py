@@ -22,9 +22,9 @@ either does the work itself, or keeps the request and labels it with the
 reason, e.g. 「（本人の判断）」「（権限）」「（本人のみ）」. A labelled request
 passes, so a legitimate question costs one short rewrite, not a loop.
 
-CALIBRATION (measured 2026-09-29, tests/calibrate_delegation_guard.py, 550
+CALIBRATION (measured 2026-09-29, tests/calibrate_delegation_guard.py, 418
 real instructions over 30 days, the hook's own decide() imported):
-    fires on 9.6% of answers; catches 9 of the 20 answers the user corrected
+    fires on 11.7% of answers; catches 9 of the 20 answers the user corrected
     as C03. Rejected wider sets: every 「〜してください」+decision requests
     42.5% (15/20); adding 「〜してください」 alone 15.8% (10/20); decision
     requests without a recommendation 21.1% (9/20, no gain).
@@ -51,37 +51,45 @@ TAIL_BYTES = 4 * 1024 * 1024
 STATE_DIR = os.path.join(os.path.expanduser("~"), ".claude", "state", NAME + "_seen")
 
 # Two shapes only. Broader patterns (any 「〜してください」 or any request for a
-# decision) fired on 42.5% of 550 real answers -- a guard that fires on half
+# decision) fired on 42.5% of real answers -- a guard that fires on half
 # of all answers is noise (calibration 2026-09-29, see WHY above).
 DELEGATE = re.compile(
-    # 1. a conditional offer: "tell me and I will do it"
-    r"(?:いただければ|いただけたら|頂ければ|もらえれば|もらえたら|くだされば|ご指示あれば|指示があれば|あれば)"
-    r"[^。\n]{0,20}(?:実施|実行|着手|進め|対応|作成|修正|反映|直し)"
+    # 1. a conditional offer addressed to the user: "tell me and I will do it".
+    #    Bare 「〜があれば修正する」 is NOT here: that is Claude's own plan.
+    r"(?:いただければ|いただけたら|頂ければ|もらえれば|もらえたら|くだされば|ご指示あれば|指示があれば"
+    r"|ご希望(?:が)?あれば|お申し付け)[^。]{0,20}(?:実施|実行|着手|進め|対応|作成|修正|反映|直し)"
     r"|(?:着手|実施|実行|進め|修正|対応)(?:して)?(?:も)?(?:よければ|よろしければ|いいなら)"
     r"|よければ一言|進めてよいか|進めてよろしいですか|実施してよいか"
     # 2. run-and-report: the user operates, Claude waits for the output
-    r"|(?:実行|試し|確認|開い|押し|起動|入れ|操作)[^。\n]{0,40}(?:結果|出力|表示|最終行|RESULT|エラー|届いたか|出たか|あるか|できたか)"
-    r"[^。\n]{0,30}(?:教えて|貼って|送って|返して|返信して|お知らせ)")
+    #    (may span a line break: 「1. 実行 / 2. 結果を貼ってください」)
+    r"|(?:実行|試し|確認|開い|押し|起動|入れ|操作)[^。]{0,60}(?:結果|出力|表示|最終行|RESULT|エラー|届いたか|出たか|あるか|できたか)"
+    r"[^。]{0,30}(?:教えて|貼って|送って|返して|返信して|お知らせ|ご共有|共有して)")
 LABEL = re.compile(r"（(?:権限|本人のみ|本人の判断|本人の意思決定|本人しか知らない)）"
                    r"|本人しか(?:知らない|できない)|権限が(?:ない|無い)|本人の意思決定")
 
 
 def closing(answer):
-    """The part of the answer that hands something over: the Next Action
-    paragraph if there is one, otherwise the last 300 characters."""
-    m = list(re.finditer(r"Next Action", answer or ""))
-    if m:
-        return answer[m[-1].start():]
-    return (answer or "")[-300:]
+    """The part of the answer that hands something over: from the last
+    「Next Action:」 label (at a line start) if there is one, otherwise the last
+    300 characters. Code blocks and 「quoted」 text are removed first -- an
+    answer that quotes a hand-off phrase is not making one."""
+    a = re.sub(r"```.*?```", " ", answer or "", flags=re.S)
+    a = re.sub(r"「[^」]{0,200}」", "「」", a)
+    m = list(re.finditer(r"(?m)^\W{0,4}Next Action\W{0,4}[:：]", a))
+    return a[m[-1].start():] if m else a[-300:]
 
 
 def decide(answer):
-    """Return the matched hand-off phrase, or None."""
+    """Return the matched hand-off phrase, or None. A run-and-report may span
+    a line break, so the whole closing is searched; a label excuses only the
+    sentence it sits in."""
     tail = closing(answer)
-    if LABEL.search(tail):
-        return None
-    hit = DELEGATE.search(tail)
-    return hit.group(0) if hit else None
+    for hit in DELEGATE.finditer(tail):
+        s = tail.rfind("。", 0, hit.start()) + 1
+        e = tail.find("。", hit.end())
+        if not LABEL.search(tail[s:e if e >= 0 else len(tail)]):
+            return hit.group(0)
+    return None
 
 
 def _text(msg):
@@ -97,6 +105,8 @@ def _is_prompt(d):
     """A prompt the user typed -- not a tool result or harness notification."""
     if d.get("type") != "user" or d.get("isSidechain") or not ("promptSource" in d or "permissionMode" in d):
         return False
+    if d.get("promptSource") == "system":     # subagent hand-backs, task notifications
+        return False
     c = (d.get("message") or {}).get("content")
     if isinstance(c, list) and any(isinstance(b, dict) and b.get("type") == "tool_result" for b in c):
         return False
@@ -105,12 +115,12 @@ def _is_prompt(d):
 
 
 def read_turn(tp):
-    """(last human prompt, final assistant text of this turn)."""
+    """(last human prompt, its timestamp, final assistant text of this turn)."""
     size = os.path.getsize(tp)
     with open(tp, "rb") as f:
         f.seek(max(0, size - TAIL_BYTES))
         data = f.read().decode("utf-8", "replace").splitlines()
-    prompt, answer = None, ""
+    prompt, pts, answer = None, "", ""
     for line in data:
         try:
             d = json.loads(line)
@@ -119,18 +129,18 @@ def read_turn(tp):
         if d.get("isSidechain"):
             continue
         if _is_prompt(d):
-            prompt, answer = _text(d.get("message")).strip(), ""
+            prompt, pts, answer = _text(d.get("message")).strip(), d.get("timestamp", ""), ""
         elif d.get("type") == "assistant":
             t = _text(d.get("message")).strip()
             if t:
                 answer = t
-    return prompt, answer
+    return prompt, pts, answer
 
 
 def main():
     try:
         me = os.path.abspath(__file__)
-        local = os.path.abspath(os.path.join(os.getcwd(), ".claude", "hooks", os.path.basename(__file__)))
+        local = os.path.abspath(os.path.join((os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()), ".claude", "hooks", os.path.basename(__file__)))
         if me != local and os.path.exists(local):
             return
     except Exception:
@@ -144,11 +154,13 @@ def main():
     tp = ev.get("transcript_path") or ""
     if not os.path.isfile(tp):
         return
-    prompt, answer = read_turn(tp)
+    prompt, pts, answer = read_turn(tp)
     hit = decide(answer) if prompt else None
     if not hit:
         return
-    key = hashlib.sha1((prompt or "").encode("utf-8", "replace")).hexdigest()[:16]
+    # keyed on the prompt's timestamp too: the same words sent again later
+    # (「再開して」) are a new instruction and must be checked again
+    key = hashlib.sha1((pts + (prompt or "")).encode("utf-8", "replace")).hexdigest()[:16]
     mark = os.path.join(STATE_DIR, "".join(ch for ch in (ev.get("session_id") or "x") if ch.isalnum() or ch in "-_") + "_" + key)
     if os.path.exists(mark):
         return          # already blocked once for this instruction
