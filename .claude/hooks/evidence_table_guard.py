@@ -61,6 +61,29 @@ NETWORK: PubMed E-utilities と Crossref。識別子ごとに1回、結果は
        ~/.claude/state/evidence_table_guard/cache.json に永続キャッシュ。
        ネットワーク不通で解決できない識別子は「未確認」＝ FAIL（cite_gate と同じ
        思想: 合格記録が無いものは通さない）。内部例外は FAIL-OPEN。
+       2026-09-29 改修（book_summary 段階4・28冊で実害3件）:
+         ① R6 の照合先に OpenAlex と PubMed の要旨を追加。Crossref は DOI の約53%
+            （キャッシュ実測 232/438）で要旨を持たず、正しい数値（Walter 2019 の
+            d=0.29・k=30・N=20,963 等）を FAIL にして執筆者に削らせていた。
+            Crossref にある値で足りないときだけ遅延取得する（通信を増やさない）。
+            要旨が増えると旧版の REVIEW が FAIL に変わるため、実コーパス42本で較正して
+            偽陽性の型を4つ潰した: 主張列の数値（本の主張であって論文の値ではない）、
+            「19世紀」、「30.9万人」（要旨は 308,849）、丸め（13.2 と 13.21）、
+            綴りの数（Seventy articles）。
+            独立QC（Fable 2026-09-29）で差し戻された2点も直した:
+            ・「要旨の無い論文を行に足すと FAIL が REVIEW に化ける」抜け道 → FAIL のまま、
+              その論文名を示して「本文値」の明記を促す（値を削らせない）。
+            ・429 の再送が1回の書き込みで数十回・数百秒に膨らみ、フックの60秒で殺されて
+              キャッシュも保存されない → 1プロセスの通信予算 NET_BUDGET 秒、未確認は
+              RETRY_AFTER_S 秒は再問い合わせしない。
+            丸めは「小数2桁以上 または 有効数字3桁以上」、万は「有効数字2桁以上」に限る
+            （0.3 が p = .254 に、1万 が 5,001〜14,999 に一致していた）。主張列は
+            統計記号（d= r= N= k= OR %）付きの数値だけ照合し、無ければ REVIEW。
+         ② HTTP 429（過負荷）・5xx は「無い論文」ではなく「未確認」。旧版は 429 を
+            ok=False で永続キャッシュし、実在論文を恒久的に R2 FAIL にしていた。
+            未確認（ok=None）はキャッシュから再試行し、_get は 429/5xx を短く再送する。
+         ③ タイトルの U+2010 等のハイフン（Meta‐analysis）を R7 で認識し、著者名の
+            ø・ö・é 等を「Surname YYYY」として拾い、Søgaard / Sogaard / Soegaard を同一視する。
 
 CALIBRATION (実測 2026-09-15): 本物の表（decks/CREATOR_BRAIN_40S_20260915-v2.md、
        主張 18 行・エビデンス 19 行・識別子 23 件）に対し、初版は FAIL 8（うち本物 0、
@@ -85,6 +108,8 @@ import os
 import re
 import sys
 import time
+import unicodedata
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -226,9 +251,32 @@ YEAR_RE = re.compile(r"\b(19|20)\d{2}\b")
 # 第一著者姓 + 年 の並び（「Zell 2020」「von der Embse 2018」「Bangert-Drowns 2004」）
 # 年の後ろに数字が続くもの（PMID 19231028 → 「PMID 1923」）は年ではない。
 # 実測 2026-09-15: この取り違えで偽 FAIL 1 件。識別子ラベルは著者名から除外する。
-AUTHOR_YEAR_RE = re.compile(r"(?<![A-Za-z])(?!(?:PMID|PMC|PMCID|DOI|ISBN)\b)"
-                            r"([A-Z][A-Za-z'\-]+(?:\s+(?:von|van|de|der|den|la|le)\s+[A-Z][A-Za-z'\-]+)?"
-                            r"|(?:von|van|de)\s+(?:der\s+)?[A-Z][A-Za-z'\-]+)\s+((?:19|20)\d{2})(?!\d)")
+# 2026-09-29: ø・ö・é・ł 等のラテン文字を姓に含める（旧版は「Søgaard 2019」を拾えず R3 REVIEW）。
+# CJK は含めない（「研究 2019」を姓と誤読しないため）。
+_LU = "A-Z\u00c0-\u00d6\u00d8-\u00de\u0100-\u017f"
+_LL = "A-Za-z\u00c0-\u00d6\u00d8-\u00f6\u00f8-\u00ff\u0100-\u017f'\u2019\\-"
+AUTHOR_YEAR_RE = re.compile(r"(?<![" + _LL + r"])(?!(?:PMID|PMC|PMCID|DOI|ISBN)\b)"
+                            r"([" + _LU + r"][" + _LL + r"]+(?:\s+(?:von|van|de|der|den|la|le)\s+[" + _LU + r"][" + _LL + r"]+)?"
+                            r"|(?:von|van|de)\s+(?:der\s+)?[" + _LU + r"][" + _LL + r"]+)\s+((?:19|20)\d{2})(?!\d)")
+_FOLD = {"\u2019": "'", "\u00f8": "o", "\u00e6": "ae", "\u0153": "oe", "\u00df": "ss", "\u0142": "l",
+         "\u0111": "d", "\u00f0": "d", "\u00fe": "th", "\u0131": "i"}
+_TRANSLIT = {"\u00f6": "oe", "\u00f8": "oe", "\u00fc": "ue", "\u00e4": "ae", "\u00e5": "aa"}
+
+
+def _surname_variants(s):
+    """Søgaard → {søgaard, sogaard, soegaard}。転写・記号落ちの表記ゆれで R3 を偽 FAIL にしない。"""
+    s = s.lower()
+    out = {s}
+    for table in (_TRANSLIT, {}):
+        t = "".join(table.get(c, c) for c in s)
+        t = "".join(_FOLD.get(c, c) for c in t)
+        t = "".join(c for c in unicodedata.normalize("NFKD", t) if not unicodedata.combining(c))
+        out.add(t)
+        out.add(t.replace("'", ""))           # O'Brien / OBrien
+    return out
+# 主張列のうち統計記号の付いた数値（d=0.44・N=99,999・OR 1.5・30%）
+CLAIM_STAT_RE = re.compile(r"(?<![A-Za-z])(?:[dgrkNnβ]\s*[=＝]|(?:OR|RR|HR|SMD)\s*[=＝:]?)\s*[−\-]?(\d[\d,]*(?:\.\d+)?|\.\d+)"
+                           r"|(\d+(?:\.\d+)?)\s*[%％]")
 # 行内の「原著に存在すべき数値」。年・タイムスタンプ・C番号は除外する。
 NUM_RE = re.compile(r"(?<![\d.:\[])(\d{1,3}(?:,\d{3})+|\d+\.\d+|\.\d+|\d+)(?![\d:\]])")
 
@@ -264,9 +312,60 @@ def _save_cache(c):
         pass
 
 
-def _get(url, timeout=40):
-    req = urllib.request.Request(url, headers=UA)
-    return urllib.request.urlopen(req, timeout=timeout).read().decode("utf-8", "replace")
+TRANSIENT = (429, 500, 502, 503, 504)
+# フックは既定60秒で殺され、殺されるとキャッシュも保存されない。通信は1プロセス合計でこの秒数まで。
+NET_BUDGET = 25.0
+RETRY_AFTER_S = 600          # 未確認（429・通信失敗）の再問い合わせまでの間隔
+_T0 = time.time()
+_THROTTLED = set()
+
+
+class NetBudgetExceeded(Exception):
+    pass
+
+
+def _remaining():
+    return NET_BUDGET - (time.time() - _T0)
+
+
+def _get(url, timeout=40, retries=2):
+    """429/5xx は短く再送する（2026-09-29: 一括照合で Crossref が 429 を返し、
+    その 429 が「無い論文」として永続キャッシュされていた）。待ちは Retry-After（上限5秒）。
+    通信予算を超えそうなら待たずに NetBudgetExceeded（呼び出し側で「未確認」になる）。"""
+    host = urllib.parse.urlsplit(url).netloc
+    for attempt in range(retries + 1):
+        if _remaining() <= 1.0:
+            raise NetBudgetExceeded("network budget %.0fs exhausted" % NET_BUDGET)
+        if host in _THROTTLED:
+            # このプロセスで一度 429/5xx を諦めたホストには以後問い合わせない（1件ずつ叩き続ける嵐を防ぐ）
+            raise NetBudgetExceeded("%s throttled earlier in this run" % host)
+        req = urllib.request.Request(url, headers=UA)
+        try:
+            return urllib.request.urlopen(req, timeout=min(timeout, max(1.0, _remaining()))).read().decode("utf-8", "replace")
+        except urllib.error.HTTPError as e:
+            if e.code not in TRANSIENT:
+                raise
+            if attempt == retries:
+                _THROTTLED.add(host)
+                raise
+            try:
+                wait = float(e.headers.get("Retry-After") or 0)
+            except Exception:
+                wait = 0
+            wait = min(max(wait, 1.0 + attempt), 5.0)
+            if wait >= _remaining() - 1.0:
+                _THROTTLED.add(host)
+                raise
+            time.sleep(wait)
+
+
+def _unconfirmed(err):
+    return {"ok": None, "err": err, "retry_at": time.time() + RETRY_AFTER_S}
+
+
+def _due(rec):
+    """キャッシュを使わず問い合わせるべきか: 未取得、または未確認で再試行時刻を過ぎたもの。"""
+    return rec is None or (rec.get("ok") is None and rec.get("retry_at", 0) <= time.time())
 
 
 # ----------------------------------------------------------------- parsing
@@ -331,7 +430,8 @@ def extract_ids(cell_text):
 
 # ----------------------------------------------------------------- resolvers
 def resolve_pmids(pmids, cache):
-    need = [p for p in pmids if "pmid:" + p not in cache]
+    # 未確認（ok=None: 通信失敗・429）は次回に再試行する。確定した結果だけを使い回す。
+    need = [p for p in pmids if _due(cache.get("pmid:" + p))]
     if need:
         try:
             j = json.loads(_get(EUTILS + "esummary.fcgi?db=pubmed&retmode=json&id=" + ",".join(need)))
@@ -351,7 +451,8 @@ def resolve_pmids(pmids, cache):
                 }
         except Exception as e:
             for p in need:
-                cache.setdefault("pmid:" + p, {"ok": None, "err": str(e)[:80]})
+                if (cache.get("pmid:" + p) or {}).get("ok") is None:
+                    cache["pmid:" + p] = _unconfirmed(str(e)[:80])
         # abstracts (batched)
         try:
             t = _get(EUTILS + "efetch.fcgi?db=pubmed&rettype=abstract&retmode=text&id=" + ",".join(need), 60)
@@ -365,7 +466,7 @@ def resolve_pmids(pmids, cache):
 
 def resolve_doi(doi, cache):
     k = "doi:" + doi.lower()
-    if k in cache:
+    if not _due(cache.get(k)):
         return
     try:
         try:
@@ -378,10 +479,17 @@ def resolve_doi(doi, cache):
                 try:
                     m = json.loads(_get("https://api.crossref.org/works/" + urllib.parse.quote(cand)))["message"]
                     break
-                except urllib.error.HTTPError:
+                except urllib.error.HTTPError as e2:
+                    if e2.code != 404:
+                        raise
                     continue
             if m is None:
-                raise
+                # Crossref 未登録の DOI（DataCite 等。実測 10.5281/zenodo.3233986）は OpenAlex で引く
+                oa = _openalex_work(doi)
+                if oa is None:
+                    raise
+                cache[k] = oa
+                return
         cache[k] = {
             "doi_resolved": m.get("DOI", doi),
             "ok": True,
@@ -393,9 +501,80 @@ def resolve_doi(doi, cache):
             "abstract": " ".join(re.sub(r"<[^>]+>", "", m.get("abstract", "")).split()),
         }
     except urllib.error.HTTPError as e:
-        cache[k] = {"ok": False, "err": "HTTP %s" % e.code}
+        # 「無い」と言えるのは 404/410 だけ。429・5xx は過負荷であって不在ではない
+        cache[k] = {"ok": False, "err": "HTTP %s" % e.code} if e.code in (404, 410) else _unconfirmed("HTTP %s" % e.code)
     except Exception as e:
-        cache[k] = {"ok": None, "err": str(e)[:80]}
+        cache[k] = _unconfirmed(str(e)[:80])
+
+
+def _openalex_abstract(j):
+    inv = (j or {}).get("abstract_inverted_index") or {}
+    pos = [(i, w) for w, idx in inv.items() for i in idx]
+    return " ".join(w for _, w in sorted(pos))
+
+
+def _pubmed_xml_abstract(x):
+    """efetch XML から AbstractText だけを取り出す（書誌行の巻号・頁・PMID を照合に混ぜない）。"""
+    body = " ".join(re.findall(r"<AbstractText[^>]*>(.*?)</AbstractText>", x or "", re.S))
+    return " ".join(re.sub(r"<[^>]+>", " ", body).split())
+
+
+def _openalex_work(doi):
+    """Crossref が 404 の DOI を OpenAlex で解決する。無ければ None（404 以外の失敗は例外のまま上げる）。"""
+    try:
+        j = json.loads(_get("https://api.openalex.org/works/doi:" + urllib.parse.quote(doi), 20, 1))
+    except urllib.error.HTTPError as e:
+        if e.code in (404, 410):
+            return None
+        raise
+    return {
+        "doi_resolved": doi, "ok": True, "source": "openalex",
+        "title": j.get("title") or j.get("display_name") or "",
+        "year": str(j.get("publication_year") or ""),
+        # display_name は「Given Family」。姓照合は部分一致なので順序は問わない
+        "authors": [((a.get("author") or {}).get("display_name") or "") for a in j.get("authorships", [])],
+        "pubtype": [j.get("type") or ""],
+        "journal": (((j.get("primary_location") or {}).get("source") or {}).get("display_name") or ""),
+        "abstract": _openalex_abstract(j),
+        "alt_checked": 0,
+    }
+
+
+def resolve_alt_abstracts(kind, v, cache):
+    """Crossref／esummary の要旨で足りないときの補助要旨（OpenAlex＋PubMed）。
+    両方とも応答が得られた時だけ alt_checked を立てる（通信失敗は次回に再試行）。"""
+    k = ("pmid:" + v) if kind == "pmid" else ("doi:" + v.lower())
+    rec = cache.get(k)
+    if not rec or not rec.get("ok") or rec.get("alt_checked") == 2 or rec.get("alt_retry_at", 0) > time.time():
+        return
+    texts, answered = [], 0
+    doi = rec.get("doi_resolved") or v
+    try:
+        key = ("pmid:" + v) if kind == "pmid" else ("doi:" + urllib.parse.quote(doi))
+        texts.append(_openalex_abstract(json.loads(_get("https://api.openalex.org/works/" + key, 20, 1))))
+        answered += 1
+    except urllib.error.HTTPError as e:
+        answered += e.code == 404
+    except Exception:
+        pass
+    try:
+        pmid = v if kind == "pmid" else None
+        if pmid is None:
+            j = json.loads(_get(EUTILS + "esearch.fcgi?db=pubmed&retmode=json&term="
+                                + urllib.parse.quote(doi + "[doi]"), 20, 1))
+            ids = j.get("esearchresult", {}).get("idlist", [])
+            pmid = ids[0] if len(ids) == 1 else None
+        if pmid:
+            # XML の AbstractText だけを使う（text 形式は書誌行の巻号・頁・PMID を含み、偶然一致で通してしまう）
+            texts.append(_pubmed_xml_abstract(_get(EUTILS + "efetch.fcgi?db=pubmed&retmode=xml&id=" + pmid, 30, 1)))
+        answered += 1
+    except Exception:
+        pass
+    rec["abstract_alt"] = " ".join(t for t in texts if t)
+    if answered == 2:
+        rec["alt_checked"] = 2  # 2 = XML の AbstractText 版
+    else:
+        rec["alt_retry_at"] = time.time() + RETRY_AFTER_S
 
 
 # ----------------------------------------------------------------- analysis
@@ -426,18 +605,70 @@ def _row_numbers(text):
     t = re.sub(r"(?<!\d)(19|20)\d{2}(?!\d)", " ", t)
     t = re.sub(r"95\s*[%％]\s*CI", " ", t)
     t = re.sub(r"\d+\s*[〜~～\-–]\s*\d+\s*(代|歳|年)", " ", t)
-    t = re.sub(r"\d+\s*(代|歳|年|か月|ヶ月|番目|位|点|つ|回|巡|周|本|章|節|時間|分|秒)(?![\d])", " ", t)
+    t = re.sub(r"\d+\s*(代|歳|年|か月|ヶ月|番目|位|点|つ|回|巡|周|本|章|節|時間|分|秒|世紀)(?![\d])", " ", t)
     nums = set()
     for m in NUM_RE.finditer(t):
         v = _norm_num(m.group(1))
+        rest = t[m.end():m.end() + 6].lstrip()
+        unit = rest[:1]
+        if unit in ("万", "億"):
+            # 「30.9万人」は要旨では 308,849。_abstract_has が丸めて照合する。
+            # 「3万人超」「3万以上」は下限の主張なので +（30,625 は 3万人超として正しい）
+            over = re.match(r"[万億][人件名例本社]?(超|以上|余)", rest)
+            nums.add(v + unit + ("+" if over else ""))
+            continue
         if v in ("0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10"):
             continue           # 単独の一桁・10 は列挙語（2本・3件）が多く検証キーにならない
         nums.add(v)
     return nums
 
 
+_ONES = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9,
+         "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15,
+         "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19}
+_TENS = {"twenty": 20, "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90}
+_WORDNUM_RE = re.compile(r"\b(" + "|".join(_TENS) + r")(?:[\s\-\u2010\u2011]+(" + "|".join(k for k in _ONES if _ONES[k] < 10) + r"))?\b"
+                         r"|\b(" + "|".join(k for k in _ONES if _ONES[k] >= 11) + r")\b", re.I)
+
+
+def _digitize_words(a):
+    """要旨の文頭では数を綴る（APA: "Seventy articles containing 147 tests"）。11〜99 を数字に直す。"""
+    def f(m):
+        if m.group(3):
+            return str(_ONES[m.group(3).lower()])
+        return str(_TENS[m.group(1).lower()] + (_ONES[m.group(2).lower()] if m.group(2) else 0))
+    return _WORDNUM_RE.sub(f, a)
+
+
 def _abstract_has(num, abstract):
-    a = abstract.replace(",", "")
+    a = _digitize_words(abstract.replace(",", ""))
+    if num.endswith(("万+", "億+")):
+        # 下限の主張（3万人超）: 書いた値以上・次の桁未満（3万人超 ← 30,625、31,000 は可、45,000 は不可）
+        digits = num[:-2]
+        base = 1e4 if num[-2] == "万" else 1e8
+        dec = len(digits.split(".")[1]) if "." in digits else 0
+        lo, hi = float(digits) * base, (float(digits) + 10 ** -dec) * base
+        return any(lo <= float(x) < hi for x in re.findall(r"(?<![\d.])\d{4,}(?:\.\d+)?(?![\d])", a))
+    if num[-1:] in ("万", "億"):
+        # 30.9万 ← 308849（書いた桁で丸めて一致）。有効数字1桁（1万・2万）は丸めを許さず完全一致のみ
+        # （1万 が 5,001〜14,999 に一致していた。Fable 2026-09-29）
+        base = 1e4 if num[-1] == "万" else 1e8
+        digits = num[:-1]
+        v = float(digits)
+        dec = len(digits.split(".")[1]) if "." in digits else 0
+        sig = len(digits.replace(".", "").lstrip("0"))
+        for x in re.findall(r"(?<![\d.])\d{4,}(?:\.\d+)?(?![\d])", a):
+            if (sig >= 2 and round(float(x) / base, dec) == v) or float(x) == v * base:
+                return True
+        return False
+    if re.fullmatch(r"\d+\.\d+", num) and (len(num.split(".")[1]) >= 2 or len(num.replace(".", "").lstrip("0")) >= 3):
+        # 丸め: 13.2 ← -13.21。書いた桁より細かい要旨の値が、書いた桁に丸まれば一致。
+        # 小数2桁以上か有効数字3桁以上に限る（0.3 が p = .254 に一致していた。Fable 2026-09-29）
+        dec = len(num.split(".")[1])
+        for x in re.findall(r"(?<![\d])\d*\.\d+(?![\d])", a):
+            xd = len(x.split(".")[1])
+            if xd > dec and abs(round(float(x), dec) - float(num)) < 10 ** -(dec + 3):
+                return True
     cands = {num}
     if re.fullmatch(r"0\.\d+", num):
         cands.add(num[1:])                      # .78
@@ -446,7 +677,7 @@ def _abstract_has(num, abstract):
     return any(re.search(r"(?<![\d.])" + re.escape(c) + r"(?![\d])", a) for c in cands)
 
 
-def analyze(text, cache, resolver_pm=resolve_pmids, resolver_doi=resolve_doi):
+def analyze(text, cache, resolver_pm=resolve_pmids, resolver_doi=resolve_doi, resolver_alt=resolve_alt_abstracts):
     """戻り値: (fails, reviews, stats)。"""
     fails, reviews = [], []
     claims, evidence = find_tables(text)
@@ -540,14 +771,16 @@ def analyze(text, cache, resolver_pm=resolve_pmids, resolver_doi=resolve_doi):
             surname = full.split()[-1].lower()
             yr = int(ystr)
             def _match(r):
-                auth = " ".join(r.get("authors", [])).lower()
+                auth = " ".join(_surname_variants(" ".join(r.get("authors", []))))
                 try:
                     ry = int(r.get("year") or 0)
                 except Exception:
                     ry = 0
-                return surname in auth and ry and abs(ry - yr) <= 1
+                return any(sv in auth for sv in _surname_variants(surname)) and ry and abs(ry - yr) <= 1
             if not any(_match(r) for r in resolved):
-                near = [r for r in resolved if surname in " ".join(r.get("authors", [])).lower()]
+                near = [r for r in resolved
+                        if any(sv in " ".join(_surname_variants(" ".join(r.get("authors", []))))
+                               for sv in _surname_variants(surname))]
                 if near:
                     fails.append("%s R4 年不一致: 「%s %d」に対し実際の出版年は %s 『%s』" %
                                  (cid, full, yr, near[0].get("year"), near[0].get("title", "")[:60]))
@@ -564,20 +797,50 @@ def analyze(text, cache, resolver_pm=resolve_pmids, resolver_doi=resolve_doi):
                 row_recs.append(r2)
         # R6 numbers
         # 行番号のセル（| 13 |）は数値照合の対象外（2026-09-27: 10行目以降だけが偽 FAIL になっていた）
-        nums = _row_numbers(" | ".join(c for j, c in enumerate(row) if j != i_id))
+        # 主張列の数値（「20%ルール」「摂氏37度」）は本の主張であって論文の値ではない（2026-09-29 較正）
+        i_claim = _col(header, "主張")
+        nums = _row_numbers(" | ".join(c for j, c in enumerate(row) if j != i_id and j != i_claim))
+        # ただし主張列でも統計記号付きの数値（d=0.44・N=99,999・30%）は照合する（無検査の通り道にしない）
+        claim_nums = set()
+        if i_claim is not None and i_claim < len(row) and i_claim != i_id:
+            for m in CLAIM_STAT_RE.finditer(row[i_claim]):
+                v = _norm_num(next(g for g in m.groups() if g))
+                if v not in nums:
+                    claim_nums.add(v)
         abstracts = [r.get("abstract", "") or "" for r in row_recs]
+        if nums and any(not any(_abstract_has(n, a) for a in abstracts if a) for n in nums):
+            # Crossref/esummary で足りないときだけ OpenAlex・PubMed の要旨を足す（①）
+            for kind2, v2 in ids:
+                try:
+                    resolver_alt(kind2, v2, cache)
+                except Exception:
+                    pass
+            abstracts = [" ".join(x for x in ((r.get("abstract") or ""), (r.get("abstract_alt") or "")) if x)
+                         for r in row_recs]
         if nums:
             if not any(abstracts):
                 reviews.append("%s R6 要旨が取得できず数値 %s を照合できない" % (cid, sorted(nums)))
             else:
                 missing = sorted(n for n in nums if not any(_abstract_has(n, a) for a in abstracts if a))
+                blind = [r.get("title", "")[:40] for r, a in zip(row_recs, abstracts) if not a]
                 if missing:
-                    msg = "%s R6 原著要旨に無い数値: %s（要旨に無い数値は書かない。本文から取ったなら「本文値」と明記。別論文の値なら、その論文の PMID/DOI を同じ行に書く）" % (cid, missing)
+                    # 要旨の無い論文を足しても FAIL のまま（REVIEW に逃がす抜け道にしない。Fable 2026-09-29）。
+                    # その論文の値なら、値を削らず「本文値」と明記するよう促す（正しい値を削らせた実害への対処）
+                    hint = ("。要旨を API で取得できない論文（%s）から取った値なら、値は削らず「本文値」と明記する"
+                            % " / ".join(blind)) if blind else ""
+                    msg = "%s R6 原著要旨に無い数値: %s（要旨に無い数値は書かない。本文から取ったなら「本文値」と明記。別論文の値なら、その論文の PMID/DOI を同じ行に書く%s）" % (cid, missing, hint)
                     (reviews if "本文値" in rowtext else fails).append(msg)
+        if claim_nums and any(abstracts):
+            cmiss = sorted(n for n in claim_nums if not any(_abstract_has(n, a) for a in abstracts if a))
+            if cmiss:
+                reviews.append("%s R6 主張列の統計値 %s が行内の論文の要旨に無い（本の主張の値なら問題ない。論文の値として書いたなら確認する）"
+                               % (cid, cmiss))
         # R7 design label: 行内のどれか1本が meta-analysis なら整合とみなす
         if "メタ分析" in rowtext or "メタアナリシス" in rowtext:
             def _is_meta(r):
                 pt = " ".join(r.get("pubtype", [])).lower() + " " + r.get("title", "").lower()
+                # U+2010 等のハイフン（Meta‐analysis）・「meta analysis」を同一視（③）
+                pt = re.sub("[\u2010-\u2015\u2212\u00ad]", "-", pt).replace("meta analy", "meta-analy")
                 return any(k in pt for k in ("meta-analy", "metaanaly", "metasynth", "quantitative review"))
             if not any(_is_meta(r) for r in row_recs):
                 reviews.append("%s R7 「メタ分析」と記載だが行内のどの論文も PublicationType/タイトルに meta-analysis が無い『%s』" %
@@ -687,7 +950,7 @@ def _selftest():
     ]
     bad = 0
     for name, text, want_fail, tag in cases:
-        fails, reviews, st = analyze(text, {}, pm, do)
+        fails, reviews, st = analyze(text, {}, pm, do, lambda *a: None)
         ok = (len(fails) == want_fail) and (tag is None or any(tag in f for f in fails))
         print(("PASS " if ok else "FAIL ") + name + ("" if ok else "  -> got %s" % fails))
         bad += 0 if ok else 1
