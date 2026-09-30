@@ -87,6 +87,15 @@
             "command": "P=$(command -v python3 || command -v python) || exit 0; exec \"$P\" .claude/hooks/deprecation_guard.py"
           }
         ]
+      },
+      {
+        "matcher": "Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "P=$(command -v python3 || command -v python) || exit 0; exec \"$P\" .claude/hooks/near_duplicate_guard.py"
+          }
+        ]
       }
     ],
     "PostToolUse": [
@@ -198,6 +207,10 @@
           {
             "type": "command",
             "command": "P=$(command -v python3 || command -v python) || exit 0; exec \"$P\" .claude/hooks/delegation_guard.py"
+          },
+          {
+            "type": "command",
+            "command": "P=$(command -v python3 || command -v python) || exit 0; exec \"$P\" .claude/hooks/near_duplicate_guard.py"
           }
         ]
       }

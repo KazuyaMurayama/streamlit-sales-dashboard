@@ -18,9 +18,13 @@ WHY（2026-09-29 依頼者指摘）
                 そのファイルを書き換える Bash/PowerShell は拒否する。
                 印の行だけを変える Edit は通す（依頼者が復活させると言ったとき）。
 
-廃盤の印（ファイルの先頭40行・行頭にあること。説明文中の引用で自分をロックしないため行頭に限る）:
-    ⛔ 廃盤（年-月-日）: <理由>。後継: <後継ファイル>      ← 日付は数字で書く
-    または front matter の行  status: deprecated
+廃盤の印（mark_in_text。near_duplicate_guard.py も同じ関数を import して使う）:
+    front matter の直後（無ければ先頭）の最初の非空行が
+        ⛔ 廃盤（年-月-日）: <理由>。後継: <後継ファイル>      ← 日付は数字で書く
+    または front matter の中の  status: deprecated
+    2026-09-30 に厳しくした: 以前は「先頭40行の行頭ならどこでも」だったため、本文35行目の印・
+    38行目の status: deprecated・規則を説明する文書の書式例までが「廃盤」扱いになり、
+    near_duplicate_guard の比較対象から消えていた（Fable 攻撃的検証）。
 
 較正（実測 2026-09-29, tests/calibrate_deprecation_guard.py）:
     直近60日の依頼者発言 1,692件に宣言判定をかけ、発火10件（0.59%）。該当は「ドラフト1は不要」
@@ -81,23 +85,47 @@ def _emit(obj):
     sys.stdout.buffer.flush()
 
 
+_MARK_BODY_RE = re.compile(r"^\s*(?:#|//|<!--|--|;)?\s*⛔\s*廃盤[（(]\d{4}-\d{2}-\d{2}[）)]")
+_FM_STATUS_RE = re.compile(r"^\s*status:\s*[\"']?(?:deprecated|廃盤)[\"']?\s*$", re.I)
+_PREAMBLE_RE = re.compile(r"^\s*(?:#!|#.*-\*-.*coding|#\s*coding[:=])")
+FM_MAX_LINES = 200
+
+
+def mark_in_text(text):
+    """印の位置を厳密に見る（2026-09-30 Fable 検証で「先頭40行の行頭ならどこでも」を改めた）。
+    有効なのは次の2つだけ:
+      ① front matter（先頭の --- から次の --- まで）の中の  status: deprecated
+      ② front matter の直後（無ければ先頭。shebang・coding 行は飛ばす）の最初の非空行が
+         ⛔ 廃盤（YYYY-MM-DD）… （コードのコメント記号 # // <!-- -- ; を前に置いてよい）
+    本文途中の印・規則を説明する文書の書式例・front matter 外の status 行は印ではない。
+    返り値: 印の行（⛔ 行があればそちらを優先）。無ければ None。"""
+    lines = (text or "").lstrip("﻿").split("\n")[:FM_MAX_LINES + HEAD_LINES]
+    i, fm_status = 0, None
+    if lines and lines[0].strip() == "---":
+        for j in range(1, min(len(lines), FM_MAX_LINES)):
+            if lines[j].strip() in ("---", "..."):
+                for ln in lines[1:j]:
+                    if _FM_STATUS_RE.match(ln):
+                        fm_status = ln.strip()
+                i = j + 1
+                break
+    while i < len(lines) and (not lines[i].strip() or _PREAMBLE_RE.match(lines[i])):
+        i += 1
+    if i < len(lines) and _MARK_BODY_RE.match(lines[i]):
+        return lines[i].strip()
+    return fm_status
+
+
 def mark_line(path):
-    """先頭 HEAD_LINES 行の行頭に廃盤の印があれば、その行を返す。無ければ None。"""
+    """ファイルに有効な廃盤の印（mark_in_text の基準）があれば、その行を返す。無ければ None。"""
     try:
         if not os.path.isfile(path):
             return None
         with io.open(path, encoding="utf-8", errors="replace") as f:
-            head = "".join(f.readline() for _ in range(HEAD_LINES))
+            head = "".join(f.readline() for _ in range(FM_MAX_LINES + HEAD_LINES))
     except Exception:
         return None
-    m = MARK_LINE_RE.search(head)
-    if not m:
-        return None
-    # status 行しか無いときは、本文の ⛔ 行があればそちらを示す（後継が書いてある）
-    for ln in head.split("\n"):
-        if re.match(r"^\s*⛔\s*廃盤", ln):
-            return ln.strip()
-    return head[m.start():].split("\n", 1)[0].strip()
+    return mark_in_text(head)
 
 
 def is_deprecation_request(text):
