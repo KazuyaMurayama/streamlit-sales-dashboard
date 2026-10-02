@@ -503,6 +503,224 @@ def read_turn(transcript_path):
     return None, list(reversed(calls))
 
 
+# ---- 1つの文書の中の「同じ対象を並べた表」の重複（2026-10-02 依頼者指摘） ----
+# WHY: 要レビュー一覧（Soulful-Content/_meta/REVIEW_REQUIRED_FILES_20260918.md）に、同じ記事を行に並べた表が
+#   2つ（§0「生きている原稿の一覧」記事|題名|状態 と「一覧表. ドラフト31本」記事|タイトル|最初の1文|重要メッセージ）
+#   あり、更新のたびに片方だけ直す・読み手が同じ情報を2度読む、が起きた。依頼者「似たような表を複数作るのは
+#   やめて。リポを限定せず、レポート全般に」。ファイル単位の重複（上）と同じクラスを、表の単位で塞ぐ。
+# 不変条件: 1つの .md の中に、同じ対象（行の見出しの値）を5件以上・小さい方の60%以上で共有する表を2つ置かない。
+#   列名・列の数・行の順・リンクの有無が違っても、行の見出しが同じ対象なら重複とみなす（列を足して1表にする）。
+#   見出しの列は固定しない（どの列でもよい）。値の種類が少ない列（判定・○×など）は見出しとみなさない。
+# 例外: 表の直前の行に <!-- dup-table-ok: 理由（10字以上） --> を書いた表は比べない（理由が無ければ無効）。
+# 止めるのは悪化したターンだけ（table_findings の docstring）。前からある重複は systemMessage で知らせる。
+# 較正（2026-10-02, tests/calibrate_duplicate_tables.py。48リポの直近30日・各最大50コミット）:
+#   止めたコミット 35/2,239（1.56%）。うち13件が狙った実例（要レビュー一覧の2つの表。2026-09-18 から
+#   10回の更新すべてで止まっていた）、ほかに BOOK12_TASKS の §1 と §4 の表（記事ID と「回」が両方にある）、
+#   book_summary/tasks.md、同じカメラ仕様の2表、など。灰色は happiness-system/DAILY_UPDATES.md の日次ログ
+#   7件（日ごとの表に同じファイルが並ぶ。スクリプトの自動生成で Claude のターン外なので Stop は動かない）。
+#   HEAD の表を含む .md 1,800本のうち重複の表あり 115本（6.39%＝既存の負債。触っても悪化しなければ止めない）。
+# 攻撃検証（2026-10-02, Sonnet。scratchpad の attack_tables.py。依頼者「Fable はほぼ使わない」により Sonnet）:
+#   初版は見逃し 15/17（2列の表を列数だけで外していた・短い値を比べていなかった）→ 直して 4/17、誤検知 0/11。
+#   残る穴: HTML の <table>、行と列を入れ替えた表、5行未満の重複（5→3 にすると誤検知が 1/11、負債が 6.3%→10.7% に増える）。
+DUP_MIN_SHARED = 5
+DUP_RATIO = 0.6
+DUP_OK = re.compile(r"<!--\s*dup-table-ok\s*[:：]\s*(.{10,}?)\s*-->")
+_TBL_SEP = re.compile(r"^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$")
+_LINK = re.compile(r"\[([^\]]*)\]\(([^)\s]*)[^)]*\)")
+_FENCE = re.compile(r"^\s*(```|~~~)")
+_NUMERIC = re.compile(r"^[\d.,]+(?:[a-z%万億円件人年月日倍点]{0,3})$")
+
+
+def _cells(line):
+    s = line.strip()
+    if s.startswith("|"):
+        s = s[1:]
+    if s.endswith("|") and not s.endswith("\\|"):
+        s = s[:-1]
+    return [c.strip() for c in re.split(r"(?<!\\)\|", s)]
+
+
+def _cell_keys(cell):
+    """セルを比べるための値。リンクは表示文字列と、リンク先の最後の部分の両方。"""
+    out = set()
+    for txt, url in _LINK.findall(cell):
+        for v in (txt, url.rstrip("/").split("/")[-1].split("#")[0]):
+            v = _NONWORD.sub("", unicodedata.normalize("NFKC", v).lower())
+            if len(v) >= 3:
+                out.add(v)
+    plain = _NONWORD.sub("", unicodedata.normalize("NFKC", _LINK.sub(r"\1", cell)).lower())
+    if len(plain) >= 3:
+        out.add(plain)
+    return out
+
+
+def md_tables(text):
+    """[(開始行番号1始まり, 見出し行, [行のセル並び], 例外の理由, 表の中身の crc32)]。コードブロックの中は見ない。"""
+    lines = text.splitlines()
+    out, i, fence = [], 0, False
+    while i < len(lines):
+        if _FENCE.match(lines[i]):
+            fence = not fence
+            i += 1
+            continue
+        if (not fence and "|" in lines[i] and i + 1 < len(lines) and _TBL_SEP.match(lines[i + 1])):
+            head = _cells(lines[i])
+            j, rows = i + 2, []
+            while j < len(lines) and "|" in lines[j] and lines[j].strip():
+                rows.append(_cells(lines[j]))
+                j += 1
+            k = i - 1
+            while k >= 0 and not lines[k].strip():
+                k -= 1
+            m = DUP_OK.search(lines[k]) if k >= 0 else None
+            sig = zlib.crc32(chr(10).join(x.strip() for x in lines[i:j]).encode("utf-8"))
+            out.append((i + 1, head, rows, m.group(1) if m else None, sig))
+            i = j
+            continue
+        i += 1
+    return out
+
+
+def _key_columns(rows):
+    """見出しになり得る列 = 値が5種以上で、行の8割以上が互いに違う列。[(列番号, {行番号: 値の集合})]。"""
+    ncol = max((len(r) for r in rows), default=0)
+    cols = []
+    for c in range(ncol):
+        vals = {n: _cell_keys(r[c]) for n, r in enumerate(rows) if c < len(r)}
+        vals = {n: v for n, v in vals.items() if v and not all(_NUMERIC.match(k) for k in v)}
+        distinct = {frozenset(v) for v in vals.values()}
+        if len(distinct) >= DUP_MIN_SHARED and len(distinct) >= 0.8 * len(vals):
+            cols.append((c, vals))
+    return cols
+
+
+def _match(a, b):
+    """セルどうしが同じ対象か: 値のどれかが一致、または短い方（4字以上）が長い方（40字以下）に含まれる。
+    長い方の上限は、説明文のセル（「nt-007 の見出し…／nt-010 の…」）が中の ID で見出しの列に一致するのを防ぐため。"""
+    for x in a:
+        for y in b:
+            if x == y:
+                return True
+            s, l = (x, y) if len(x) <= len(y) else (y, x)
+            if len(s) >= 4 and len(l) <= 40 and s in l:
+                return True
+    return False
+
+
+def _norm_cell(cell):
+    return _NONWORD.sub("", unicodedata.normalize("NFKC", _LINK.sub(r"", cell)).lower())
+
+
+def _similar(x, y):
+    """見出し以外のセルが同じ情報か（片方だけ直して古くなった版も拾うため、完全一致でなく文字2-gramの重なり）。"""
+    if not x or not y:
+        return False
+    if x == y:
+        return True
+    if min(len(x), len(y)) < 8 or _NUMERIC.match(x) or _NUMERIC.match(y):
+        return False  # 短い値・数字は完全一致だけ（200万円/300万円、1962/1912 を同じとみなさない）
+    ga = {x[k:k + 2] for k in range(len(x) - 1)}
+    gb = {y[k:k + 2] for k in range(len(y) - 1)}
+    return len(ga & gb) / float(len(ga | gb)) >= 0.6
+
+
+def _shared_info(rows_a, rows_b, pairs, ka, kb):
+    """対応する行で、見出し以外の列に同じ情報（同じ値）が入っている列の組があるか。半分以上の行で似ていれば有り。"""
+    na = max((len(r) for r in rows_a), default=0)
+    nb = max((len(r) for r in rows_b), default=0)
+    for i in range(na):
+        if i == ka:
+            continue
+        for j in range(nb):
+            if j == kb:
+                continue
+            vals = [(_norm_cell(rows_a[x][i]) if i < len(rows_a[x]) else "",
+                     _norm_cell(rows_b[y][j]) if j < len(rows_b[y]) else "") for x, y in pairs]
+            vals = [(u, v) for u, v in vals if u and v]
+            sim = sum(1 for u, v in vals if _similar(u, v))
+            if sim >= DUP_MIN_SHARED and sim >= 0.6 * len(vals):
+                return True
+    return False
+
+
+def duplicate_tables(text):
+    """同じ対象の同じ情報を並べた表の組 [(行A, 行B, 共有数, 小さい方の行数)]。
+    条件: ①見出しの列どうしで、同じ対象が5件以上・小さい方の60%以上 ②その対象の行で、見出し以外にも
+    同じ情報の列がある（＝同じ値が2か所にあり、片方だけ直すと食い違う）。②が無い表（同じ項目名で別の対象を
+    説明する仕様の表、同じ対象の別の指標の表）は重複に数えない。"""
+    return [h[:4] for h in _dup_pairs(text)]
+
+
+GENERIC_KEY_HEAD = {"項目", "項", "内容", "属性", "要素", "パラメータ", "パラメーター", "設定", "指標", "条件", "仕様",
+                    "軸", "観点", "区分", "item", "field", "property", "key", "attribute", "parameter", "name"}
+
+
+def _generic_head(head):
+    """「項目|内容」の形（1行＝1属性で、別々の物を同じ項目名で説明する表）か。見出し列の列名で判定する。"""
+    return bool(head) and _NONWORD.sub("", unicodedata.normalize("NFKC", head[0]).lower()) in GENERIC_KEY_HEAD
+
+
+def _dup_pairs(text):
+    """duplicate_tables の中身。各組に (行A, 行B, 共有数, 小さい方, 表Aの crc32, 表Bの crc32)。
+    2列だけの表どうしで、見出しの列名が「項目」「条件」等の汎用語の組（1行＝1属性で、別々の製品・人物を
+    同じ項目名で説明する表）は比べない（2026-10-02 攻撃検証で、列数だけで外すと2列の一覧表の重複を12件見逃した）。"""
+    tbls = [t for t in md_tables(text) if not t[3]]
+    keyed = [(t[0], t[2], _key_columns(t[2]), t[4], max((len(r) for r in t[2]), default=0)) for t in tbls]
+    out = []
+    for x in range(len(keyed)):
+        for y in range(x + 1, len(keyed)):
+            la, ra, ca, sa, wa = keyed[x]
+            lb, rb, cb, sb, wb = keyed[y]
+            if wa <= 2 and wb <= 2 and _generic_head(tbls[x][1]) and _generic_head(tbls[y][1]):
+                continue
+            best = None
+            for ka, va in ca:
+                for kb, vb in cb:
+                    pairs = []
+                    for na, a in va.items():
+                        nb = next((n for n, b in vb.items() if _match(a, b)), None)
+                        if nb is not None:
+                            pairs.append((na, nb))
+                    small = min(len(va), len(vb))
+                    if (len(pairs) >= DUP_MIN_SHARED and len(pairs) >= DUP_RATIO * small
+                            and (not best or len(pairs) > best[2]) and _shared_info(ra, rb, pairs, ka, kb)):
+                        best = (la, lb, len(pairs), small, sa, sb)
+            if best:
+                out.append(best)
+    return out
+
+
+def table_findings(text, head_text):
+    """(止める組, 知らせるだけの組)。止めるのは、このターンで悪化したときだけ:
+    ①ファイルが新しい（HEAD に無い） ②重複の組が HEAD より増えた ③重複の組のどちらかの表を、このターンで
+    変えた（片方の表だけ直して食い違う、が起きる場面そのもの）。HEAD から変わらない古い重複は知らせるだけ
+    （1行直すために長い文書の表の統合を強いない。既存の負債 2.3% のファイルを触るたびに止めると形骸化する）。"""
+    cur = _dup_pairs(text)
+    if not cur:
+        return [], []
+    if head_text is None:
+        return [c[:4] for c in cur], []
+    head_sigs = {t[4] for t in md_tables(head_text)}
+    if len(cur) > len(_dup_pairs(head_text)) or any(c[4] not in head_sigs or c[5] not in head_sigs for c in cur):
+        return [c[:4] for c in cur], []
+    return [], [c[:4] for c in cur]
+
+
+def _fmt_tables(hits):
+    lines = []
+    for path, la, lb, shared, small in hits[:8]:
+        lines.append("  - %s: %d行目の表と %d行目の表が同じ対象を %d件共有（小さい方 %d件）" % (path, la, lb, shared, small))
+    if len(hits) > 8:
+        lines.append("  ほか %d 組" % (len(hits) - 8))
+    return "\n".join(lines)
+
+
+TABLE_RESOLVE = (
+    "解消法: 2つの表を1つにまとめる（列を足す）。消す側の表の列で必要なものは残す表へ移し、"
+    "消す側は削除する。本当に別物（例: 期間の違う集計）なら、片方の表の直前の行に "
+    "<!-- dup-table-ok: 理由（10字以上） --> を書く。")
+
+
 def _fmt_pairs(root_pairs):
     lines = []
     for a, b, m in root_pairs[:8]:
@@ -541,7 +759,7 @@ def on_stop(ev):
         r = _git_root(p)
         if r and r not in roots:
             roots.append(r)
-    found, cut = [], []
+    found, cut, tbl_block, tbl_warn = [], [], [], []
     for root in roots:
         if time.time() > deadline:
             cut.append((root, -1))
@@ -549,6 +767,20 @@ def on_stop(ev):
         targets = changed_files(root, since)
         if not targets:
             continue
+        for rel in targets:
+            if os.path.splitext(rel)[1].lower() not in (".md", ".markdown"):
+                continue
+            try:
+                with io.open(os.path.join(root, rel), encoding="utf-8", errors="replace") as fh:
+                    text = fh.read()
+            except Exception:
+                continue
+            if mark_in_text(text) or "|" not in text:
+                continue
+            head = _git(root, ["show", "HEAD:" + rel.replace("\\", "/")])
+            b, w = table_findings(text, head)
+            tbl_block += [(os.path.join(root, rel),) + x for x in b]
+            tbl_warn += [(os.path.join(root, rel),) + x for x in w]
         pairs, skipped = find_pairs(root, targets, deadline)
         found += [(os.path.join(root, a), os.path.join(root, b), m) for a, b, m in pairs]
         if skipped:
@@ -559,6 +791,14 @@ def on_stop(ev):
             TIME_BUDGET, "、".join("%s 残り%s" % (r, ("%dファイル" % n) if n >= 0 else "全部") for r, n in cut))
         sys.stderr.buffer.write((note + "\n").encode("utf-8"))
         sys.stderr.buffer.flush()
+    if tbl_block:
+        _record_firing("near_duplicate_guard", ev)
+        _emit({"decision": "block", "reason": (
+            "【同じ対象・同じ情報の表が1つの文書に2つ】このターンで作成・変更した文書に、同じ対象を行に並べ、"
+            "同じ値を持つ表が2つ以上ある。直すたびに片方しか直らず、読み手は同じ情報を2度読む"
+            "（2026-10-02 依頼者指摘。要レビュー一覧の「生きている原稿の一覧」と「一覧表」の実例）。\n"
+            + _fmt_tables(tbl_block) + "\n" + TABLE_RESOLVE)})
+        return
     if found:
         _record_firing("near_duplicate_guard", ev)
         _emit({"decision": "block", "reason": (
@@ -566,6 +806,10 @@ def on_stop(ev):
             "同じリポにある。版管理せずに2つ置くと、修正のたびに片方しか直らない"
             "（2026-09-30 依頼者指摘。nt-040 の原稿と投稿用、計画書 v1/v2 の実例）。\n"
             + _fmt_pairs(found) + "\n" + RESOLVE + (("\n" + note) if note else ""))})
+    elif tbl_warn:
+        _emit({"systemMessage": "⚠ near_duplicate_guard: このターンで触った文書に、前からある重複の表がある"
+               "（このターンでは悪化していないので止めない）。1つの表にまとめることを勧める。\n"
+               + _fmt_tables(tbl_warn)})
     elif cut:
         # 黙って通さない: 見られなかったことを利用者に見える形で知らせる（止めはしない）
         _record_firing("near_duplicate_guard", ev)
