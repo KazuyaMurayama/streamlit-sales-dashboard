@@ -156,7 +156,8 @@ def _read_turn(transcript_path):
 
     user_idx = [i for i, r in enumerate(rows)
                 if r.get("type") == "user" and _text(r)
-                and _tc.strip_wrappers(_text(r)).strip()]   # skip machine rows (2026-10-02)
+                and not _tc.is_machine_row(r)              # skip machine rows (2026-10-02)
+                and _tc.strip_wrappers(_text(r)).strip()]
     if not user_idx:
         return None, [], ""
     start = user_idx[-1]

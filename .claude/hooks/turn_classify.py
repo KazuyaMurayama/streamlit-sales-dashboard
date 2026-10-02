@@ -60,12 +60,31 @@ _WRAP = (
     # row. review_gate anchored its self-review to a subagent's report instead
     # of the user's question, so the review checked the answer against nothing
     # the user asked. These carry no user requirement.
-    r"\AAnother Claude session sent a message:.*\Z",
+    # Fallback only (transcripts without the structural fields below). Tag
+    # blocks are stripped, never a whole message: a user who pastes hook output
+    # and adds "this is a false positive" must keep their own words.
     r"<agent-message[^>]*>.*?</agent-message>",
     r"<task-notification>.*?</task-notification>",
-    r"\AStop hook feedback:.*\Z",
-    r"\A\[SYSTEM NOTIFICATION[^\]]*\].*\Z",
 )
+
+
+def is_machine_row(row):
+    """True for transcript "user" rows the harness wrote, not the human.
+
+    Measured 2026-10-02 on a real transcript: subagent hand-backs carry
+    origin.kind == "peer" and isMeta; background-task notices carry
+    origin.kind == "task-notification"; Stop-hook feedback carries isMeta.
+    Human prompts carry origin.kind == "human" and no isMeta. Structural
+    fields are used instead of matching text so a pasted hook message typed
+    by the user is still treated as the user's request.
+    """
+    try:
+        if row.get("isMeta"):
+            return True
+        kind = (row.get("origin") or {}).get("kind")
+        return kind in ("peer", "task-notification")
+    except Exception:
+        return False
 
 # Continuation utterances: carry no new requirements, must not re-trigger.
 CONTINUATION = {
