@@ -55,6 +55,16 @@ _WRAP = (
     r"<command-args>.*?</command-args>",
     r"<ide_selection>.*?</ide_selection>",
     r"<user-prompt-submit-hook>.*?</user-prompt-submit-hook>",
+    # Machine-generated user rows (2026-10-02): a subagent hand-back, a
+    # background-task notification, or Stop-hook feedback arrives as a "user"
+    # row. review_gate anchored its self-review to a subagent's report instead
+    # of the user's question, so the review checked the answer against nothing
+    # the user asked. These carry no user requirement.
+    r"\AAnother Claude session sent a message:.*\Z",
+    r"<agent-message[^>]*>.*?</agent-message>",
+    r"<task-notification>.*?</task-notification>",
+    r"\AStop hook feedback:.*\Z",
+    r"\A\[SYSTEM NOTIFICATION[^\]]*\].*\Z",
 )
 
 # Continuation utterances: carry no new requirements, must not re-trigger.

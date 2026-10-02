@@ -84,6 +84,8 @@ LATENT = (
                "数値には成立前提を併記／表示値は有効数字4桁"),
     ("push", "成果物3列表（成果物・説明・リンク）とURL存在確認（git ls-tree で blob 確認）"),
     ("numbers", "パラメータのbare表記禁止（初出時に「何が・どの条件で・どうなる」を1文添える）"),
+    ("numbers", "差・倍率・変化量は基準とセットで（ポイント差なら基準側の率、倍率なら分母）。"
+                "読者が数値を解釈・判断するのに足りない説明（基準・分母・単位・比較対象・前提）が無いか"),
     ("git", "完了＝main へマージ済み＆push済み。ブランチに成果物を残さない"),
 )
 
@@ -153,7 +155,8 @@ def _read_turn(transcript_path):
         return c if isinstance(c, str) else None
 
     user_idx = [i for i, r in enumerate(rows)
-                if r.get("type") == "user" and _text(r)]
+                if r.get("type") == "user" and _text(r)
+                and _tc.strip_wrappers(_text(r)).strip()]   # skip machine rows (2026-10-02)
     if not user_idx:
         return None, [], ""
     start = user_idx[-1]
