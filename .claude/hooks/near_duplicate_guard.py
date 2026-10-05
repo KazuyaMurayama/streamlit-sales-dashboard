@@ -522,6 +522,13 @@ def read_turn(transcript_path):
 # 攻撃検証（2026-10-02, Sonnet。scratchpad の attack_tables.py。依頼者「Fable はほぼ使わない」により Sonnet）:
 #   初版は見逃し 15/17（2列の表を列数だけで外していた・短い値を比べていなかった）→ 直して 4/17、誤検知 0/11。
 #   残る穴: HTML の <table>、行と列を入れ替えた表、5行未満の重複（5→3 にすると誤検知が 1/11、負債が 6.3%→10.7% に増える）。
+# 改訂（2026-10-05, 依頼者指摘: 上位15の表と全51行の表を見逃した）:
+#   ①行名の表記揺れ（文字2-gram 包含 0.6 以上。両方に番号があって違えば別物）②対応する行は最も近いものを選ぶ
+#   ③定数・2値の列（担当=経理、確信度=中）は同じ情報に数えない（Fable 攻撃検証で誤検知 13/15 の主因→4/15）。
+#   再較正（同条件）: 止めたコミット 30/2,262（1.33%）→ 28/2,262（1.24%）。新たに止めるのは狙った実例
+#   deep-research ea33aa2 など。外れたのは機種が1つも重ならないカメラ仕様2表（以前はリンク文字列の多対一で誤検知）
+#   と happiness-system の日次ログの一部。負債 112/1,911（5.86%）→ 122/1,908（6.39%）。
+#   Fable 攻撃で残る穴: 英日・略称、4字ラベル vs 40字超の説明、数値の単位表記違い、接頭辞だけ共有する別物（人口/面積）。
 DUP_MIN_SHARED = 5
 DUP_RATIO = 0.6
 DUP_OK = re.compile(r"<!--\s*dup-table-ok\s*[:：]\s*(.{10,}?)\s*-->")
@@ -595,16 +602,44 @@ def _key_columns(rows):
 
 
 def _match(a, b):
-    """セルどうしが同じ対象か: 値のどれかが一致、または短い方（4字以上）が長い方（40字以下）に含まれる。
-    長い方の上限は、説明文のセル（「nt-007 の見出し…／nt-010 の…」）が中の ID で見出しの列に一致するのを防ぐため。"""
+    return _match_score(a, b) > 0
+
+
+def _match_score(a, b):
+    """セルどうしが同じ対象か。1.0＝値のどれかが一致、または短い方（4字以上）が長い方（40字以下）に含まれる。
+    長い方の上限は、説明文のセル（「nt-007 の見出し…／nt-010 の…」）が中の ID で見出しの列に一致するのを防ぐため。
+    0〜1＝表記揺れの近さ（下の FUZZY_*）。0＝別の対象。対応する行は点の最も高いものを選ぶ。"""
+    best = 0.0
     for x in a:
         for y in b:
             if x == y:
-                return True
+                return 1.0
             s, l = (x, y) if len(x) <= len(y) else (y, x)
             if len(s) >= 4 and len(l) <= 40 and s in l:
-                return True
-    return False
+                return 1.0
+            ds, dl = _DIGITS.findall(s), _DIGITS.findall(l)
+            if len(s) >= FUZZY_MIN and len(l) <= FUZZY_MAX and (not ds or not dl or ds == dl):
+                c = _bigram_contain(s, l)
+                if c >= FUZZY_CONTAIN and c > best:
+                    best = c
+    return best
+
+
+# 表記の揺れ（言い換え・括弧の補足・語順）でも同じ対象とみなす（2026-10-05 追加）。
+# 実例: 上位15の表「本を閉じて要点を思い出す（想起練習）」と全51行の表「…（想起練習・自己テスト）」。
+# 完全一致と部分一致だけだと15行中3行しか対応せず、同じ値（E/I/X/総合）を持つ2つの表を見逃した。
+# 正しい対応の文字2-gram包含率は 0.72〜1.00、2番目の候補は 0.08〜0.36（同じ文書の実測）→ 閾値 0.6。
+FUZZY_MIN = 6
+FUZZY_MAX = 120
+FUZZY_CONTAIN = 0.6
+_DIGITS = re.compile(r"\d+")  # 両方に番号があって違えば別の対象（nt-002 と nt-003）。片方だけの番号（「#3 想起練習」）は比べない
+
+
+def _bigram_contain(s, l):
+    """短い方 s の文字2-gram のうち、長い方 l にもあるものの割合。"""
+    gs = {s[k:k + 2] for k in range(len(s) - 1)}
+    gl = {l[k:k + 2] for k in range(len(l) - 1)}
+    return len(gs & gl) / float(len(gs)) if gs else 0.0
 
 
 def _norm_cell(cell):
@@ -637,6 +672,8 @@ def _shared_info(rows_a, rows_b, pairs, ka, kb):
             vals = [(_norm_cell(rows_a[x][i]) if i < len(rows_a[x]) else "",
                      _norm_cell(rows_b[y][j]) if j < len(rows_b[y]) else "") for x, y in pairs]
             vals = [(u, v) for u, v in vals if u and v]
+            if len({u for u, _ in vals}) < 3:
+                continue  # 定数・2値の列（担当=経理、確信度=中）は対象を区別する情報でない（2026-10-05 攻撃検証で誤検知 13/15 の主因）
             sim = sum(1 for u, v in vals if _similar(u, v))
             if sim >= DUP_MIN_SHARED and sim >= 0.6 * len(vals):
                 return True
@@ -678,9 +715,9 @@ def _dup_pairs(text):
                 for kb, vb in cb:
                     pairs = []
                     for na, a in va.items():
-                        nb = next((n for n, b in vb.items() if _match(a, b)), None)
-                        if nb is not None:
-                            pairs.append((na, nb))
+                        sc = max(((_match_score(a, b), n) for n, b in vb.items()), default=(0, None))
+                        if sc[0] > 0:
+                            pairs.append((na, sc[1]))
                     small = min(len(va), len(vb))
                     if (len(pairs) >= DUP_MIN_SHARED and len(pairs) >= DUP_RATIO * small
                             and (not best or len(pairs) > best[2]) and _shared_info(ra, rb, pairs, ka, kb)):
