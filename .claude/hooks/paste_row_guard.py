@@ -23,28 +23,54 @@ row IS the data, followed only by the separator line:
     | 2026-10-05 | 563 | 14032666 | 18210541 |  | 9560 | memo |
     |---|---|---|---|---|---|---|
 
-WHAT IT DOES
-------------
-Only when a prose line of the final answer offers sheet paste content -- a
-paste word (貼|コピペ|ペースト|paste) and a sheet word (シート|スプレッドシート|
-Sheets|セル|列|N行) on the SAME line -- the table or code block next to that
-line (the first one below it, at most 3 prose lines away and not past a
-heading) is checked for:
-  1. a code block with a delimited row: an inner TAB, or 3+ separators of
-     「;」「,」 or 2+ spaces on a line that is not code;
-  2. a Markdown table with >= 1 body row (rows after the separator).
-Either one blocks the stop ONCE per instruction with the required format.
-Blocks ABOVE the line are not checked: a closing 「上の1行を貼って」 sits next
-to the 成果物 table, and the paste block itself is always introduced by a
-line above it.
+WHAT IT DOES (v2, 2026-10-05, after an adversarial review)
+----------------------------------------------------------
+v1 required the paste word and the sheet word on the SAME line and checked
+only the block right below it, in the LAST assistant message. An independent
+review (Fable) built 16 realistic failures and 9 legitimate answers: v1
+missed 15/16 and blocked 7/9. v2 therefore works on the whole turn and keys
+on the shape of the DATA, not on the wording around it:
 
-CALIBRATION (measured 2026-10-05, tests/calibrate_paste_row_guard.py, real
-transcripts in ~/.claude/projects, the hook's own decide() imported):
-    last 30 days : 376 answers, paste-offer lines in 5, fired 3 (0.80%)
-    last 120 days: 1257 answers, fired 3 (0.24%)
-All 3 firings are the 3 answers the user corrected on 2026-10-05 (recall
-3/3, 0 false positives). The first version also fired on 「309行」 (a file's
-line count) and 「文字列」 -- the sheet words were narrowed to remove both.
+TRIGGER (turn level): the user prompt or this turn's assistant text has a
+sheet word (シート|スプレッドシート|Sheets|spreadsheet|セル|Positions) AND the
+assistant text has an offer word (貼|コピペ|ペースト|入力|記入|追加|copy|paste).
+"This turn" = every assistant message since the last user prompt, joined:
+the paste row may sit in a mid-turn message under a short closing message.
+
+Then EVERY table, code block, inline code span, 4-space-indented line and
+column-letter bullet list in the turn is inspected. Only DATA ROWS count:
+  - table row  : first cell is a date (YYYY-MM-DD / YYYY/MM/DD). Generic
+                 analysis tables (CAGR/MaxDD, 成果物/リンク) are not data rows.
+  - code / inline / indented line: split by TAB, or by , ; | ｜ into >= 3
+                 fields, and either date-first or a majority of numbers.
+                 Fenced blocks tagged js/gs/sh/py/... are skipped; a line
+                 that is not date-first is skipped when it looks like code
+                 (call syntax, = , trailing ;, function/var/...).
+BLOCK when:
+  1. a table has a data row as a BODY row (header + >= 1 body row), incl.
+     pipe rows with no separator at all and full-width ｜ tables;
+  2. a header-only table of column names is followed by a table carrying
+     data (column names split off into their own table);
+  3. a data row sits in code / inline code / an indented block (only when
+     the turn has a paste word proper: 貼|コピペ|ペースト|copy|paste);
+  4. the cells are given one by one: a bullet list (- A: 2026-10-05 / - B:
+     563 ...) or a vertical table (| A | 入力日 | 2026-10-05 |, 3+ rows).
+A header-only table whose header IS the data row passes -- that is the
+required format. Blocks ONCE per instruction.
+
+CALIBRATION (measured 2026-10-05, tests/calibrate_paste_row_guard.py: every
+real main-agent turn in ~/.claude/projects, rebuilt as the hook sees it, the
+hook's own explain() imported; every fire hand-labelled):
+    30 days : 376 turns, triggered 57 (15.2%), fired 4 (1.06%)  TP 4 / FP 0
+    120 days: 1257 turns, triggered 226 (18.0%), fired 4 (0.32%) TP 4 / FP 0
+The 4 fires: the 3 answers corrected on 2026-10-05, and a TAB row on
+2026-09-28 (「そのままコピペできるやつ出力して」) -- the same defect, earlier.
+The first v2 draft fired 9 times over 120 days with 5 FP: a diff hunk
+(1,1368c1,1370), a yen amount (7,730,000円) and 3 sheet LOG rows quoted in
+code blocks as evidence in turns that said 入力/追加 but offered no paste.
+Hence NOT_A_ROW and the paste-word requirement for code rows.
+v1 (a4c742d, same-line trigger) on the same tests: 11/34 -- all 15
+adversarial failures and the mid-turn case missed, all 7 legit answers blocked.
 
 Deployed from claude-governance/templates/hooks/ -- edit there, not here.
 """
@@ -65,95 +91,184 @@ NAME = "paste_row_guard"
 TAIL_BYTES = 4 * 1024 * 1024
 STATE_DIR = os.path.join(os.path.expanduser("~"), ".claude", "state", NAME + "_seen")
 
-PASTE = re.compile(r"貼|コピペ|ペースト|paste", re.I)
-# 「行」 alone would match 実行/行う/銀行 and 「列」 alone 配列/行列/文字列 -- both
-# are restricted to their sheet senses. In calibration 「309行」 (a file's line
-# count) and 「文字列」 fired, so only 1行/一行/N行目 count, and 字列 is excluded.
-SHEET = re.compile(r"シート|スプレッドシート|Sheets?\b|セル"
-                   r"|(?<![配行並系序直羅字])列(?!挙)"
-                   r"|(?<![0-9０-９])[1１一]行(?!数)|[0-9０-９一二三]行目"
-                   r"|(?:上の|下の|次の|同じ|空い(?:てい)?る|最終|新しい|各|値の)行")
+SHEET = re.compile(r"シート|スプレッドシート|Sheets?\b|spreadsheet|セル|Positions", re.I)
+OFFER = re.compile(r"貼|コピペ|ペースト|入力|記入|追加|copy|paste", re.I)
+# Code / inline rows need a paste word proper: in calibration, sheet LOG rows
+# quoted in code blocks as evidence (「2026-09-09|status|line|ok|...」) fired in
+# turns that only said 入力/追加 -- the user was not being handed a row.
+PASTE_OFFER = re.compile(r"貼|コピペ|ペースト|copy|paste", re.I)
+NOT_A_ROW = re.compile(r"^[+\-−]?[¥$￥]?\d{1,3}(?:,\d{3})+(?:\.\d+)?\S{0,3}$"     # 7,730,000円
+                       r"|^\d+(?:,\d+)?[acd]\d+(?:,\d+)?$"                       # diff hunk 1,1368c1,1370
+                       r"|^@@ ")
 FENCE = re.compile(r"^\s{0,3}(```+|~~~+)\s*([\w+-]*)")
-SEP_ROW = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)*\|?\s*$")
-CODE_LINE = re.compile(r"[={}]|=>|\b(?:function|var|let|const|return|def|import|if|for)\b")
-GAP = 3          # prose lines allowed between the paste line and its block
+CODE_LANGS = {"js", "gs", "javascript", "ts", "typescript", "sh", "bash", "zsh", "shell", "console",
+              "py", "python", "powershell", "ps1", "pwsh", "json", "sql", "yaml", "yml", "html",
+              "css", "diff", "mermaid", "java", "go", "rust", "c", "cpp", "ruby"}
+PIPE = "|｜"
+SEP_CELL = re.compile(r"^\s*:?[-－ー—]{3,}:?\s*$")
+DATE = re.compile(r"^\d{4}[-/年]\d{1,2}[-/月]\d{1,2}日?$")
+NUM = re.compile(r"^[+\-−]?[¥$￥]?\d[\d,]*(?:\.\d+)?(?:%|円|万|株|枚|ドル)?$")
+CODE_SYNTAX = re.compile(r"\b[A-Za-z_][\w.]*\(.*\)|;\s*$|(?<![<>!=])=(?!=)|\b(?:function|var|let|const|def|import|return)\b|=>")
+LETTER_ITEM = re.compile(r"^\s*[-*・]\s*([A-Z]{1,2})(?:列)?\s*[:：=]\s*(.*)$")
 
 
-def _blocks(answer):
-    """Split the answer into ('prose', line) / ('code', lines) / ('table', rows)
-    items, in order."""
-    lines = (answer or "").replace("\r\n", "\n").split("\n")
-    items, i = [], 0
+def _cells(line):
+    s = line.strip()
+    if s and s[0] in PIPE:
+        s = s[1:]
+    if s and s[-1] in PIPE:
+        s = s[:-1]
+    return [c.strip() for c in re.split(r"[|｜]", s)]
+
+
+def _is_sep(line):
+    cs = _cells(line)
+    return bool(cs) and all(SEP_CELL.match(c) for c in cs if c != "") and any(c for c in cs)
+
+
+def _date_first(cells):
+    vals = [c.strip("*` ") for c in cells]
+    return bool(vals) and bool(DATE.match(vals[0]))
+
+
+def _data_fields(fields):
+    """>= 3 fields and date-first or mostly numbers."""
+    f = [x.strip().strip("\"'") for x in fields]
+    if len(f) < 3:
+        return False
+    if DATE.match(f[0]):
+        return True
+    nonempty = [x for x in f if x]
+    return len(nonempty) >= 3 and sum(1 for x in nonempty if NUM.match(x) or DATE.match(x)) * 2 > len(nonempty)
+
+
+def _splits(line):
+    """Every way of cutting the line into >= 3 fields (TAB, | ｜, comma, semicolon).
+    All are tried: a memo field with 「1,425株」 must not hide a ;-separated row."""
+    s = line.strip()
+    out = []
+    for sep in ("\t", r"[|｜]", ",", ";"):
+        parts = re.split(sep, s)
+        if sep == r"[|｜]":
+            parts = [p for i, p in enumerate(parts) if not (p.strip() == "" and i in (0, len(parts) - 1))]
+        if len(parts) >= 3:
+            out.append(parts)
+    return out
+
+
+def _data_line(line):
+    """A code-like line carrying a delimited data row?"""
+    s = line.strip()
+    if not s or NOT_A_ROW.match(s):
+        return False
+    cuts = _splits(s)
+    if any(DATE.match(f[0].strip().strip("\"'")) for f in cuts):
+        return True                     # a date-first row is data even if the memo has (...)
+    if CODE_SYNTAX.search(s):
+        return False
+    return any(_data_fields(f) for f in cuts)
+
+
+def scan(text):
+    """Split the turn's text into tables, code lines and bullet groups."""
+    lines = (text or "").replace("\r\n", "\n").split("\n")
+    tables, code, prose, bullets = [], [], [], []
+    i = 0
+    cur_b = []
     while i < len(lines):
-        m = FENCE.match(lines[i])
+        ln = lines[i]
+        m = FENCE.match(ln)
         if m:
-            fence, body, i = m.group(1), [], i + 1
+            fence, lang = m.group(1), (m.group(2) or "").lower()
+            body = []
+            i += 1
             while i < len(lines) and not lines[i].strip().startswith(fence[:3]):
                 body.append(lines[i])
                 i += 1
-            items.append(("code", body))
             i += 1
+            if lang not in CODE_LANGS:
+                code.extend(body)
             continue
-        if lines[i].lstrip().startswith("|") and i + 1 < len(lines) and SEP_ROW.match(lines[i + 1]):
-            rows = [lines[i]]
-            i += 2
-            while i < len(lines) and lines[i].lstrip().startswith("|"):
-                rows.append(lines[i])
+        st = ln.strip()
+        if st and st[0] in PIPE:
+            run = []
+            while i < len(lines) and lines[i].strip() and lines[i].strip()[0] in PIPE:
+                run.append(lines[i])
                 i += 1
-            items.append(("table", rows))
+            # split the run into tables: a row followed by a separator starts one
+            k = 0
+            while k < len(run):
+                if k + 1 < len(run) and _is_sep(run[k + 1]):
+                    header, body = _cells(run[k]), []
+                    k += 2
+                    while k < len(run) and not (k + 1 < len(run) and _is_sep(run[k + 1])):
+                        if not _is_sep(run[k]):
+                            body.append(_cells(run[k]))
+                        k += 1
+                    tables.append((header, body))
+                else:               # pipe rows with no separator: every row is a body row
+                    body = []
+                    while k < len(run) and not (k + 1 < len(run) and _is_sep(run[k + 1])):
+                        if not _is_sep(run[k]):
+                            body.append(_cells(run[k]))
+                        k += 1
+                    tables.append((None, body))
             continue
-        items.append(("prose", lines[i]))
+        if re.match(r"^(?: {4,}|\t)\S", ln) and not re.match(r"^\s*(?:[-*+]|\d+\.)\s", ln):
+            code.append(ln)
+        else:
+            prose.append(ln)
+        mb = LETTER_ITEM.match(ln)
+        if mb:
+            cur_b.append(mb.group(2).strip())
+        elif st:
+            if len(cur_b) >= 3:
+                bullets.append(cur_b)
+            cur_b = []
         i += 1
-    return items
+    if len(cur_b) >= 3:
+        bullets.append(cur_b)
+    for ln in prose:
+        for span in re.findall(r"`([^`\n]+)`", ln):
+            code.append(span)
+    return tables, code, bullets
 
 
-def _is_paste_line(line):
-    s = re.sub(r"「[^」]{0,200}」|`[^`]*`", " ", line)   # quoted / inline code is not an offer
-    return bool(PASTE.search(s) and SHEET.search(s))
+def triggered(text, prompt=""):
+    t = re.sub(r"```.*?```", " ", text or "", flags=re.S)   # offer words inside code do not count
+    return bool((SHEET.search(prompt or "") or SHEET.search(text or "")) and OFFER.search(t))
 
 
-def _code_problem(body):
-    for ln in body:
-        s = ln.strip()
-        if not s or "|" in s:
-            continue
-        if re.search(r"\S\t", ln):
-            return "コードブロック内のタブ区切り行"
-        if CODE_LINE.search(s):
-            continue
-        for sep, label in ((";", "セミコロン"), (",", "カンマ"), (r" {2,}", "空白")):
-            if len(re.findall(sep, s)) >= 3:
-                return "コードブロック内の%s区切り行" % label
-    return None
+def explain(text, prompt=""):
+    """(description of the broken paste format, the offending row) or (None, None)."""
+    if not triggered(text, prompt):
+        return None, None
+    tables, code, bullets = scan(text)
+    for n, (header, body) in enumerate(tables):
+        for r in body:
+            if _date_first(r):
+                return "列名行のある表・複数行の表（データ行が本体行になっている）", " | ".join(r)
+        if header is not None and not body and not _date_first(header) and len(header) >= 2:
+            nxt = tables[n + 1] if n + 1 < len(tables) else None
+            if nxt and ((nxt[0] and _date_first(nxt[0])) or any(_date_first(r) for r in nxt[1])):
+                return "列名だけの表とデータの表に分かれた形", " | ".join(header)
+        # the cells given one per row: | A | 入力日 | 2026-10-05 | ... (a vertical sheet row)
+        rows = [r for r in body if r]
+        if len(rows) >= 3 and sum(1 for r in rows if re.match(r"^[A-Z]{1,2}(?:列)?$", r[0])) >= 3                 and any(DATE.match(c) or NUM.match(c) for r in rows for c in r[1:]):
+            return "セルを1行ずつ縦に並べた表", " / ".join(" | ".join(r) for r in rows[:3])
+    strong = PASTE_OFFER.search(re.sub(r"```.*?```", " ", text or "", flags=re.S))
+    for ln in (code if strong else []):
+        if _data_line(ln):
+            return "コードブロック・インラインコード内の区切り行", ln.strip()
+    for b in bullets:
+        if sum(1 for v in b if DATE.match(v) or NUM.match(v)) * 2 > len(b):
+            return "セルごとの箇条書き", " / ".join(b[:4])
+    return None, None
 
 
-def decide(answer):
+def decide(text, prompt=""):
     """Return a short description of the broken paste format, or None."""
-    items = _blocks(answer)
-    for i, (kind, val) in enumerate(items):
-        if kind != "prose" or not _is_paste_line(val):
-            continue
-        cands = []
-        gap = 0                                   # the block below the line
-        for k in range(i + 1, len(items)):
-            kk, vv = items[k]
-            if kk != "prose":
-                cands.append(items[k])
-                break
-            if vv.lstrip().startswith("#"):
-                break
-            if vv.strip():
-                gap += 1
-                if gap > GAP:
-                    break
-        for kk, vv in cands:
-            if kk == "code":
-                p = _code_problem(vv)
-                if p:
-                    return p
-            elif kk == "table" and len(vv) > 1:
-                return "列名行や複数行のある表（本体 %d 行）" % (len(vv) - 1)
-    return None
+    return explain(text, prompt)[0]
 
 
 def _text(msg):
@@ -179,12 +294,12 @@ def _is_prompt(d):
 
 
 def read_turn(tp):
-    """(last human prompt, its timestamp, final assistant text of this turn)."""
+    """(last human prompt, its timestamp, ALL assistant text of this turn joined)."""
     size = os.path.getsize(tp)
     with open(tp, "rb") as f:
         f.seek(max(0, size - TAIL_BYTES))
         data = f.read().decode("utf-8", "replace").splitlines()
-    prompt, pts, answer = None, "", ""
+    prompt, pts, parts = None, "", []
     for line in data:
         try:
             d = json.loads(line)
@@ -193,19 +308,19 @@ def read_turn(tp):
         if d.get("isSidechain"):
             continue
         if _is_prompt(d):
-            prompt, pts, answer = _text(d.get("message")).strip(), d.get("timestamp", ""), ""
+            prompt, pts, parts = _text(d.get("message")).strip(), d.get("timestamp", ""), []
         elif d.get("type") == "assistant":
             t = _text(d.get("message")).strip()
             if t:
-                answer = t
-    return prompt, pts, answer
+                parts.append(t)
+    return prompt, pts, "\n\n".join(parts)
 
 
 REASON = ("【貼り付け形式の検査（1回のみ）】シートに貼る内容が%sになっている。"
           "スマホの Google Sheets ではタブ区切りのコードブロックは1セルにまとまり、"
           "列名行のある表は列名まで1行として貼られる（2026-10-05 に2回指摘）。"
           "貼る行は、データそのものを見出し行にした1行だけの Markdown 表にし、その下は区切り行だけにすること"
-          "（列名行・本体行・コードブロックは使わない）。例:\n"
+          "（列名行・本体行・コードブロック・箇条書きは使わない）。例:\n"
           "| 2026-10-05 | 563 | 14032666 | 18210541 |  | 9560 | メモ |\n"
           "|---|---|---|---|---|---|---|\n"
           "空欄の列は「|  |」で残す。列の説明が必要なら表の外に文章で書く。この形式で回答し直せ。")
@@ -228,8 +343,8 @@ def main():
     tp = ev.get("transcript_path") or ""
     if not os.path.isfile(tp):
         return
-    prompt, pts, answer = read_turn(tp)
-    hit = decide(answer) if prompt else None
+    prompt, pts, text = read_turn(tp)
+    hit = decide(text, prompt) if prompt else None
     if not hit:
         return
     key = hashlib.sha1((pts + (prompt or "")).encode("utf-8", "replace")).hexdigest()[:16]
