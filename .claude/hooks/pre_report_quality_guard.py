@@ -435,14 +435,24 @@ def main():
             except Exception:
                 struct = []
 
-        if len(f_after) <= len(f_before) and not struct:
-            return  # regression-only: pre-existing debt never blocks
-
-        seen = set(f_before)
-        added = [x for x in f_after if x not in seen]
+        # regression-only: 既存の負債では止めない。悪化の判定は件数ではなく
+        # 「行番号を除いた所見（値・桁数）の多重集合」で行う（2026-10-06）。
+        # 件数比較だと、既存の 12.34 を 12.345678 に悪化させても件数が同じで
+        # 素通りした（3桁化で 4桁値が既存所見になったため盲点が拡大）。
+        # 行番号を除くのは、上に行を足しただけで全所見が「新規」に見えるのを防ぐため。
+        import collections as _co
+        _key = lambda x: (x[0], re.sub(r"^L\d+\s*", "", x[1]))
+        _left = _co.Counter(_key(x) for x in f_before)
+        added = []
+        for x in f_after:
+            k = _key(x)
+            if _left[k] > 0:
+                _left[k] -= 1
+            else:
+                added.append(x)
+        if not added and not struct:
+            return
         added += [("structure", d) for _c, d in struct]
-        if not added:
-            added = f_after[-1:]
         # 発火記録: 無反応と故障を区別するため(CLAUDE.md §14 F2)。ledger が読む
         _record_firing("pre_report_quality_guard", data)
         _emit(added, cfg.get("mode", "warn"))

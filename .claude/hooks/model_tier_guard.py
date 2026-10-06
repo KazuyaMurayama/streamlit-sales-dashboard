@@ -32,8 +32,11 @@ except Exception:
 # その他判断が必要なプロセス」を語彙化したもの。固有名詞ではなく工程名で書く。
 JUDGMENT = re.compile(
     r"計画|設計|方針|分析|検証|レビュー|監査|評価|判断|QC|品質|"
-    r"批判|反証|考察|戦略|最終チェック|critic|review|audit|verify|"
-    r"analy|plan|design|judge|assess|critiq",
+    r"批判|反証|考察|戦略|最終チェック|critic|review|audit|verif|"
+    r"analy|plan|design|judge|assess|critiq|"
+    # 2026-10-06 追加（攻撃的検証で silent だった判断系の委譲）:
+    # "Independent verification" / "Investigate root cause" / "調査して報告" / "反例を探す"
+    r"investigat|root.?cause|debug|attack|調査|反例|原因|攻撃|診断",
     re.I,
 )
 
@@ -95,7 +98,8 @@ def main():
         #   prompt まで見ると sonnet 委譲の 78.2%（251件）で発火した。prompt には
         #   「検証」「計画」等の定型語が必ず入り、実装・転記の委譲まで警告して形骸化する。
         #   description だけにすると 22.4%（72件）に下がり、残るのは「QC前提攻撃」
-        #   「Verify Task deliverables」等の判断系だった。
+        #   「Verify Task deliverables」等の判断系だった。語彙に investigat/調査/反例 等を
+        #   足した後（同日）は 26.2%（84件、全委譲の 8.49%）。
         text = " ".join(
             str(ti.get(k) or "")
             for k in ("subagent_type", "description")

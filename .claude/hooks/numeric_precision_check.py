@@ -32,7 +32,8 @@ CITATION_CTX = re.compile(
     # 「253.89 ± 5.59 mg CE/g」等の実測値±SD 表記。丸めると出典の誤引用になる。
     r"±|\+/-", re.I)
 # 一致判定（R-STAT-7: 有効数字4桁で同値とみなす）を述べる行。
-EQUIV_CTX = re.compile(r"一致|同値|等価|R-STAT-7|equivalen", re.I)
+# 「一致」単独は広すぎる（実測: 直近60本で F 値の「換算値と一致」を誤って免除）。
+EQUIV_CTX = re.compile(r"一致判定|同値判定|全桁一致|R-STAT-7|equivalence", re.I)
 
 
 def _strip_uncheckable(text):
@@ -101,6 +102,11 @@ def _strip_uncheckable(text):
     # 暗号資産の数量は「4桁に丸める」と別の金額になる（0.78049 BTC / 1.5625 BTC は
     # 3.125÷2 の厳密値）。単位付きの数量は full precision が正しい。
     for m in re.finditer(r"\d+\.\d+\s*(?:BTC|ETH|XRP|SOL|BNB|枚|oz|ct)\b", text, flags=re.I):
+        blank(m)
+    # 製品の仕様値（13.97mm / 6.3インチ / 50.3MP）はメーカー公表値そのもの。
+    # 3桁化（2026-10-06）で新たに誤検知した主なクラス（実測: 直近60本で旧2件→新18件）。
+    for m in re.finditer(r"\d+\.\d+\s*(?:mm|cm|kg|mg|g|MP|GHz|MHz|mAh|Wh|W|インチ|inch)(?![A-Za-z])",
+                         text):
         blank(m)
     # 年.月 のバージョン/シーズン表記（2025.05 今季完売 / v2025.05）
     for m in re.finditer(r"(?<![\d.])(?:19|20)\d{2}\.(?:0[1-9]|1[0-2])(?![\d])", text):
