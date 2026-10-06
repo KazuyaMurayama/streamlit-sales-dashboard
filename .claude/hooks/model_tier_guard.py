@@ -1,4 +1,6 @@
-"""PreToolUse hook (Task): remind when a judgment-tier subagent is launched on Sonnet.
+"""PreToolUse hook (Agent/Task): 委譲の2点を検査する。
+  1. 判断系の委譲を Sonnet で起動したら警告する（モデル階層 §7）。
+  2. prompt にターン上限（「最大40ターン」等）が無い委譲を止める（2026-10-06 追加）。
 
 背景（2026-08-14 ユーザー指示）: 使用量に約50%の余裕があるため、単純タスク以外は
 Opus/Fable を積極的に使う方針へ転換した。本フックは「文面だけのルールは守られない」
@@ -8,7 +10,7 @@ Opus/Fable を積極的に使う方針へ転換した。本フックは「文面
 含まれるのに model 指定が sonnet 系のとき、非ブロッキングの警告を出す。
 
 Fail-open: 例外は必ず exit 0（無反応で握りつぶさず、下の SELFTEST で発火確認する）。
-ブロックはしない（permissionDecision は使わない）。誤検知で作業を止める害の方が大きい。
+モデル階層の判定はブロックしない。ターン上限の欠落だけは止める（下の BUDGET の較正を参照）。誤検知で作業を止める害の方が大きい。
 
 Deployed from claude-governance/hooks/ — edit there, not the deployed copy.
 
@@ -48,6 +50,29 @@ SIMPLE = re.compile(
 )
 
 SONNET = re.compile(r"sonnet|haiku", re.I)
+
+# ターン上限の記述（2026-10-06 追加）。
+# 較正（実測・直近21日の委譲983件、うち tool_uses が取れた191件）:
+#   上限を書いた委譲は 0.712%（7件）しかない。子エージェントの tool_uses は中央値16・
+#   上位10%で48。40を超えた30件（15.7%）が子エージェント全体の tool_uses の 48.4% を
+#   占める。消費は「ターン数 × 再送文脈」の積なので、長く回る少数が支配する。
+#   警告型（context_budget_guard）は 7日32回発火しても消費が下がらなかったため、
+#   ここは止める（deny）。直し方は1行足すだけで、止められた側の損失は1往復。
+BUDGET = re.compile(
+    r"\d+\s*(ターン|turn|回の?ツール|ツール呼び出し|tool.?uses?)|"
+    r"(最大|上限|以内)\s*\d+\s*(回|ターン)", re.I)
+
+BUDGET_REASON = (
+    "委譲の prompt にターン上限がありません。prompt に「最大40ターン以内」"
+    "（軽い調査なら15、検証なら20〜30）と「成果物はファイルへ保存・返信は要約2KB以内」を"
+    "書いて呼び直してください。大きな作業は 計画→実装→検証 の別々の委譲に分けます。"
+    "（消費は ターン数×再送文脈 の積。40ターン超の15.7%の委譲が子エージェント消費の約半分を占める）"
+)
+
+
+def needs_budget(prompt):
+    """True when the delegation prompt states no turn budget."""
+    return not BUDGET.search(prompt or "")
 
 
 def verdict(model, text):
@@ -105,7 +130,17 @@ def main():
             for k in ("subagent_type", "description")
         )
         why = verdict(str(ti.get("model") or ""), text)
-        if why:
+        if needs_budget(str(ti.get("prompt") or "")):
+            _record_firing("model_tier_guard", data)
+            reason = BUDGET_REASON + ((" / " + why) if why else "")
+            print(json.dumps({
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": reason,
+                }
+            }, ensure_ascii=False))
+        elif why:
             _record_firing("model_tier_guard", data)
             print(json.dumps({
                 "hookSpecificOutput": {
