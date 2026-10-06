@@ -44,14 +44,15 @@ TIME OF DAY (2026-10-06 ユーザー指示「作成日と最終更新日に何�
   書式は `最終更新日: 2026-10-06 14:32 JST`。時刻は JST の固定オフセットで計算する
   （Web 版のクラウド環境は UTC で動くため date.today() では 0〜9 時に日付がずれる）。
   T1 FAIL  この編集で書いた 最終更新日（新規なら 作成日 も）に時刻が無い。
-  T2 FAIL  書いた時刻が現在 JST から 30 分超前、または 5 分超先（推測で書いた時刻）。
-  T3 FAIL  既存ファイルの本文を変えたのに、最終更新日が 30 分より古いまま（時刻なしも古い扱い）。
+  T2 FAIL  書いた時刻が現在 JST から 10 分超前、または 5 分超先（推測で書いた時刻）。
+  T3 FAIL  既存ファイルの本文を変えたのに、最終更新日が 10 分より古いまま（時刻なしも古い扱い）。
            「先に最終更新日を更新してから本文を編集する」を強制する。Edit は連続した
            old_string しか持てず、本文の編集と冒頭の日付行を1回で直せないため。
            旧 D5（追記80字以上で WARN）は警告では守られなかった型なので T3 に置き換えた。
   T4 FAIL  新規の日付付きレポート（*_YYYYMMDD.md）に 作成日・最終更新日 の行が無い。
-  時刻の検査は冒頭 HEADER_LINES 行に限る。本文の表や引用にある「更新日:」を
-  冒頭の日付と取り違えないため。
+  時刻の検査は冒頭 HEADER_LINES 行に限り、先頭の YAML front matter（--- … ---）は除く。
+  本文の表や引用の「更新日:」や、サイト生成器が日付型で読む `updated:` を
+  冒頭の日付行と取り違えないため（front matter に時刻を足すと日付型が壊れる）。
 
 NON-GOALS (stated so the next reader does not "fix" them by widening):
   Prose dates ("8/31 判定", "締切8月25日") are NOT checked. They are frequently
@@ -70,7 +71,9 @@ from datetime import date, datetime, timedelta, timezone
 
 JST = timezone(timedelta(hours=9))
 HEADER_LINES = 30
-STALE = timedelta(minutes=30)   # これより古い最終更新日のまま本文を変えたら止める
+# これより古い最終更新日のまま本文を変えたら止める。30分だと窓の中の2回目の更新が
+# 同じ時刻のまま残り「開いている版が最新か」を判別できなかった（Fable QC 2026-10-06）。
+STALE = timedelta(minutes=10)
 AHEAD = timedelta(minutes=5)    # 時計のずれの許容
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -120,9 +123,9 @@ TIME = r"(?:[ T\u3000]+(\d{1,2}):(\d{2})(?:\s*[(（]?\s*JST\s*[)）]?)?)?"
 # Last updated: (10), 更新日: (4) and bold-on-either-side forms. Matching only
 # the form in front of you is how the original I6 silently passed the defect.
 RE_UPDATED = re.compile(
-    r"(?:最終更新日|最終更新|更新日|Last\s+updated|Updated)\**\s*[:：]\s*\**\s*" + ISO + TIME,
+    r"(?:最終更新日時|最終更新日|最終更新|更新日時|更新日|\bLast\s+(?:updated|modified)|\bUpdated)\**\s*[:：]\s*\**\s*" + ISO + TIME,
     re.I)
-RE_CREATED = re.compile(r"(?:作成日|Created)\**\s*[:：]\s*\**\s*" + ISO + TIME, re.I)
+RE_CREATED = re.compile(r"(?:作成日時|作成日|\bCreated)\**\s*[:：]\s*\**\s*" + ISO + TIME, re.I)
 RE_HEADING = re.compile(r"^#{2,4}\s*\**\s*" + ISO, re.M)
 RE_ANY_DATE = re.compile(ISO)
 
@@ -291,9 +294,14 @@ def _stamp(m):
         return None
 
 
+RE_FRONT = re.compile(r"\A\ufeff?---[ \t]*\r?\n.*?\r?\n---[ \t]*(?:\r?\n|\Z)", re.S)
+
+
 def _head(rx, text):
-    """First match of rx inside the first HEADER_LINES lines, else None."""
-    m = rx.search(text)
+    """First match of rx inside the first HEADER_LINES lines, else None.
+    A leading YAML front matter block is skipped (its `updated:` is data)."""
+    f = RE_FRONT.match(text)
+    m = rx.search(text, f.end() if f else 0)
     if m and text.count("\n", 0, m.start()) < HEADER_LINES:
         return m
     return None
@@ -341,7 +349,7 @@ def _check(after, before, today, is_new, now=None, report_name=False):
                          "書いてください（1日に複数回更新するため日付だけでは最新か判別できない）。"
                          % (label, label, stamp))
         elif _ymd(mm) == t and not (now - STALE <= dt <= now + AHEAD):
-            fails.append("%sの時刻 %s が現在（%s）と30分以上離れています。"
+            fails.append("%sの時刻 %s が現在（%s）と10分以上離れています。"
                          "推測で書かず現在時刻を書いてください。"
                          % (label, dt.strftime("%H:%M"), stamp))
 
@@ -398,11 +406,13 @@ def main():
             return
 
         try:
-            with open(fp, encoding="utf-8-sig") as f:
-                before = f.read()
+            with open(fp, "rb") as f:
+                raw_before = f.read()
             is_new = False
         except Exception:
-            before, is_new = "", True
+            raw_before, is_new = b"", True
+        # A cp932 file must not be mistaken for a new one (Fable QC 2026-10-06).
+        before = raw_before.decode("utf-8-sig", "replace")
 
         if tool == "Write":
             after = ti.get("content") or ""
