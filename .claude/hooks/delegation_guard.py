@@ -31,6 +31,23 @@ real instructions over 30 days, the hook's own decide() imported):
 The 11 misses are decision requests (「お決めください」「ご判断ください」),
 which look the same as legitimate ③本人の意思決定 questions.
 
+BATCHED DECISIONS (2026-10-06)
+------------------------------
+User: 「その3つは、今決めるべきことですか？かつ、Claude側で決められないものですか？
+推測はできないものですか？」 and then 「聞かなくていいことを6つも聞いたというような
+ミスも、今後は繰り返さないでほしくて、このリポジトリでもそうですし、他のリポジトリ
+でも同様です」. The answer had closed with 「Next Action: … の6つを決めてください
+（レポート §5 A1〜A6）」. Of the six, three were already decided in the repo's own
+documents, two had defaults Claude could set (reversible settings), one was a
+real decision -- and none was needed that day.
+
+A single decision request still passes (it may be a real ③). A request for
+SEVERAL decisions at once is the shape of this defect: it is a to-do list
+handed to the user instead of triage. It is blocked once with the triage
+test (already decided? reversible? needed now?). The count is read from the
+sentence itself: 「6つ」「3点」「A1〜A6」, or a 「・」-separated list of options.
+Calibration: tests/calibrate_delegation_guard.py (BATCH line).
+
 Deployed from claude-governance/templates/hooks/ -- edit there, not here.
 """
 import hashlib
@@ -64,6 +81,27 @@ DELEGATE = re.compile(
     #    (may span a line break: 「1. 実行 / 2. 結果を貼ってください」)
     r"|(?:実行|試し|確認|開い|押し|起動|入れ|操作)[^。]{0,60}(?:結果|出力|表示|最終行|RESULT|エラー|届いたか|出たか|あるか|できたか)"
     r"[^。]{0,30}(?:教えて|貼って|送って|返して|返信して|お知らせ|ご共有|共有して)")
+# Widened after the 2026-10-06 adversarial review (Fable, 12/15 evasions): 「決めてほしい」
+# 「ご判断をお願いします」「決断してください」「お決めになってください」「選んでもらいたい」
+# 「決定をお願いします」 were outside the first version.
+DECIDE_REQ = re.compile(
+    r"(?:決めて|お決め(?:になって)?|ご判断|判断して|選んで|お選び|ご選択|選択して|確定して|ご指定|指定して|"
+    r"ご決定|決定して|決断して|ご決断|選定して|ご回答|回答して|答えて|ご返答)"
+    r"(?:ください|下さい|いただ|頂|もら|ほし|欲し)"
+    r"|(?:ご)?(?:判断|決定|決断|回答|指定|選択|選定)(?:を|の)(?:お願い|ください|いただ|頂)")
+_N = r"(?:[2-9２-９]|[1-9１-９][0-9０-９]|[二三四五六七八九十]|ふた|みっ|よっ|いつ|むっ|なな|やっ)"
+BATCH_COUNT = re.compile(
+    # the count must name the things to decide: 「6つを」「3点（…）」「2点——①」「4点のご判断」「3つあります」.
+    # Not 「3つの不具合」 (one decision about three bugs), 「80点へ」 (a score), 「変える3点、の分割」.
+    _N + r"(?:つ|点|件|項目|個|問)(?=\s*(?:を|について|——|―|（|\(|:|：|とも|すべて|全て|、(?!の)|,|あり|ある"
+    r"|の(?:ご)?(?:判断|決定|決断|回答|指定|選択)|に(?:答え|ついて)))"
+    # a labelled range of items: A1〜A6, 問1〜問3, A1 から A6 まで. A bare number range (nt-002〜032) is a list of files.
+    r"|(?<![A-Za-zＡ-Ｚａ-ｚ\-])(?:[A-ZＡ-Ｚ]|問|Q)[0-9０-９]+\s*(?:[〜~～\-－]|から)\s*(?:[A-ZＡ-Ｚ]|問|Q)?[0-9０-９]+"
+    r"(?:\s*(?:の|を|について|まで|に|（))"
+    r"|[①-⑳]\s*[〜~～]\s*[①-⑳]|[①-⑳]{3,}")
+# Several decisions written as a list rather than a count.
+BATCH_LIST = re.compile(r"それぞれ|まとめて|各項目|一つずつ|1つずつ|ひとつずつ")
+ONE_CHOICE = re.compile(r"(?:のうち|の中から|から)?(?:1つ|一つ|ひとつ|1本|1点|どれか|いずれか|どちらか|どちら|どれ)(?:を|に|か|だけ)")
 LABEL = re.compile(r"（(?:権限|本人のみ|本人の判断|本人の意思決定|本人しか知らない)）"
                    r"|本人しか(?:知らない|できない)|権限が(?:ない|無い)|本人の意思決定")
 
@@ -77,6 +115,33 @@ def closing(answer):
     a = re.sub(r"「[^」]{0,200}」", "「」", a)
     m = list(re.finditer(r"(?m)^\W{0,4}Next Action\W{0,4}[:：]", a))
     return a[m[-1].start():] if m else a[-300:]
+
+
+def _sentence(tail, i, j):
+    s = max(tail.rfind("。", 0, i), tail.rfind("\n\n", 0, i)) + 1
+    e = tail.find("。", j)
+    return tail[s:e if e >= 0 else len(tail)]
+
+
+def decide_batch(answer):
+    """Return the request when the closing asks the user for SEVERAL decisions at once."""
+    tail = closing(answer)
+    for hit in DECIDE_REQ.finditer(tail):
+        sent = _sentence(tail, hit.start(), hit.end())
+        sent = re.sub(r"^\W{0,4}Next Action\W{0,4}[:：]\s*", "", sent)   # the label's colon is not a list
+        m = BATCH_COUNT.search(sent)
+        if m:
+            return m.group(0) + " → " + hit.group(0)
+        if ONE_CHOICE.search(sent):
+            continue    # 「A案・B案・C案のうち1つを選んで」: options of ONE decision
+        # 「・」「／」 between two digits is a list of items to look at (記事4・6・42), not of decisions
+        seps = len(re.findall(r"(?<![0-9０-９])[・／/](?![0-9０-９])", sent))
+        commas = len(re.findall(r"[、,]", sent))
+        alts = len(re.findall(r"か[、,／]|か——", sent))
+        colon_list = re.search(r"[:：][^。]*[、,][^。]*[、,]", sent)
+        if seps >= 2 or commas >= 3 or alts >= 2 or colon_list or BATCH_LIST.search(sent):
+            return "列挙した複数項目 → " + hit.group(0)
+    return None
 
 
 def decide(answer):
@@ -156,7 +221,8 @@ def main():
         return
     prompt, pts, answer = read_turn(tp)
     hit = decide(answer) if prompt else None
-    if not hit:
+    batch = None if hit or not prompt else decide_batch(answer)
+    if not hit and not batch:
         return
     # keyed on the prompt's timestamp too: the same words sent again later
     # (「再開して」) are a new instruction and must be checked again
@@ -170,6 +236,19 @@ def main():
     except Exception:
         pass
     _record_firing(NAME, ev)
+    if batch:
+        reason = ("【決定の一括依頼（1回のみ）】回答の締めで、ユーザーに複数の決定をまとめて求めている（%s）。"
+                  "決定を頼む前に、1項目ずつ次の順で仕分けよ。"
+                  "①既に決まっていないか: リポの正典（BUSINESS.md・戦略文書・tasks.md・CLAUDE.md・過去のレポート）を検索し、"
+                  "決まっていれば「決定済み」と書いて聞かない。"
+                  "②今決める必要があるか: 必要になる時点（その操作の直前など）まで聞かない。"
+                  "③推測・既定値で進められないか: 取り消せる設定・あとから変えられる選択は、根拠を添えて既定値を置き、"
+                  "「変えたければ言ってください」で済ませる。"
+                  "残るのは、取り消せない・本人しか知らない・既決定を変える、のどれかに当たる項目だけで、"
+                  "推奨と理由を添えて1つずつ聞く（CLAUDE.md §11.2）。仕分けの結果を書き直して回答し直せ。" % batch)
+        _record_firing(NAME, ev)
+        sys.stdout.buffer.write(json.dumps({"decision": "block", "reason": reason}, ensure_ascii=True).encode("ascii"))
+        return
     reason = ("【丸投げ検査（1回のみ）】回答の締めがユーザーへの作業・承認の依頼になっている（「%s」）。"
               "ユーザーに頼んでよいのは ①権限がない ②本人しか知らない情報 ③本人の意思決定 だけ（CLAUDE.md §11.2）。"
               "該当しないなら、今このターンで自分で実行し、結果を報告し直せ（確認・操作・結果取得・明らかなミスの修正・"

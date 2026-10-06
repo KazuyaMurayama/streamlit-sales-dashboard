@@ -39,6 +39,20 @@ WHAT IS CHECKED (deliberately narrow — see NON-GOALS)
   D4 WARN  Newest `## YYYY-MM-DD —` heading is older than today, when this edit
            adds content. Warn-only: appending to an old log entry is legitimate.
 
+TIME OF DAY (2026-10-06 ユーザー指示「作成日と最終更新日に何時何分（日本時間）まで」):
+  理由は「1日に何回も更新するので、日付だけでは開いている版が最新か判断できない」。
+  書式は `最終更新日: 2026-10-06 14:32 JST`。時刻は JST の固定オフセットで計算する
+  （Web 版のクラウド環境は UTC で動くため date.today() では 0〜9 時に日付がずれる）。
+  T1 FAIL  この編集で書いた 最終更新日（新規なら 作成日 も）に時刻が無い。
+  T2 FAIL  書いた時刻が現在 JST から 30 分超前、または 5 分超先（推測で書いた時刻）。
+  T3 FAIL  既存ファイルの本文を変えたのに、最終更新日が 30 分より古いまま（時刻なしも古い扱い）。
+           「先に最終更新日を更新してから本文を編集する」を強制する。Edit は連続した
+           old_string しか持てず、本文の編集と冒頭の日付行を1回で直せないため。
+           旧 D5（追記80字以上で WARN）は警告では守られなかった型なので T3 に置き換えた。
+  T4 FAIL  新規の日付付きレポート（*_YYYYMMDD.md）に 作成日・最終更新日 の行が無い。
+  時刻の検査は冒頭 HEADER_LINES 行に限る。本文の表や引用にある「更新日:」を
+  冒頭の日付と取り違えないため。
+
 NON-GOALS (stated so the next reader does not "fix" them by widening):
   Prose dates ("8/31 判定", "締切8月25日") are NOT checked. They are frequently
   correct references to other days, so flagging them trains the user to ignore
@@ -52,7 +66,12 @@ import json
 import os
 import re
 import sys
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
+
+JST = timezone(timedelta(hours=9))
+HEADER_LINES = 30
+STALE = timedelta(minutes=30)   # これより古い最終更新日のまま本文を変えたら止める
+AHEAD = timedelta(minutes=5)    # 時計のずれの許容
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 try:
@@ -89,6 +108,8 @@ ALWAYS = ("business.md", "claude.md", "readme.md", "tasks.md",
           "current_best_strategy.md", "strategy_registry.md")
 
 ISO = r"(20\d{2})-(\d{2})-(\d{2})"
+# 任意の時刻部（2026-10-06 追加）。「 14:32」「T14:32」「 14:32 JST」「 14:32（JST）」を受ける。
+TIME = r"(?:[ T\u3000]+(\d{1,2}):(\d{2})(?:\s*[(（]?\s*JST\s*[)）]?)?)?"
 
 # 最終更新日 / Last updated. Bold markers may sit on EITHER side of the word
 # (`**最終更新日**:` vs `**最終更新日:**`). Assuming one form let the original
@@ -99,9 +120,9 @@ ISO = r"(20\d{2})-(\d{2})-(\d{2})"
 # Last updated: (10), 更新日: (4) and bold-on-either-side forms. Matching only
 # the form in front of you is how the original I6 silently passed the defect.
 RE_UPDATED = re.compile(
-    r"(?:最終更新日|最終更新|更新日|Last\s+updated|Updated)\**\s*[:：]\s*\**\s*" + ISO,
+    r"(?:最終更新日|最終更新|更新日|Last\s+updated|Updated)\**\s*[:：]\s*\**\s*" + ISO + TIME,
     re.I)
-RE_CREATED = re.compile(r"(?:作成日|Created)\**\s*[:：]\s*\**\s*" + ISO, re.I)
+RE_CREATED = re.compile(r"(?:作成日|Created)\**\s*[:：]\s*\**\s*" + ISO + TIME, re.I)
 RE_HEADING = re.compile(r"^#{2,4}\s*\**\s*" + ISO, re.M)
 RE_ANY_DATE = re.compile(ISO)
 
@@ -255,14 +276,40 @@ def _in_scope(fp, cfg):
     return any(d in "/" + norm for d in DEFAULT_DIRS)
 
 
-def _check(after, before, today, is_new):
+def _ymd(m):
+    return "%s-%s-%s" % m.groups()[:3]
+
+
+def _stamp(m):
+    """datetime(JST) of a matched 作成日/最終更新日, or None when it has no time."""
+    y, mo, d, hh, mm = m.groups()
+    if hh is None:
+        return None
+    try:
+        return datetime(int(y), int(mo), int(d), int(hh), int(mm), tzinfo=JST)
+    except ValueError:
+        return None
+
+
+def _head(rx, text):
+    """First match of rx inside the first HEADER_LINES lines, else None."""
+    m = rx.search(text)
+    if m and text.count("\n", 0, m.start()) < HEADER_LINES:
+        return m
+    return None
+
+
+def _check(after, before, today, is_new, now=None, report_name=False):
     """Return (fails, warns). `before` is '' for a new file."""
     fails, warns = [], []
     t = today.isoformat()
+    if now is None:
+        now = datetime.now(JST)
+    stamp = now.strftime("%Y-%m-%d %H:%M JST")
 
     m = RE_UPDATED.search(after)
     if m:
-        got = "%s-%s-%s" % m.groups()
+        got = _ymd(m)
         if got != t:
             fails.append(
                 "最終更新日が %s ですが、システム日付は %s です。"
@@ -270,7 +317,7 @@ def _check(after, before, today, is_new):
 
     m = RE_CREATED.search(after)
     if m and is_new:
-        got = "%s-%s-%s" % m.groups()
+        got = _ymd(m)
         if got != t:
             fails.append("新規ファイルの作成日が %s ですが、本日は %s です。"
                          % (got, t))
@@ -283,27 +330,44 @@ def _check(after, before, today, is_new):
         if d > horizon and g not in seen_before:
             fails.append("未来の日付 %s を追加しています（本日 %s）。" % (d, t))
 
-    # D5: content changed today but 最終更新日 still shows an older date.
-    # The mirror image of D1: D1 catches a date copied from the previous
-    # session onto new work; D5 catches real work landing in an old document
-    # whose date nobody bumped. Both leave the file claiming a date that is not
-    # when it was actually last written.
-    #
-    # WARN, not FAIL, and deliberately so: typo fixes and formatting passes are
-    # legitimately not "updates". Blocking them would make the guard something
-    # to be switched off. Only fires when prose actually grew, and only when the
-    # stale date was NOT introduced by this edit (that is D1's job, already
-    # reported above — reporting both would double-count one mistake).
-    if before and m and not is_new:
-        got = "%s-%s-%s" % m.groups()
-        grew = len(after) - len(before)
-        unchanged_date = bool(RE_UPDATED.search(before)) and \
-            ("%s-%s-%s" % RE_UPDATED.search(before).groups()) == got
-        if got < t and grew >= 80 and unchanged_date:
-            warns.append(
-                "本文を %d 文字追記していますが、最終更新日は %s のままです"
-                "（本日 %s）。実質的な更新なら %s に更新してください。"
-                % (grew, got, t, t))
+    # --- Time of day (T1-T4, 2026-10-06) ----------------------------------
+    up_a, up_b = _head(RE_UPDATED, after), _head(RE_UPDATED, before)
+    cr_a = _head(RE_CREATED, after)
+
+    def _written(label, mm):
+        dt = _stamp(mm)
+        if dt is None:
+            fails.append("%sに時刻がありません。`%s: %s` の形で何時何分（日本時間）まで"
+                         "書いてください（1日に複数回更新するため日付だけでは最新か判別できない）。"
+                         % (label, label, stamp))
+        elif _ymd(mm) == t and not (now - STALE <= dt <= now + AHEAD):
+            fails.append("%sの時刻 %s が現在（%s）と30分以上離れています。"
+                         "推測で書かず現在時刻を書いてください。"
+                         % (label, dt.strftime("%H:%M"), stamp))
+
+    # T1/T2: only the value THIS edit writes. A date line the edit did not
+    # touch is T3's business.
+    if up_a and (is_new or not up_b or up_a.groups() != up_b.groups()):
+        _written("最終更新日", up_a)
+    if is_new and cr_a:
+        _written("作成日", cr_a)
+
+    # T3: the body changed but the stamp did not move and is already stale.
+    if (not is_new and up_a and up_b and after != before
+            and up_a.groups() == up_b.groups()):
+        dt = _stamp(up_b)
+        if dt is None or dt < now - STALE:
+            old = up_b.group(0)
+            new = old[:old.index(_ymd(up_b))] + stamp
+            fails.append(
+                "本文を変更する前に最終更新日を現在時刻へ更新してください。"
+                "先にこの1行だけを置き換えてから、本文の編集をやり直します: "
+                "old_string=`%s` → new_string=`%s`" % (old, new))
+
+    # T4: a new date-suffixed report must carry both header lines.
+    if is_new and report_name and not (cr_a and up_a):
+        fails.append("新規レポートの H1 直下に `作成日: %s` と `最終更新日: %s` の"
+                     "2行がありません。" % (stamp, stamp))
 
     heads = sorted({"%s-%s-%s" % g for g in RE_HEADING.findall(after)})
     past = [d for d in heads if d <= t]
@@ -351,13 +415,15 @@ def main():
         else:
             return
 
-        today = date.today()
-        fails, warns = _check(after, before, today, is_new)
+        now = datetime.now(JST)
+        today = now.date()
+        report_name = bool(REPORT_NAME.search(os.path.basename(fp)))
+        fails, warns = _check(after, before, today, is_new, now, report_name)
 
         # Regression-only on FAILs: never block because of a date that was
         # already wrong on disk before this edit.
         if not is_new and fails:
-            pre_f, _ = _check(before, before, today, False)
+            pre_f, _ = _check(before, before, today, False, now)
             fails = [f for f in fails if f not in pre_f] or []
 
         if not fails and not warns:

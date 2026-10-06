@@ -6,6 +6,9 @@ context and therefore never bound behaviour at all):
 
   1. 有効数字3桁 (2026-08-24 指示。旧4桁は 2026-07-24)  -> numeric_precision_check
   2. 根拠なき網羅主張の禁止          -> report_rigor_check
+  3. 立ち上げ前の現状値を判断理由にしない -> startup_state_check
+     (「まだほとんどリリースしていないのに、今のフォロワー数をもとに何かの判断に
+      するのはおかしい」2026-10-06)
      (「本当にまだ試してないんですか？…検証計画に穴がありそう」2026-07-01)
 
 Design decisions, all forced by measurement rather than assumption:
@@ -26,7 +29,7 @@ Design decisions, all forced by measurement rather than assumption:
 
 Per-repo configuration — .claude/report_quality.json (all keys optional):
   {"mode": "warn"|"deny"|"off",
-   "checks": ["numeric","rigor"],
+   "checks": ["numeric","rigor","state"],
    "include": ["outputs/", "reports/"],
    "exclude": ["data/", "materials/"]}
 
@@ -210,7 +213,7 @@ def _registered_local_copy_exists():
 
 
 def _load_config():
-    cfg = {"mode": "warn", "checks": ["numeric", "rigor"],
+    cfg = {"mode": "warn", "checks": ["numeric", "rigor", "state"],
            "include": None, "exclude": None}
     try:
         p = os.path.join(os.getcwd(), ".claude", "report_quality.json")
@@ -331,6 +334,9 @@ def _analyze(text, cfg, mods):
     if "rigor" in cfg["checks"] and mods[1]:
         for f in mods[1].analyze_text(text):
             out.append(("網羅主張", f"L{f['line']}「{f['claim']}」{f['text'][:50]}"))
+    if "state" in cfg["checks"] and len(mods) > 2 and mods[2]:
+        for f in mods[2].analyze_text(text):
+            out.append(("現状値の根拠化", f"L{f['line']}「{f['state']}」{f['text'][:50]}"))
     return out
 
 
@@ -353,9 +359,13 @@ def main():
             import report_rigor_check as rrc
         except Exception:
             rrc = None
-        if npc is None and rrc is None:
+        try:
+            import startup_state_check as ssc
+        except Exception:
+            ssc = None
+        if npc is None and rrc is None and ssc is None:
             return
-        mods = (npc, rrc)
+        mods = (npc, rrc, ssc)
 
         # Read stdin as BYTES and decode UTF-8 explicitly. json.load(sys.stdin)
         # uses the Windows locale encoding (CP932 here), which mojibakes every
@@ -480,6 +490,15 @@ def _struct_hint(findings):
             "そこは自分で確認すること。")
 
 
+def _state_hint(findings):
+    if not any(k == "現状値の根拠化" for k, _v in findings):
+        return ""
+    return ("\n【現状値の根拠化】立ち上げ前・初期の現状値（フォロワー数・会員数・記事数など、"
+            "これから作る対象の今の大きさ）を、戦略・設計の判断理由にしている。現状値は測定の起点"
+            "（ベースライン）としてだけ書き、判断は目標の状態・顧客・中身の性質・収支から導くこと"
+            "（2026-10-06 依頼者指摘）。")
+
+
 def _emit(findings, mode):
     lines = [f"・[{k}] {v}" for k, v in findings[:4]]
     body = "\n".join(lines)
@@ -487,6 +506,7 @@ def _emit(findings, mode):
         reason = ("レポート品質ルール違反をこの編集で新規に追加しています:\n" + body +
                   "\n有効数字は3桁（表示値のみ・引用実測値/法定定数は対象外、一致判定は4桁）。"
                   "網羅主張には根拠か留保（未検証/対象外/前提 等）を近傍に添える。"
+                  + _state_hint(findings)
                   + _struct_hint(findings))
         print(json.dumps({"hookSpecificOutput": {
             "hookEventName": "PreToolUse",
@@ -497,7 +517,7 @@ def _emit(findings, mode):
             "hookEventName": "PreToolUse",
             "additionalContext": (
                 "⚠ レポート品質チェック（warn・ブロックはしない）:\n" + body +
-                _struct_hint(findings) +
+                _struct_hint(findings) + _state_hint(findings) +
                 "\n※誤検知なら .claude/report_quality.json で調整可。")}}))
 
 

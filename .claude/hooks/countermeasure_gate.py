@@ -151,6 +151,10 @@ IMPERATIVE_RE = re.compile(
     u"|(?:立てて|計画して|実行して|対策して|考えて|作って|やって|防いで|直して)"
     u"|(?:せよ|しろ|してくれ)"
     u"|お願いします"
+    # 2026-10-06: 命令形「〜しなさい」と当為「〜すべき／べきではないでしょうか」、
+    # 中止要求「やめて／やめるべき」。実ユーザーの 再発防止 依頼3件中2件が
+    # この形だけで書かれており、旧パターンでは沈黙した（docstring 参照）。
+    u"|なさい|べき|やめ(?:て|る|なさい)"
     # complaint forms -- the countermeasure was judged inadequate
     u"|意味が(?:ほぼ)?無|意味がない|応えな|不十分|甘い|できていない"
     u"|終わったこと|限定すぎ|ほとんど発火")
@@ -203,34 +207,167 @@ FIX_VERB_RE = re.compile(
     u"(?:立てて|計画して|実行して|対策して|考えて|作って|やって|防いで|直して"
     u"|修正して|改善して|反映して|更新して|検討して"
     u"|お願いし|してください|して下さい|してほしい|して欲しい"
-    u"|せよ|しろ|してくれ)"
+    u"|せよ|しろ|してくれ|なさい|べき|やめて|やめる)"
     u"|(?:不十分|甘い|できていない|意味が(?:ほぼ)?無|意味がない|応えな"
     u"|終わったこと|限定すぎ|ほとんど発火|繰り返して)")
 
-# Deploying is not a substitute for auditing, but a turn that deployed AND
-# audited is the intended shape; deploy alone is explicitly not enough, because
-# "I shipped it" was the claim that kept turning out to be false.
+# --- (a)(b)(c): was the countermeasure MECHANICAL, DEPLOYED, and FIRED? -----
+#
+# ⛔ THE GAP THIS CLOSES (2026-10-06). Until today DEPLOY_RE was defined and
+# never used, and nothing looked at WHAT the turn produced. A turn that ran the
+# audit, dispatched Fable, and then shipped a paragraph in one repo's markdown
+# passed -- which is exactly 欠陥③「散文追記で終わる」 and 欠陥①「1リポ」, the two
+# defects this gate was built to stop. Each check below reads TOOL CALLS
+# (Write/Edit file_path, Bash/PowerShell command), never prose, and never a
+# subagent's prompt text: telling a helper "run deploy_all.py" is not running it.
+
+# (a) An executable countermeasure lives under a hooks/ or scripts/ directory
+# (templates/hooks/ included). Tests and calibrators are NOT the countermeasure:
+# writing only test_x.py proves nothing was built.
+COUNTERMEASURE_PATH_RE = re.compile(
+    r"(?:^|[/\\])(?:hooks|scripts)[/\\](?:[^/\\]+[/\\])*[^/\\]+\.(?:py|sh|js|ps1)$",
+    re.IGNORECASE)
+NOT_COUNTERMEASURE_RE = re.compile(
+    r"(?:^|[/\\])tests?[/\\]|(?:^|[/\\])(?:test_|calibrate_)[^/\\]*$",
+    re.IGNORECASE)
+EDIT_TOOLS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
+# Shell verbs that write the file named last on the segment.
+SHELL_WRITE_VERB_RE = re.compile(
+    r"^\s*(?:sudo\s+)?(?:tee|cp|mv|install|sed\s+-i\S*|perl\s+-[a-z]*i\S*"
+    r"|Copy-Item|Move-Item|Set-Content|Out-File|Add-Content)\b", re.IGNORECASE)
+SHELL_REDIRECT_RE = re.compile(r">{1,2}\s*['\"]?([^\s'\";&|<>]+)")
+PATH_TOKEN_RE = re.compile(r"[^\s'\";&|<>()]+\.(?:py|sh|js|ps1)\b", re.IGNORECASE)
+
+# (b) The deployment actually ran. A dry run deploys nothing.
 DEPLOY_RE = re.compile(r"deploy_all\.py")
+DEPLOY_RUN_RE = re.compile(
+    r"\b(?:python3?|py)(?:\.exe)?\s+(?:-\S+\s+)*['\"]?\S*deploy_all\.py",
+    re.IGNORECASE)
+
+# (c) Something was EXECUTED that would show it fires: a test, a calibration
+# against real data, pytest, or the cross-hook firing verifier. Reading the
+# test file (cat test_x.py) is not executing it.
+FIRING_CHECK_RE = re.compile(
+    r"\b(?:python3?|py)(?:\.exe)?\s+(?:-\S+\s+)*['\"]?\S*"
+    r"(?:test_\w+|calibrate_\w+|verify_hook_firing)\.py"
+    r"|\bpytest\b", re.IGNORECASE)
+
+# Exemption for (a)-(c): a reason written into COUNTERMEASURE_EXEMPT.json in
+# this turn. An empty reason is not a reason (the audit enforces the same).
+EXEMPT_FILE_RE = re.compile(r"COUNTERMEASURE_EXEMPT\.json$", re.IGNORECASE)
+EXEMPT_REASON_RE = re.compile(r"\"reason\"\s*:\s*\"[^\"\s]")
+
+SEGMENT_SPLIT_RE = re.compile(r"\n|;|&&|\|\||(?<![|>])\|(?!\|)")
 
 
-def _read_turn(transcript_path):
-    """Return (user_ask, tool_blob) for the latest turn.
+def _is_cm_path(p):
+    p = (p or "").strip().strip("'\"")
+    return bool(COUNTERMEASURE_PATH_RE.search(p)
+                and not NOT_COUNTERMEASURE_RE.search(p))
+
+
+def _segments(cmd):
+    return [s for s in SEGMENT_SPLIT_RE.split(cmd or "") if s.strip()]
+
+
+def _shell_writes_cm(cmd):
+    """Best-effort: does this shell command write an executable countermeasure
+    file? Redirect target, or the LAST path token of a writing verb (cp src
+    dst: only dst is written)."""
+    for seg in _segments(cmd):
+        for m in SHELL_REDIRECT_RE.finditer(seg):
+            if _is_cm_path(m.group(1)):
+                return True
+        if SHELL_WRITE_VERB_RE.search(seg):
+            toks = PATH_TOKEN_RE.findall(seg)
+            if toks and _is_cm_path(toks[-1]):
+                return True
+    return False
+
+
+def _ts(v):
+    """ISO8601 timestamp -> epoch seconds, or None."""
+    if not isinstance(v, str) or not v:
+        return None
+    try:
+        return datetime.strptime(v[:19], "%Y-%m-%dT%H:%M:%S").replace(
+            tzinfo=timezone.utc).timestamp()
+    except Exception:
+        return None
+
+
+def _tool_uses(rows):
+    out = []
+    for r in rows:
+        if r.get("type") != "assistant":
+            continue
+        for b in ((r.get("message") or {}).get("content") or []):
+            if isinstance(b, dict) and b.get("type") == "tool_use":
+                inp = b.get("input")
+                out.append((b.get("name") or "",
+                            inp if isinstance(inp, dict) else {}))
+    return out
+
+
+def _load_rows(path, tail=4000):
+    try:
+        with io.open(path, encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()[-tail:]
+    except Exception:
+        return []
+    rows = []
+    for ln in lines:
+        try:
+            r = json.loads(ln)
+        except Exception:
+            continue
+        if isinstance(r, dict):
+            rows.append(r)
+    return rows
+
+
+def _subagent_uses(transcript_path, since):
+    """Tool calls made by subagents dispatched in this turn.
+
+    Claude Code stores each subagent's transcript at
+    <transcript minus .jsonl>/subagents/agent-*.jsonl, NOT in the parent file
+    (measured 2026-10-06: 1,371 such files under ~/.claude/projects). Without
+    this, a parent that delegates the hook edit -- the normal shape of a large
+    countermeasure -- could never satisfy (a)-(c). Only rows timestamped at or
+    after the turn's user message count.
+    """
+    out = []
+    try:
+        d = os.path.join(os.path.splitext(transcript_path)[0], "subagents")
+        if not os.path.isdir(d):
+            return out
+        files = [os.path.join(d, n) for n in os.listdir(d)
+                 if n.endswith(".jsonl")]
+        if since is not None:
+            files = [f for f in files if os.path.getmtime(f) >= since - 5]
+        for f in sorted(files, key=os.path.getmtime)[-50:]:
+            rows = _load_rows(f)
+            if since is not None:
+                rows = [r for r in rows
+                        if (_ts(r.get("timestamp")) or since) >= since - 1]
+            out.extend(_tool_uses(rows))
+    except Exception:
+        pass
+    return out
+
+
+def _read_turn_full(transcript_path):
+    """Return (user_ask, tool_blob, uses) for the latest turn.
+
+    uses = [(tool_name, input_dict), ...] from the parent transcript plus any
+    subagent transcripts written during this turn.
 
     Windowed to the last 4000 rows, matching the other guards: bounds parsing
     cost on very large transcripts. readlines() still does full I/O.
     """
-    try:
-        with io.open(transcript_path, encoding="utf-8", errors="replace") as f:
-            lines = f.readlines()[-4000:]
-    except Exception:
-        return "", ""
-
-    rows = []
-    for ln in lines:
-        try:
-            rows.append(json.loads(ln))
-        except Exception:
-            continue
+    rows = _load_rows(transcript_path)
+    if not rows:
+        return "", "", []
 
     def _text(r):
         c = (r.get("message") or {}).get("content")
@@ -246,22 +383,67 @@ def _read_turn(transcript_path):
     user_idx = [i for i, r in enumerate(rows)
                 if r.get("type") == "user" and _text(r)]
     if not user_idx:
-        return "", ""
+        return "", "", []
     start = user_idx[-1]
     ask = _text(rows[start]) or ""
 
+    uses = _tool_uses(rows[start + 1:])
+    uses += _subagent_uses(transcript_path, _ts(rows[start].get("timestamp")))
+    return ask, _blob(uses), uses
+
+
+def _blob(uses):
+    """The text AUDIT_RE / ADVERSARIAL_RE search: selected input fields."""
     tools = []
-    for r in rows[start + 1:]:
-        if r.get("type") != "assistant":
-            continue
-        for b in ((r.get("message") or {}).get("content") or []):
-            if isinstance(b, dict) and b.get("type") == "tool_use":
-                inp = b.get("input") or {}
-                for k in ("command", "file_path", "path", "prompt", "query"):
-                    v = inp.get(k)
-                    if isinstance(v, str):
-                        tools.append(v)
-    return ask, "\n".join(tools)
+    for name, inp in uses:
+        for k in ("command", "file_path", "path", "prompt", "query"):
+            v = inp.get(k)
+            if isinstance(v, str):
+                tools.append(v)
+        # 2026-10-06: the `model` key was never collected, so a real
+        # Agent(model="fable") call could not match ADVERSARIAL_RE -- only the
+        # test fixtures (which fake it as a Bash string) could. Serialize it.
+        if name in ("Task", "Agent") and isinstance(inp.get("model"), str):
+            tools.append(json.dumps({"tool": name, "model": inp["model"]}))
+    return "\n".join(tools)
+
+
+def _read_turn(transcript_path):
+    """Backward-compatible (user_ask, tool_blob)."""
+    ask, blob, _ = _read_turn_full(transcript_path)
+    return ask, blob
+
+
+def _commands(uses):
+    return [inp.get("command") for _, inp in uses
+            if isinstance(inp.get("command"), str)]
+
+
+def _mechanical_checks(uses):
+    """Return {'a','b','c','exempt'} -> bool from this turn's tool calls."""
+    cmds = _commands(uses)
+    a = exempt = False
+    for name, inp in uses:
+        fp = inp.get("file_path") or inp.get("notebook_path") or ""
+        if name in EDIT_TOOLS and isinstance(fp, str):
+            if _is_cm_path(fp):
+                a = True
+            if EXEMPT_FILE_RE.search(fp):
+                body = (inp.get("content") or inp.get("new_string") or "")
+                for e in (inp.get("edits") or []):
+                    if isinstance(e, dict):
+                        body += e.get("new_string") or ""
+                if EXEMPT_REASON_RE.search(body):
+                    exempt = True
+    for c in cmds:
+        if _shell_writes_cm(c):
+            a = True
+        if "COUNTERMEASURE_EXEMPT.json" in c and EXEMPT_REASON_RE.search(c):
+            exempt = True
+    b = any(DEPLOY_RUN_RE.search(seg) and "--dry-run" not in seg
+            for c in cmds for seg in _segments(c))
+    c_ = any(FIRING_CHECK_RE.search(seg) for c in cmds for seg in _segments(c))
+    return {"a": a, "b": b, "c": c_, "exempt": exempt}
 
 
 REASON = u"""⛔ 再発防止を指示されたターンだが、対策の実効性を一度も測っていない
@@ -297,7 +479,7 @@ zero hooks and zero CI」）。**少なくとも2回再発したクラス**で�
 """
 
 
-MISSING_ADVERSARIAL = u"""⛔ 監査は実行済みだが、**独立した攻撃的検証を行っていない**。
+MISSING_ADVERSARIAL = u"""⛔ **独立した攻撃的検証（別モデル）を行っていない**。
 
 「自作テストの合格は証拠にならない」「自分の計画を自分でQCしない」は
 ルールに明記されているが、守られたことが一度も検査されていなかった。
@@ -319,6 +501,75 @@ MISSING_ADVERSARIAL = u"""⛔ 監査は実行済みだが、**独立した攻撃
 「攻撃的検証を行いました」と書くだけでは通らない。
 本ゲートはツール呼び出しを見ており、文章は見ていない。
 """
+
+
+MISSING_MECHANICAL = u"""⛔ 対策が「機械的・配布済み・発火確認済み」になっていない
+
+このターンのツール呼び出しから、次が確認できなかった（文章は見ていない）:
+{items}
+
+  (a) 実行可能な対策ファイル: hooks/ または scripts/ 配下（templates/hooks/ を含む）の
+      .py/.sh/.js/.ps1 をこのターンで作成・編集したか（tests/・test_*・calibrate_* は対象外）
+  (b) 配布: python scripts/deploy_all.py（および --global）を実行したか（--dry-run は不可）
+  (c) 発火確認: test_*.py / calibrate_*.py / pytest / scripts/verify_hook_firing.py を
+      実行したか
+
+散文1リポで終わる対策が、このゲートを素通りしていた（2026-10-06 実測: 監査と
+Fable 起動だけで通過でき、DEPLOY_RE は定義されたまま一度も使われていなかった）。
+
+構造的に当てはまらない場合のみ、index/COUNTERMEASURE_EXEMPT.json に
+**理由付きで**書けば (a)〜(c) は免除される（理由が空なら無効）。
+"""
+
+LABELS = {
+    "a": u"(a) 実行可能な対策ファイルの作成・編集",
+    "b": u"(b) deploy_all.py による配布",
+    "c": u"(c) テスト／較正／発火確認の実行",
+    "d": u"(d) audit_countermeasures.py / countermeasure_ledger.py の実行",
+    "e": u"(e) 別モデル（Fable 等）による攻撃的検証",
+}
+
+
+def is_countermeasure_request(ask):
+    """True when the USER commissioned a countermeasure in this message.
+
+    Topic (ASK_RE) + request (IMPERATIVE_RE), minus a past-tense background
+    mention that commissions only a lookup (BACKGROUND_RE without FIX_VERB_RE).
+    Compaction summaries are excluded by the caller.
+    """
+    if not (ASK_RE.search(ask) and IMPERATIVE_RE.search(ask)):
+        return False
+    if BACKGROUND_RE.search(ask) and not FIX_VERB_RE.search(ask):
+        return False
+    return True
+
+
+def _missing(tools, uses):
+    """Ordered list of missing proof keys among a..e."""
+    m = _mechanical_checks(uses)
+    miss = []
+    if not m["exempt"]:
+        miss += [k for k in ("a", "b", "c") if not m[k]]
+    if not AUDIT_RE.search(tools):
+        miss.append("d")
+    if not ADVERSARIAL_RE.search(tools):
+        miss.append("e")
+    return miss
+
+
+def _reason(missing):
+    head = (u"⛔ 再発防止ターンの完了条件が未充足: "
+            + u" / ".join(LABELS[k] for k in missing) + u"\n\n")
+    parts = []
+    if any(k in missing for k in ("a", "b", "c")):
+        parts.append(MISSING_MECHANICAL.replace(
+            u"{items}",
+            u"\n".join(u"  ❌ " + LABELS[k] for k in missing if k in "abc")))
+    if "d" in missing:
+        parts.append(REASON)
+    if "e" in missing:
+        parts.append(MISSING_ADVERSARIAL)
+    return head + u"\n".join(parts)
 
 
 def main():
@@ -343,7 +594,7 @@ def main():
     tp = _codex_transcript(ev.get("transcript_path"))
     if not tp:
         return
-    ask, tools = _read_turn(tp)
+    ask, tools, uses = _read_turn_full(tp)
     if not ask:
         return
 
@@ -357,7 +608,7 @@ def main():
         return
 
     # Condition 1: the user asked for a countermeasure, in their own words.
-    if not (ASK_RE.search(ask) and IMPERATIVE_RE.search(ask)):
+    if not is_countermeasure_request(ask):
         return
 
     # ...but not when 再発防止 is merely BACKGROUND to a different request.
@@ -391,25 +642,30 @@ def main():
     # PAST TENSE about an already-installed countermeasure, and what it
     # commissions is a LOOKUP. Both must hold to stay silent -- so a message
     # that mentions a past countermeasure and then asks for a FIX still fires.
-    if BACKGROUND_RE.search(ask) and not FIX_VERB_RE.search(ask):
-        return
+    # (The check itself lives in is_countermeasure_request() so the
+    # calibration script replays exactly the code that runs here.)
 
-    # Condition 2: BOTH proofs must be present in this turn's tool calls.
-    #   - the audit ran (the five defects were measured, not asserted)
-    #   - a different model was dispatched to break it (self-testing is not
-    #     evidence; see ADVERSARIAL_RE for what this cost when it was missing)
-    if AUDIT_RE.search(tools) and ADVERSARIAL_RE.search(tools):
+    # Condition 2: ALL five proofs must be present in this turn's tool calls.
+    #   (a) an executable countermeasure file was written (not prose)
+    #   (b) deploy_all.py actually ran (not one repo)
+    #   (c) a test / calibration / firing check was executed (it fires)
+    #   (d) the audit ran (the five defects were measured, not asserted)
+    #   (e) a different model was dispatched to break it (self-testing is not
+    #       evidence; see ADVERSARIAL_RE for what this cost when it was missing)
+    # (a)-(c) are waived when this turn wrote a non-empty reason into
+    # index/COUNTERMEASURE_EXEMPT.json.
+    #
+    # ⛔ NO HEADLESS EXEMPTION. CLAUDE_HEADLESS_JOB=1 (unattended
+    # auto-implementation runs) is deliberately NOT a skip condition here: an
+    # unattended run is the one with nobody watching for a prose-only
+    # countermeasure, so it must satisfy the same five proofs.
+    missing = _missing(tools, uses)
+    if not missing:
         return
 
     _record_fired(ev)
 
-    reason = REASON
-    if AUDIT_RE.search(tools):
-        # The audit ran but nothing attacked it -- name that specifically, so
-        # the block is actionable instead of repeating the generic checklist.
-        reason = MISSING_ADVERSARIAL
-
-    out = {"decision": "block", "reason": reason}
+    out = {"decision": "block", "reason": _reason(missing)}
     # ensure_ascii=True + buffer.write: CP932 consoles mangle kanji whose
     # second byte is 0x5C (「表」= 0x95 0x5C) through a text stream, which
     # corrupts the JSON. Learned on md_date_guard.py.
