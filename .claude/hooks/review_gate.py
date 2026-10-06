@@ -81,7 +81,7 @@ STATE_DIR = os.path.join(os.environ.get("TEMP") or os.environ.get("TMP") or ".",
 # irrelevant dimensions. Each entry: (trigger, reminder).
 LATENT = (
     ("report", "レポートは自己完結（他版参照で中核を省略しない）／結論が単体でミスリードしない／"
-               "数値には成立前提を併記／表示値は有効数字4桁"),
+               "数値には成立前提を併記／表示値は有効数字3桁（一致判定は4桁）"),
     ("push", "成果物3列表（成果物・説明・リンク）とURL存在確認（git ls-tree で blob 確認）"),
     ("numbers", "パラメータのbare表記禁止（初出時に「何が・どの条件で・どうなる」を1文添える）"),
     ("numbers", "差・倍率・変化量は基準とセットで（ポイント差なら基準側の率、倍率なら分母）。"

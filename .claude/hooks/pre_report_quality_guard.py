@@ -4,7 +4,7 @@ Covers two chronically-violated rules that previously existed ONLY as prose
 (or, worse, only in memory files, which arrive as advisory <system-reminder>
 context and therefore never bound behaviour at all):
 
-  1. 有効数字4桁 (2026-07-24 指示)  -> numeric_precision_check
+  1. 有効数字3桁 (2026-08-24 指示。旧4桁は 2026-07-24)  -> numeric_precision_check
   2. 根拠なき網羅主張の禁止          -> report_rigor_check
      (「本当にまだ試してないんですか？…検証計画に穴がありそう」2026-07-01)
 
@@ -475,7 +475,7 @@ def _emit(findings, mode):
     body = "\n".join(lines)
     if mode == "deny":
         reason = ("レポート品質ルール違反をこの編集で新規に追加しています:\n" + body +
-                  "\n有効数字は4桁（表示値のみ・引用実測値/法定定数は対象外）。"
+                  "\n有効数字は3桁（表示値のみ・引用実測値/法定定数は対象外、一致判定は4桁）。"
                   "網羅主張には根拠か留保（未検証/対象外/前提 等）を近傍に添える。"
                   + _struct_hint(findings))
         print(json.dumps({"hookSpecificOutput": {

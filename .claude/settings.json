@@ -96,6 +96,15 @@
             "command": "P=$(command -v python3 || command -v python) || exit 0; exec \"$P\" .claude/hooks/near_duplicate_guard.py"
           }
         ]
+      },
+      {
+        "matcher": "Agent|Task",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "P=$(command -v python3 || command -v python) || exit 0; exec \"$P\" .claude/hooks/model_tier_guard.py"
+          }
+        ]
       }
     ],
     "PostToolUse": [

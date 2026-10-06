@@ -59,6 +59,23 @@ import re
 
 from datetime import datetime
 
+
+# 標準出力・標準エラーを UTF-8 に固定する（2026-10-06）。
+# Windows ではパイプ出力が cp932 になり、Claude Code は UTF-8 として読むため、
+# 警告文・ブロック理由が文字化けしてモデルに読めなかった（実測: model_tier_guard
+# 14日166回の警告がすべて化け、process_leak_guard のブロック理由も化けた）。
+# 本モジュールはほぼ全フックが import するので、ここで一括して直す。
+def _force_utf8_stdio():
+    import sys as _sys
+    for _s in (_sys.stdout, _sys.stderr):
+        try:
+            _s.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+
+_force_utf8_stdio()
+
 STATE_ROOT = os.path.join(os.path.expanduser("~"), ".claude", "state")
 
 

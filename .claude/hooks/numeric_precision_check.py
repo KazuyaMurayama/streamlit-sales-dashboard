@@ -1,16 +1,20 @@
 # -*- coding: utf-8 -*-
-"""Detect over-precision numbers in report text (有効数字4桁ルール / 2026-07-24 指示).
+"""Detect over-precision numbers in report text (有効数字3桁ルール / 2026-08-24 指示).
 
-Rule: displayed values use 4 significant figures (round at the 5th).
-  OK : 187.8万円, 83.06%, 1234, 0.9983
-  NG : 2278.8212180746564万円, 29.113456%
+Rule: displayed values use 3 significant figures (round at the 4th).
+  2026-07-24 の旧4桁ルールを 2026-08-24 に3桁へ改訂（正典= deliverables-policy.md §3.5）。
+  本ファイルは 2026-10-06 まで旧4桁のまま検査しており、29.11% のような4桁値を素通りさせていた。
+  OK : 188万円, 83.1%, 1234, 0.998
+  NG : 2278.82万円, 29.11%
+  例外: 一致判定（R-STAT-7 は有効数字4桁で同値を判定する）の行は4桁まで許す。
 
 Scope guards (false-positive avoidance) — the checker deliberately IGNORES:
   - fenced code blocks and inline code (raw/full-precision values are allowed there)
   - dates (2026-07-24), times, version strings (v1.2.3), file names
   - long digit strings without a decimal point (IDs, sha, 12桁マイナンバー, epoch ms)
   - values inside HTML comments
-Only decimal numbers with >4 significant digits in PROSE/TABLE text are flagged.
+Only decimal numbers with >3 significant digits in PROSE/TABLE text are flagged
+(>4 on equivalence-judgment lines, see EQUIV_CTX).
 """
 import re
 
@@ -21,12 +25,14 @@ import re
 NUM = re.compile(r"(?<![0-9A-Za-z_.])(-?\d+\.\d+)(?![0-9A-Za-z_.])")
 DATEISH = re.compile(r"\d{4}-\d{2}-\d{2}|\d{4}/\d{2}/\d{2}|v?\d+\.\d+\.\d+")
 # A line quoting a source's own measurement. Rounding these would misquote the
-# source, so the 4-sigfig rule does not apply to them.
+# source, so the sigfig rule does not apply to them.
 CITATION_CTX = re.compile(
     r"et al\.|\(20\d\d\)|\b(?:RCT|SD|CI)\b|[Pp]\s*[<=]\s*0?\.\d|95%\s*CI|"
     r"\bn\s*=\s*\d|\bN\s*=\s*\d|arxiv|doi|"
     # 「253.89 ± 5.59 mg CE/g」等の実測値±SD 表記。丸めると出典の誤引用になる。
     r"±|\+/-", re.I)
+# 一致判定（R-STAT-7: 有効数字4桁で同値とみなす）を述べる行。
+EQUIV_CTX = re.compile(r"一致|同値|等価|R-STAT-7|equivalen", re.I)
 
 
 def _strip_uncheckable(text):
@@ -128,7 +134,7 @@ def analyze_text(text):
     for m in NUM.finditer(scan):
         raw = m.group(1)
         n = sigfigs(raw)
-        if n <= 4:
+        if n <= 3:
             continue
         line = scan.count("\n", 0, m.start()) + 1
         # Cited third-party measurements must be reproduced verbatim; rounding a
@@ -137,18 +143,21 @@ def analyze_text(text):
         src = lines_raw[line - 1] if line - 1 < len(lines_raw) else ""
         if CITATION_CTX.search(src):
             continue
+        # 一致判定の行は R-STAT-7（有効数字4桁で同値判定）に従うため4桁まで許す。
+        if n <= 4 and EQUIV_CTX.search(src):
+            continue
         try:
             val = float(raw)
-            # round to 4 significant figures for the suggestion
+            # round to 3 significant figures for the suggestion
             from decimal import Decimal
             if val == 0:
                 sug = "0"
             else:
                 import math
                 exp = math.floor(math.log10(abs(val)))
-                q = round(val, -(exp - 3))
+                q = round(val, -(exp - 2))
                 sug = ("%g" % q)
         except Exception:
-            sug = "(4桁に丸める)"
+            sug = "(3桁に丸める)"
         findings.append({"line": line, "value": raw, "sigfigs": n, "suggestion": sug})
     return findings
