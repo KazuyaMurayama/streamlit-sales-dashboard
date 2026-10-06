@@ -21,6 +21,13 @@ import os
 import re
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    from firing_log import record as _record_firing
+except Exception:
+    def _record_firing(*_a, **_k):
+        return False
+
 # 判断が必要な工程を表す語。ユーザー指示 2026-08-14「計画段階、分析、最終チェック、
 # その他判断が必要なプロセス」を語彙化したもの。固有名詞ではなく工程名で書く。
 JUDGMENT = re.compile(
@@ -53,10 +60,10 @@ def verdict(model, text):
         return None
     return (
         "モデル階層ルール（2026-08-14）: 判断を伴う工程（計画・分析・検証・最終チェック等）は "
-        "Opus 5 を既定とし、独立QC・最終レビューのみ Fable 5 を使う。"
+        "Opus を既定とし、独立QC・最終レビューのみ Fable を使う。"
         "この Task は判断系だが sonnet 系で起動されようとしている。"
         "単純作業（整形・転記・機械的抽出）ならこのまま可。"
-        "判断を含むなら model を 'opus'（独立QCなら 'claude-fable-5'）に変更すること。"
+        "判断を含むなら model を 'opus'（独立QCなら 'fable'）に変更すること。"
     )
 
 
@@ -83,12 +90,19 @@ def main():
         raw = sys.stdin.buffer.read()
         data = json.loads(raw.decode("utf-8", "replace"))
         ti = data.get("tool_input") or {}
+        # 判定は subagent_type と description だけで行い、prompt 本文は見ない。
+        # 較正（2026-10-06・実測・直近14日の委譲988件、うち sonnet 指定321件）:
+        #   prompt まで見ると sonnet 委譲の 78.2%（251件）で発火した。prompt には
+        #   「検証」「計画」等の定型語が必ず入り、実装・転記の委譲まで警告して形骸化する。
+        #   description だけにすると 22.4%（72件）に下がり、残るのは「QC前提攻撃」
+        #   「Verify Task deliverables」等の判断系だった。
         text = " ".join(
             str(ti.get(k) or "")
-            for k in ("subagent_type", "description", "prompt")
+            for k in ("subagent_type", "description")
         )
         why = verdict(str(ti.get("model") or ""), text)
         if why:
+            _record_firing("model_tier_guard", data)
             print(json.dumps({
                 "hookSpecificOutput": {
                     "hookEventName": "PreToolUse",
