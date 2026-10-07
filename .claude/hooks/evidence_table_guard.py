@@ -143,10 +143,11 @@ EUTILS = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/"
 CONF_VOCAB = {"高", "中", "低"}
 # 2026-09-18 追加: 二軸化（判定＋独自性）。独自性は「効く」ことを含意せず、証拠の代わりにならない。
 # 未検証 = 検証可能だが当たる研究が無い（自己申告・逸話のみ）。検証対象外 = 原理的に実証不能。
-VERDICT_VOCAB = {"支持", "部分支持", "反証", "未検証", "検証対象外"}
+# 探索不足（2026-10-07 追加）= 探したが「未検証」と言える条件（EVIDENCE_SEARCH_GUIDE §3 の5条件）を満たせなかった
+VERDICT_VOCAB = {"支持", "部分支持", "反証", "未検証", "探索不足", "検証対象外"}
 NOVELTY_VOCAB = {"通説", "再構成", "独自"}
-VERDICT_RANK = {"支持": 0, "部分支持": 1, "反証": 2, "未検証": 3, "検証対象外": 4}
-VERDICT_RANK_NAME = dict((v, k) for k, v in VERDICT_RANK.items())
+VERDICT_RANK = {"支持": 0, "部分支持": 1, "反証": 2, "未検証": 3, "探索不足": 3, "検証対象外": 4}
+VERDICT_RANK_NAME = dict((v, k) for k, v in VERDICT_RANK.items() if k != "探索不足")  # 3 は「未検証」で表示
 CENTRAL_ORDER_RE = re.compile(r"並び順\s*[:：]\s*(?:本書の)?中心命題")
 EFFECT_VOCAB = {"大", "中", "小", "ほぼゼロ", "不明", "不適用"}
 EXEMPT_RE = re.compile(r"検証対象外|に同じ")
@@ -156,6 +157,56 @@ EXEMPT_RE = re.compile(r"検証対象外|に同じ")
 # 較正（2026-09-26・全リポの科学系の表 18ファイル 269行）: 識別子なし 235行、
 # 「該当なし」だけで免除されていた行 0、探索記録のある行 0 → 既存ファイルの判定は変わらない。
 SEARCH_LOG_RE = re.compile(r"探索\s*[:：][^|]*?[→>]\s*\d+\s*件")
+# 2026-10-07 改訂: 上の書式（言い換え1通りでも書ける）だけでは免除しない。
+# 経営書15本で118行中67行が「未検証」だったが、探索は言い換え0通り。三枝3冊の15行を
+# EVIDENCE_SEARCH_GUIDE §3 どおり探し直すと6行で判定が変わった（BCG マトリクスは反する実験あり）。
+# 免除する探索記録は「探索(日付・⚠なし): A / B / C / D ＋WebSearch … → N件」
+# ＝言い換え4通り・道具の警告なし（Semantic Scholar 全滅でない）・WebSearch 併用。
+# 満たせない行は判定を「探索不足」にすれば、旧書式の記録でも免除する（正直に書けば通る）。
+# 照合前に強調記号 * を剥がす。括弧の中（日付・⚠なし）は入れ子の括弧も許す（最後の「）:」まで）。
+# 検索語に → を含みうるので、件数の直前の最後の矢印まで取る（Fable 反証 2026-10-07 #3）。
+STRONG_LOG_RE = re.compile(r"探索\s*[（(]([^|]*?)[)）]\s*[:：]([^|]*)[→⇒>]\s*([0-9０-９]+)\s*件")
+ANY_LOG_RE = re.compile(r"探索\s*(?:[（(][^|]*?[)）])?\s*[:：][^|]*[→⇒>]\s*[0-9０-９]+\s*件")
+_LOG_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+_LOG_NOWARN_RE = re.compile(r"⚠\s*(?:なし|無し)")
+
+
+def _term_ok(t):
+    # 中身のある言い換えか: 英字3字以上の語が2つ以上・6字以上の単語（refocusing 等）・日本語4字以上
+    # （"a" "b" の水増しを数えない。Fable 反証 2026-10-07 #2）
+    return (len(re.findall(r"[A-Za-z]{3,}", t)) >= 2 or bool(re.search(r"[A-Za-z]{6,}", t))
+            or len(re.findall(r"[\u3040-\u30ff\u4e00-\u9fff]", t)) >= 4)
+
+
+def search_log(rowtext):
+    """探索記録を読む。戻り値: None（記録なし）または dict(strong, found, terms, why)。
+    strong = 日付・⚠なし・WebSearch 併用・中身のある別々の言い換え4通り。
+    機械で確かめられないこと（⚠なしは自己申告、実際に回したか）は呼び出し側が REVIEW に回す。"""
+    t = rowtext.replace("*", "")
+    m = STRONG_LOG_RE.search(t)
+    if not m:
+        return {"strong": False, "found": None, "terms": [], "why": "旧書式（括弧に日付・⚠なしが無い）"} if ANY_LOG_RE.search(t) else None
+    meta, body, n = m.group(1), m.group(2), int(m.group(3).translate(str.maketrans("０１２３４５６７８９", "0123456789")))
+    terms, seen = [], set()
+    b = re.sub(r"[（(][^（）()]*websearch[^（）()]*[)）]", " ", body, flags=re.I)   # 括弧書きの WebSearch は語に数えない
+    for x in re.split(r"\s*[/／・＋+]\s*", b):
+        k = re.sub(r"\s+", " ", x).strip().casefold()
+        if not k or "websearch" in k or k in seen or not _term_ok(k):
+            continue
+        seen.add(k)
+        terms.append(x.strip())
+    why = []
+    if not _LOG_DATE_RE.search(meta):
+        why.append("日付なし")
+    if not _LOG_NOWARN_RE.search(meta):
+        why.append("⚠なしの記載なし")
+    if "websearch" not in m.group(0).casefold():
+        why.append("WebSearch なし")
+    if len(terms) < 4:
+        why.append("別々の言い換えが %d 通り" % len(terms))
+    return {"strong": not why, "found": n, "terms": terms, "why": "・".join(why)}
+
+
 PMID_RE = re.compile(r"pubmed\.ncbi\.nlm\.nih\.gov/(\d+)|\bPMID\s*[:：]?\s*(\d{6,9})", re.I)
 # 「DOI: 10.…」だけでなく「DOI 10.…」（コロン無し）も識別子として拾う。
 # 実測 2026-09-15: コロン無しで書いた Haber 1979 の DOI が抽出されず、
@@ -710,7 +761,18 @@ def analyze(text, cache, resolver_pm=resolve_pmids, resolver_doi=resolve_doi, re
         cid = row[i_id].strip("* ")
         seen_ids.add(cid)
         rowtext = " | ".join(row)
-        exempt = bool(EXEMPT_RE.search(rowtext) or SEARCH_LOG_RE.search(rowtext))
+        log = search_log(rowtext)
+        # 免除は判定セルで決める（行のどこかに「探索不足」の語があるだけでは免除しない。Fable 反証 #1）
+        vd0 = re.sub(r"（.*?）|\(.*?\)", "", row[i_verdict] if i_verdict is not None and i_verdict < len(row) else "").replace("*", "").strip()
+        log_ok = bool(log) and (
+            (vd0 == "探索不足") or
+            (vd0 in ("未検証", "") and log["strong"]))
+        exempt = bool(EXEMPT_RE.search(rowtext) or log_ok)
+        if log_ok and log["strong"]:
+            reviews.append("%s R1 探索記録で免除（%s・%d件）: ⚠なし・実行は自己申告。検索語: %s"
+                           % (cid, vd0 or "判定列なし", log["found"], " / ".join(log["terms"])[:160]))
+            if log["found"] and vd0 == "未検証":
+                reviews.append("%s R1 探索で %d 件見つかったのに「未検証」。題名・抄録を読んで判定したか確認する" % (cid, log["found"]))
         # R9 二軸の語彙（2026-09-18 追加）。判定列を持つ表すべてが対象＝製品系も含む。
         if i_verdict is not None:
             # 括弧の注記を先に落としてから強調記号を剥がす。逆順だと
@@ -719,7 +781,7 @@ def analyze(text, cache, resolver_pm=resolve_pmids, resolver_doi=resolve_doi, re
             vd = row[i_verdict] if i_verdict < len(row) else ""
             vd = re.sub(r"（.*?）|\(.*?\)", "", vd).replace("*", "").strip()
             if vd and vd not in VERDICT_VOCAB:
-                fails.append("%s R9 判定が語彙外: 「%s」（支持/部分支持/反証/未検証/検証対象外）"
+                fails.append("%s R9 判定が語彙外: 「%s」（支持/部分支持/反証/未検証/探索不足/検証対象外）"
                              % (cid, vd))
             elif vd:
                 verdict_seq.append((cid, vd))
@@ -732,8 +794,12 @@ def analyze(text, cache, resolver_pm=resolve_pmids, resolver_doi=resolve_doi, re
         if not ids:
             # R1 は科学系の表だけに課す。製品・実務系は一次資料が公式ドキュメントであり
             # PMID/DOI を持たない（課すと全行が偽 FAIL になる）。R9 の語彙検査は上で済んでいる。
-            if not exempt and is_science_table:
-                fails.append("%s R1 識別子なし（PubMed/DOI の URL か PMID/DOI を書く。見つからない場合は scripts/evidence_search.py で探し「探索: <検索語> → N件」を書く。免除は「検証対象外」明記時のみ）" % cid)
+            if not exempt and is_science_table and log:
+                fails.append("%s R1 探索記録が足りない（%s。判定「%s」）。「未検証」と書けるのは 日付・道具の⚠なし・WebSearch 併用・別々の言い換え4通りのとき。"
+                             "書式: 探索(日付・⚠なし): A / B / C / D ＋WebSearch … → N件。満たせなければ判定を「探索不足」にする。"
+                             "支持・反証なら識別子を書く。docs/EVIDENCE_SEARCH_GUIDE.md §3" % (cid, log["why"] or "判定と合わない", vd0))
+            elif not exempt and is_science_table:
+                fails.append("%s R1 識別子なし（PubMed/DOI の URL か PMID/DOI を書く。見つからない場合は scripts/evidence_search.py で言い換え4通り＋WebSearch で探し「探索(日付・⚠なし): A / B / C / D ＋WebSearch … → N件」を書く。免除は「検証対象外」明記時のみ）" % cid)
             continue
         # R5 vocabulary（免除行以外）
         if not exempt:
@@ -947,6 +1013,27 @@ def _selftest():
     cases += [
         ("red R9b: 宣言なしで検証対象外が支持より上", T, 1, "R9b"),
         ("green R9b: 「並び順: 本書の中心命題に近い順」宣言ありは対象外", "並び順: 本書の中心命題に近い順\n\n" + T, 0, None),
+    ]
+    # 2026-10-07: 探索記録の強さ（三枝3冊で、言い換えなしの「未検証」15行中6行が覆った）
+    S = ("並び順: 本書の中心命題に近い順\n\n| # | 主張 | 独自性 | 判定 | 信頼度 | 効果量 | 根拠の要点 | 出典 |\n"
+         "|---|---|---|---|---|---|---|---|\n| 1 | 集中 | 通説 | %s | 低 | 不適用 | %s | 著者の主張のみ |\n")
+    strong = "探索(2026-10-07・⚠なし): focus strategy / niche strategy / diversification meta-analysis / refocusing ＋WebSearch meta-analysis → 0件"
+    cases += [
+        ("red R1: 言い換え1通りの旧書式で未検証（当時の欠陥）", S % ("未検証", "探索: market segmentation targeting firm performance → 8件"), 1, "R1 探索記録が足りない"),
+        ("green R1: 4通り・⚠なし・WebSearch の記録", S % ("未検証", strong), 0, None),
+        ("red R1: ⚠ありの記録（S2 全滅）", S % ("未検証", strong.replace("⚠なし", "⚠あり")), 1, "R1"),
+        ("red R1: 3通りしかない", S % ("未検証", strong.replace(" / refocusing", "")), 1, "R1"),
+        ("red R1: WebSearch なし", S % ("未検証", strong.replace(" ＋WebSearch meta-analysis", "")), 1, "R1"),
+        ("green R1: 探索不足と正直に書けば旧書式でも通る", S % ("探索不足", "探索: market segmentation → 8件"), 0, None),
+        ("red R1: 判定=支持で識別子なし・強い記録（Fable #1）", S % ("支持", strong), 1, "R1"),
+        ("red R1: 未検証で「探索不足」の語を根拠に書いただけ（Fable #1）", S % ("未検証", "探索: focus → 8件（探索不足ではない）"), 1, "R1"),
+        ("red R1: 同じ語を4回（Fable #2）", S % ("未検証", "探索(2026-10-07・⚠なし): focus strategy / focus strategy / Focus Strategy / focus strategy ＋WebSearch x → 0件"), 1, "R1"),
+        ("red R1: 中身のない1文字語（Fable #2）", S % ("未検証", "探索(2026-10-07・⚠なし): a / b / c / d ＋WebSearch x → 0件"), 1, "R1"),
+        ("red R1: WebSearch を4語目に数える（Fable #2）", S % ("未検証", "探索(2026-10-07・⚠なし): focus strategy / niche strategy / refocusing firms / WebSearch meta analysis → 0件"), 1, "R1"),
+        ("red R1: 日付なし（Fable #2）", S % ("未検証", strong.replace("2026-10-07・", "")), 1, "R1"),
+        ("green R1: 強調・⚠ なし・⇒・入れ子括弧（Fable #3）", S % ("未検証", "**探索(2026-10-07(再実行)・⚠ なし)**: focus strategy / niche strategy / diversification meta-analysis / corporate refocusing（WebSearch focus meta-analysis も） ⇒ 0件"), 0, None),
+        ("green R9b: 探索不足 → 未検証 の順は同じ帯（Fable #4）",
+         (S % ("探索不足", "探索: x y → 1件")).replace("並び順: 本書の中心命題に近い順\n\n", "") + "| 2 | 絞り | 通説 | 未検証 | 低 | 不適用 | " + strong + " | 著者の主張のみ |\n", 0, None),
     ]
     bad = 0
     for name, text, want_fail, tag in cases:
