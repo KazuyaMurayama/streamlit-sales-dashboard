@@ -36,11 +36,17 @@ WHAT IT DOES
    within 600 chars.
 3. LOOKUP, newest first, first hit wins:
    ① the user's own typed prompts earlier in this transcript (pasted blocks
-     stripped): the sentence must contain stem+suffix-family, ASSERT a state
-     (です／している／すべて／のみ …) and not REQUEST one (してください …);
-   ② ~/.claude/projects/*/memory/*.md, same assert condition;
+     stripped): the sentence must name the option -- core of the stem (attribute
+     noun 口座／プラン／あり … stripped) + optional attribute noun + a particle, or
+     the v3 stem+suffix-family -- and the CLAUSE that names it (split at 、／ため／
+     ので／けど／から) must ASSERT a state (です／している／すべて／を使っ／に加入／
+     ではありません／〜なし・ …) and not be a guess, plan or question (もし／はず／
+     と思／予定です／〜か？). The sentence must not REQUEST (してください …) nor be
+     about a third party (友人は／顧客が／読者の …);
+   ② ~/.claude/projects/*/memory/*.md, same statement condition;
    ③ compact summaries, only sentences attributed to the user
-     (user／ユーザー／述べ／伝え／stated／said／told).
+     (user／ユーザー／述べ／伝え／stated／said／told) and not recording that
+     Claude asked (確認を依頼／尋ね／asked).
 4. A hit blocks the stop ONCE per instruction, quoting the user's words, and
    asks Claude to collapse to that premise and write
    「前提（ユーザー確認済み）: 〜（根拠: YYYY-MM-DD の発言）」.
@@ -53,14 +59,30 @@ this hook's own branches()/lookup() imported):
     v1 naive keywords        fire 20 (1.00%)  true 1  -- 初版/改訂版/自己申告,
                              compact summary quoting Claude's own words
     v2 +ask-hint +assert     fire  6 (0.30%)  true 1  -- その場合／この場合
-    v3 +no deictic/1-char    fire  1 (0.05%)  true 1  <-- adopted
+    v3 +no deictic/1-char    fire  1 (0.05%)  true 1  branch 19
     v4 v3 + suffix 「なら」   fire  8 (0.40%)  true 1  -- rejected
-The one firing is the incident turn; defective answer alone fires, defective
-.md alone fires, the corrected answer+md is silent. The 18 silent branch turns
-were about third parties (料金プラン, 妊娠中の人 …), where silence is right.
-Known misses (round 2, thresholds NOT lowered): label without suffix
-(「特定なら…一般なら…」), English-only branch or summary, a bare question with
-no option labels (「口座区分を教えてください」).
+    v5 (re-measured 2026-10-09 20:48 JST, 58 transcripts / 1,996 turns)
+       P1 lookup decoupled from the suffix family + clause-level statement
+       P2 Latin stems, 1 space before the suffix, predicate/wh-word stems out
+       P3 ask hints 「かで…変わ」「合わせて選」「当てはまる」「ご自身の」
+                             fire  1 (0.05%)  true 1  branch 15  <-- adopted
+       (the same single incident turn; the 4 branch turns v5 drops are
+       「どのプランの人」 x3 and a 「である可能性の方」 predicate fragment.
+       A draft that also accepted ASCII 「.」 after the core fired 3 times on
+       「どの.gs」 in MEMORY.md -- rejected.)
+WHY v5: the Fable adversarial review (2026-10-09) showed v3 was silent on the
+incident sentence itself 「特定口座の分は…一般口座の分は…どちらか確かめてくだ
+さい」: the lookup searched 「特定口座」+FAMILY[の分] = 「特定口座口座」. v3 fired on
+the real incident only through an incidental 「一般預りがあれば」. Synthetic set
+(tests/test_stated_state_guard_synthetic.py): recall 5/23 -> 17/23, baits 5/12
+-> 2/12 (F06/F11: deliverables for third parties / general readers, accepted;
+the pass label covers them).
+Known misses (thresholds NOT lowered): label without suffix (「特定なら…一般なら…」),
+English-only branch or summary, a bare question with no option labels
+(「口座区分を教えてください」), multi-token labels with a space (「Pro プランの方」
+「Windows をお使いの方」), a label followed by と／で (「個人の場合と法人の場合で」),
+and statements that need a value dictionary (「個人事業主」→個人, 「給与収入は
+ありません」→給与なし, 「退職しています」→退職済み).
 
 fail-open: any exception -> exit 0. stop_hook_active -> return.
 Deployed from claude-governance/templates/hooks/ -- edit there, not here.
@@ -101,13 +123,13 @@ def memory_glob():
     return os.path.join(os.path.expanduser("~"), ".claude", "projects", "*", "memory", "*.md")
 
 
-# ---- v3 settings (calibration 2026-10-09). Do not widen without re-running the calibration.
+# ---- v5 settings (calibration 2026-10-09). Do not widen without re-running the calibration.
 SUFFIX = r"(?:の場合|の分|の方|であれば|預り|預かり|口座|プラン|契約|会員|居住|在住|ユーザーの場合|の人)"
 FAMILY = {"預り": "(?:預り|預かり|口座)", "預かり": "(?:預り|預かり|口座)", "口座": "(?:預り|預かり|口座)",
           "の場合": "(?:の場合|なら|で|です|である|を使|にして|になって)", "の分": "(?:預り|預かり|口座|の分)",
           "の方": "(?:の方|です|である|で)", "であれば": "(?:なら|で|です|である)", "の人": "(?:です|である|で)"}
 STEM = r"[^\s、。，．（）()「」『』【】\[\]*:：/・|｜#>=<→←]{1,10}"
-LABEL = re.compile(r"(?<![^\s、。（）「」【】*:：/・|｜\-■●◆\d]) ?(" + STEM + r")(" + SUFFIX + r")"
+LABEL = re.compile(r"(?<![^\s、。（）「」【】*:：/・|｜\-■●◆\d]) ?(" + STEM + r")[ \u3000]?(" + SUFFIX + r")"
                    r"(?=[はがも、：:\s（(]|です|だけ|のみ|なら|の取引|の分)")
 STOP = set((
     "その この あの 以下 上記 下記 多く 通常 標準 既存 新規 最新 旧 新 他 別 同 各 全 両 前 後 今 次 先 本 当 該 "
@@ -119,12 +141,28 @@ STOP = set((
     "肯定 否定 賛成 反対 採用 不採用 棄却 多数 少数 最初 最後 上記以外 それ以外 これ以外 そうでない 否 不明 判定不能 "
     "発火 未発火 ブロック 警告 無反応").split())
 ASK_HINT = re.compile(r"確かめ|確認し|確認する|確認して|どちら|いずれ|どれに|該当|当たるか|教えて|お知らせ"
-                      r"|分からない場合|不明な場合|次第|によって(?:変|異|分)")
+                      r"|分からない場合|不明な場合|次第|によって(?:変|異|分)"
+                      # v5 (P3): 「AかBかで手順が変わります」「ご自身の状況に合わせて選んで」「当てはまる方を」
+                      r"|かで(?:手順|手続|やり方|結論|扱い|対応)?が?(?:変わ|異な|分かれ)|合わせて選|当てはまる|ご自身の|お使いの")
 ASSERT = re.compile(r"です|でした|である|している|してます|しています|してる|して(?:い)?る|で行って|を使って|使ってい"
                     r"|に住んで|を持って|持ってい|になってい|にしてい|契約して|加入して|開設して|保有して"
-                    r"|すべて|全て|全部|のみ|だけ|しかない|しかありません")
+                    r"|すべて|全て|全部|のみ|だけ|しかない|しかありません"
+                    # v5 (P1): を/に/で + verb, negation (a negative is a stated state), memo form 「車なし・持ち家あり」
+                    r"|を使っ|を利用|に加入|に住ん|で申告|で運用|で取引|を契約|をしてい"
+                    r"|ではありません|ではない|はありません|していません|持っていません|いません|ありません"
+                    r"|(?:あり|なし)(?:\s|$|・|、|。)")
 REQUEST = re.compile(r"してください|して下さい|してほしい|して欲しい|お願いし|にしてくれ|にして。|になるように")
+# v5 (P1): a clause that names the attribute but is a guess / plan / question is not a state
+NOT_STATE = re.compile(r"[かの][？?]?\s*$|はず|と思|もし|仮に|だったら|としたら|予定です|つもり|検討")
+CLAUSE = re.compile(r"(?<=、)|(?<=ため)|(?<=ので)|(?<=けど)|(?<=から)")
+# a sentence about someone else's attribute is not the user's state
+THIRD = re.compile(r"(?:友人|家族|妻|夫|親|子|同僚|顧客|お客|取引先|読者|相手|先方|彼|彼女)(?:は|が|の|も)")
+# a compact sentence recording that Claude ASKED is not the user's statement
+COMPACT_ASK = re.compile(r"確認を依頼|尋ね|質問し|\basked\b", re.I)
+ATTR_TAIL = r"(?:口座|預り|預かり|プラン|契約|会員|在住|居住|あり|なし)$"
+ATTR = r"(?:口座|預り|預かり|プラン|契約|会員|版|在住|居住|あり|なし)?"
 USER_MARK = re.compile(r"\buser\b|ユーザー|述べ|伝え|stated|said|told|according to the user|user's", re.I)
+STOP_LATIN = set("OK NG v1 v2 v3 A B C X Y Z".split())
 # pass label: the branch is about a different case than the one the user stated
 EXEMPT = re.compile(r"[（(]既述とは別件")
 
@@ -133,8 +171,14 @@ def _ok_stem(s):
     s = s.lstrip("—－-ー ")
     if len(s) < 2 or re.fullmatch(r"[そこあど][のれ]?|そう|こう", s):   # その場合/この場合 are not option labels
         return False
-    return (s not in STOP and not re.fullmatch(r"[\dA-Za-z.%,]+", s)
-            and bool(re.search(r"[぀-ヿ一-鿿A-Za-z]", s)))
+    # v5 (P2): Latin stems (Windows / iPhone / NISA) are labels; only digits, version tags and 1 letter are not
+    if s in STOP or s in STOP_LATIN or re.fullmatch(r"[\d.%,]+|v\d+|[A-Za-z]", s):
+        return False
+    if re.search(r"である|可能性|より|こと|もの|ため|べき|しない|ない$", s):   # predicate fragments, not option labels
+        return False
+    if re.match(r"(?:どの|どれ|どちら|どんな|どう|何|なに|いずれ)", s):   # 「どのプランの人」 is a question, not an option
+        return False
+    return bool(re.search(r"[぀-ヿ一-鿿A-Za-z]", s))
 
 
 def _paragraph(t, p):
@@ -176,20 +220,42 @@ def _sentences(txt):
     return re.split(r"(?<=[。\n])", txt or "")
 
 
+def _pattern(stem, suf):
+    """User-side pattern. v3 required stem+FAMILY[suf] right after the stem, so 「特定口座」+「の分」
+    looked for 「特定口座口座」 and never matched 「一般口座で行っている」 (v5 P1 fix): strip the
+    attribute noun to a core and accept core [space] [attribute noun] particle; keep the v3 form too."""
+    core = re.sub(ATTR_TAIL, "", stem) or stem
+    fam = FAMILY.get(suf, re.escape(suf))
+    return re.compile("(?:" + re.escape(core) + r"[ \u3000]?" + ATTR
+                      + r"(?:の場合|なら|で|です|である|を|に|は|が|も|だ|、|[・。;；,，）]|\s|$)"
+                      + "|" + re.escape(stem) + fam + ")")
+
+
+def _is_statement(sent, pat):
+    """The sentence names the attribute, and the clause that names it asserts a state
+    (not a request, a third party, a guess, a plan or a question)."""
+    s = sent.strip()
+    if not pat.search(s) or REQUEST.search(s) or THIRD.search(s):
+        return False
+    for cl in CLAUSE.split(s):
+        if pat.search(cl) and ASSERT.search(cl) and not NOT_STATE.search(cl):
+            return True
+    return False
+
+
 def lookup(groups, prior_rows, memory):
     """prior_rows: [(ts, text, kind)] with kind in {"prompt","compact"}, oldest first.
     memory: [(path, text)]. Returns [(label, kind, where, sentence)], one per matched stem."""
     found = []
     for suf, stems, _p in groups:
-        fam = FAMILY.get(suf, re.escape(suf))
         for s in sorted(stems):
-            pat = re.compile(re.escape(s) + fam)
+            pat = _pattern(s, suf)
             hit = None
             for ts, txt, kind in reversed(prior_rows):          # newest first
                 if kind != "prompt":
                     continue
                 for sent in _sentences(txt):
-                    if pat.search(sent) and ASSERT.search(sent) and not REQUEST.search(sent):
+                    if _is_statement(sent, pat):
                         hit = (s + suf, "prompt", ts, sent.strip()[:160])
                         break
                 if hit:
@@ -197,7 +263,7 @@ def lookup(groups, prior_rows, memory):
             if not hit:
                 for fn, txt in memory:
                     for sent in _sentences(txt):
-                        if pat.search(sent) and ASSERT.search(sent) and not REQUEST.search(sent):
+                        if _is_statement(sent, pat):
                             hit = (s + suf, "memory", os.path.basename(fn), sent.strip()[:160])
                             break
                     if hit:
@@ -207,7 +273,7 @@ def lookup(groups, prior_rows, memory):
                     if kind != "compact":
                         continue
                     for sent in _sentences(txt):
-                        if pat.search(sent) and USER_MARK.search(sent):
+                        if pat.search(sent) and USER_MARK.search(sent) and not COMPACT_ASK.search(sent):
                             hit = (s + suf, "compact", ts, sent.strip()[:160])
                             break
                     if hit:
