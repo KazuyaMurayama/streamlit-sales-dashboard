@@ -225,8 +225,9 @@ except Exception:  # adapter missing: say so, do not fail silently
 # under ~/.claude/state/countermeasure_gate/<session_id>.json, holding
 # last_fired (ISO8601 UTC) and a cumulative count. Failures here must never
 # break the gate itself, so every step is wrapped and swallowed.
-STATE_DIR = os.path.join(os.path.expanduser("~"), ".claude", "state",
-                         "countermeasure_gate")
+STATE_DIR = (os.environ.get("COUNTERMEASURE_GATE_STATE_DIR")   # tests
+             or os.path.join(os.path.expanduser("~"), ".claude", "state",
+                             "countermeasure_gate"))
 
 
 def _fire_sid(ev):
@@ -736,7 +737,7 @@ def _load_rows(path, tail=4000):
     return rows
 
 
-def _subagent_uses(transcript_path, since):
+def _subagent_uses(transcript_path, since, until=None):
     """Tool calls made by subagents dispatched in this turn.
 
     Claude Code stores each subagent's transcript at
@@ -760,6 +761,9 @@ def _subagent_uses(transcript_path, since):
             if since is not None:
                 rows = [r for r in rows
                         if (_ts(r.get("timestamp")) or since) >= since - 1]
+            if until is not None:   # replay of a past turn (calibration)
+                rows = [r for r in rows
+                        if (_ts(r.get("timestamp")) or until) <= until + 1]
             out.extend(_tool_uses(rows))
     except Exception:
         pass
@@ -834,7 +838,39 @@ def _read_turn_full(transcript_path):
 
     uses = _tool_uses(rows[start + 1:])
     uses += _subagent_uses(transcript_path, _ts(rows[start].get("timestamp")))
+    # C08 2026-10-12: context for the continuation / self-claim / schedule /
+    # sibling-copy checks, kept on the function so the 3-tuple API is intact.
+    _read_turn_full.ctx = {
+        "prior_asks": [_text(rows[i]) or "" for i in user_idx[-7:-1]][::-1],
+        "prior_idx": user_idx[-7:-1][::-1],
+        "rows": rows,
+        "tp": transcript_path,
+        "cwd": rows[start].get("cwd"),
+        "final_text": _final_text(rows[start + 1:]),
+        "turn_text": _text_after_last_sched(rows[start + 1:]),
+        "start_ts": _ts(rows[start].get("timestamp")),
+    }
     return ask, _blob(uses), uses
+
+
+_read_turn_full.ctx = {}
+
+
+def _final_text(rows, every=False):
+    """The last assistant text of the turn (what the user reads as the answer);
+    every=True: all assistant texts of the turn, joined (S accepts a first-firing
+    plan stated in any message, e.g. the answer before a later 補足)."""
+    allt = []
+    for r in reversed(rows):
+        if r.get("type") != "assistant" or r.get("isSidechain"):
+            continue
+        tx = [b.get("text") for b in ((r.get("message") or {}).get("content") or [])
+              if isinstance(b, dict) and b.get("type") == "text"
+              and isinstance(b.get("text"), str) and b.get("text").strip()]
+        if tx and not every:
+            return "\n".join(tx)
+        allt[:0] = tx
+    return "\n".join(allt)
 
 
 def _blob(uses):
@@ -947,6 +983,500 @@ def _mechanical_checks(uses):
     e = _adversarial_dispatched(uses)
     return {"a": bool(stems), "b": b, "c": c_, "d": d, "e": e,
             "exempt": exempt}
+
+
+# =========================================================================
+# C08 REDESIGN 2026-10-12 (correction digest: 撤回・再設計, 3 recurrences)
+# -------------------------------------------------------------------------
+# Measured on the 3 real recurrences (index/correction_history.jsonl) by
+# replaying the turn that shipped each defective countermeasure through the
+# gate as of beab694:
+#   A 2026-10-02 06:47 「4時半頃/9時半ごろ…再発防止が必要です」 (RemoteTrigger
+#     edits): triggered, blocked once for (e), then passed -- (c) was met by
+#     test_routine_data.py and a manual `RemoteTrigger run`. Neither exercises
+#     the SCHEDULED firing (UTC date, 5h usage window); the job broke at its
+#     next 4:20 run (complaint 10-07 00:37).
+#   B 2026-10-07 10:30 「すすめて」 (evidence_search.py fixed in the template,
+#     cp'd to 3 repos; youtube-to-presentation kept an old copy): NOT
+#     triggered -- the ask is a continuation, the countermeasure was named two
+#     prompts earlier. No check anywhere compares same-name copies in other
+#     repos (scope_coverage_guard covers ID-named DOCUMENT families only).
+#   C 2026-10-09 08:54 「一般預りと伝えたはず」 (assistant chose 再発防止 itself,
+#     saved a memory file, wrote 「再発防止は、記憶への保存までは済んでいます」):
+#     NOT triggered -- the user never said 再発防止, so (e) was never asked.
+# CLASS (one sentence): the gate keyed on the wording of the CURRENT user
+# prompt and on in-turn evidence only, so countermeasures commissioned by
+# context (continuations, the assistant's own decision) and countermeasures
+# whose real firing / real scope lies outside the turn (schedules, copies in
+# other repos) were never held to the proofs.
+# INVARIANTS added:
+#   T2  a continuation prompt (すすめて/実行して/OK...) inherits the request
+#       status of the last substantive prompt (<= 3 back).
+#   T3  the turn's FINAL answer claims a countermeasure is (partly) in place
+#       (「再発防止は…済んでいます」「再発しないよう…追加しました」) -> proofs (a)-(e).
+#   S   a schedule was created/changed (RemoteTrigger create/update,
+#       CronCreate, schtasks /create|/change, Register/Set-ScheduledTask,
+#       crontab, a workflow `cron:`) -> the final answer must name the first
+#       scheduled firing and say it will be / was checked. A manual run does
+#       not exercise the schedule.
+#   X   a code file was edited in repo R and an equivalent copy (same
+#       distinctive basename, >= 30% shared lines, content differs) exists in
+#       another repo under the same parent, not written during the turn and
+#       not named in the final answer -> block with the list.
+# S and X apply to every turn (B and A were not phrased as 再発防止); T2/T3
+# only widen when (a)-(e) are demanded.
+# =========================================================================
+CONTINUATION_RE = re.compile(
+    u"^\\s*(?:[①-⑳\\d]+\\s*(?:から|を)?\\s*)?"
+    u"(?:すすめて|進めて|実行して|続けて|つづけて|続行|やって|お願いします|おねがい"
+    u"|はい|ok|OK|オーケー|了解|それで|どうぞ|go|continue|proceed|yes)"
+    u"(?:ください|下さい|ね|よ)?\\s*[。！!.]?\\s*$", re.IGNORECASE)
+# Fable 2026-10-12: a short status check / nudge between a request and its
+# continuation (「すすめてる？」「どうなった？」) must not break the chain.
+NUDGE_RE = re.compile(
+    u"[？?]\\s*$|どう(?:なっ|です|でしょ)|まだ|進捗|終わ|状況|すすめ|進め|続き", re.I)
+
+
+# Fable 2026-10-12 (2): a short approval or choice 「はい」「いいよ」「承認」
+# 「全部やって」「B案で」「push して」 continues the same request.
+APPROVAL_RE = re.compile(
+    u"はい|いいよ|いいです|良いです|承認|了解|ok|おk|全部|すべて|全て|案で|でお願い"
+    u"|で進め|でいい|push|プッシュ|やって|進めて|すすめて|それで|お願い|頼む|どうぞ"
+    u"|マージ|merge|go", re.I)
+
+
+def _is_continuation(ask):
+    a = (ask or "").strip()
+    if CONTINUATION_RE.match(a[:40]):
+        return True
+    return (len(a) <= 20
+            and bool(NUDGE_RE.search(a) or APPROVAL_RE.search(a))
+            and not is_countermeasure_request(a))
+
+
+def _commission_origin(ask, prior_asks):
+    """0 = this prompt asked (T1); k >= 1 = inherited from prior_asks[k-1]
+    through a chain of continuations (T2); None = not commissioned."""
+    if is_countermeasure_request(ask):
+        return 0
+    if not _is_continuation(ask):
+        return None
+    for k, p in enumerate(prior_asks or [], 1):
+        if _is_continuation(p):
+            continue
+        return k if is_countermeasure_request(p) else None
+    return None
+
+
+def _user_commissioned(ask, prior_asks):
+    return _commission_origin(ask, prior_asks) is not None
+
+
+# T3: the answer says a countermeasure exists. Completion verb (or a noun
+# stop 「…記憶に保存。」) in the same clause. Not: negated completion
+# (「まだ完了していません」), a NAME use (neutralized), a past/dated history
+# (「前回の再発防止で…」「（2026-09-03）導入しました」).
+_DONE_NOUN = u"(?:保存|追加|導入|配布|登録|設定|反映|記録|実装|作成|組み込み)"
+SELF_CLAIM_RE = re.compile(
+    u"(?:再発防止|恒久対策|再発を?防(?:止|ぐ)|再発しない(?:よう|ため)"
+    u"|同じ(?:ミス|こと|失敗|誤り|問題)[がをは]?(?:繰り返さ|起こさ|起き)ない(?:よう|ため))"
+    u"[^。\\n]{0,60}?"
+    u"(?:済(?:み|ん)|完了(?:し|です|。|$)"
+    u"|(?:入れ|追加し|導入し|配布し|保存し|登録し|設定し|反映し|記録し|組み込み"
+    u"|仕込み|実装し|作成し|作り)(?:ました|てあります|ています|た。)"
+    u"|" + _DONE_NOUN + u"(?:済み?|\\s*[。．]|\\s*$))", re.M)
+_NEG_AFTER_RE = re.compile(u"^[^。\\n]{0,8}?(?:ません|ていない|てない|ない[。、]|ず[。、]|未)")
+_DATE_RE = re.compile(u"\\d{4}-\\d{1,2}-\\d{1,2}|\\d{1,2}/\\d{1,2}|\\d{1,2}月\\d{1,2}日")
+_CODE_BLOCK_RE = re.compile(u"```.*?```", re.S)
+
+
+def _self_claimed(final_text):
+    t = _CODE_BLOCK_RE.sub(u"", final_text or "")
+    t = _neutralize(t)
+    for m in SELF_CLAIM_RE.finditer(t):
+        head = t[max(0, m.start() - 20):m.start()]
+        if re.search(u"(?:前回|以前|過去|先週|昨日|既存)の?[^。\\n]*$", head):
+            continue
+        if _NEG_AFTER_RE.search(t[m.end() - 2:m.end() + 12]):
+            continue
+        if _DATE_RE.search(head + m.group(0)):
+            continue
+        return True
+    return False
+
+
+# S: schedule changes ------------------------------------------------------
+SCHED_CMD_RE = re.compile(
+    r"schtasks(?:\.exe)?\s+/(?:create|change)\b|Register-ScheduledTask\b"
+    r"|Set-ScheduledTask\b|New-ScheduledTaskTrigger\b|\$\w+\.Triggers\b"
+    r"|\bcrontab\s+(?!-l\b)\S|launchctl\s+(?:load|bootstrap)\b"
+    r"|systemctl\s+(?:enable|edit)\s+\S+\.timer", re.IGNORECASE)
+_READONLY_HEAD_RE = re.compile(
+    r"^\s*(?:echo|printf|grep|rg|cat|type|less|head|tail|Select-String|Write-Output"
+    r"|Write-Host|git\b|ls\b|dir\b|#)", re.IGNORECASE)
+SCHED_MCP_RE = re.compile(r"(?i)^mcp__.*(?:schedul|cron|trigger|routine).*(?:create|update)")
+WORKFLOW_RE = re.compile(r"[/\\]\.github[/\\]workflows[/\\][^/\\]+\.ya?ml$", re.I)
+# Fable 2026-10-12: the plan is judged over the WHOLE answer written after the
+# last schedule change, and needs BOTH a concrete datetime and a promise to
+# check (or an observed run). A sentence break between them is fine
+# (「次の予定実行: 2026-10-13 04:31 JST。起動後にログを確認します。」); a check
+# with no datetime (「次回の実行ログを確認します」) is not.
+_REL_DAY = u"(?:明朝|明日|明晩|今夜|今晩|今朝|翌朝|本日|今日|毎朝|毎日|次回|初回|tomorrow|tonight)"
+_CLOCK = u"(?:\\d{1,2}[:：]\\d{2}|\\d{1,2}時(?:\\d{1,2}分|半)?)"
+FIRING_DATETIME_RE = re.compile(
+    u"\\d{4}-\\d{1,2}-\\d{1,2}|\\d{1,2}/\\d{1,2}(?!\\d)|\\d{1,2}月\\d{1,2}日"
+    u"|" + _REL_DAY + u"[^。\\n]{0,15}?" + _CLOCK
+    + u"|" + _CLOCK + u"[^。\\n]{0,6}?" + _REL_DAY
+    + u"|(?:次回|次の)?(?:ログオン|ログイン|サインイン|再起動)(?:時|後)|next logon",
+    re.IGNORECASE)
+FIRING_EVENT = u"(?:(?<!テストを)(?<!テスト)(?:起動|実行|発火)|ログ|run|log)"
+FIRING_CHECK = u"(?:確認|確かめ|チェック|点検|見届|検証|check|verif)"
+# A promise is FUTURE (確認します/する/予定); a past 「確認しました」 is the manual
+# run, not the scheduled one.
+_FUTURE = u"(?=[^。\\n]{0,6}?(?:します|する|しましょう|予定|ます|てください|check|verify))"
+FIRING_PROMISE_RE = re.compile(
+    FIRING_EVENT + u"[^。\\n]{0,50}?" + FIRING_CHECK + _FUTURE
+    + u"|" + FIRING_CHECK + u"[^。\\n]{0,15}?" + FIRING_EVENT + _FUTURE, re.I)
+# An observed run counts only with a clock time (「4:20:41 に起動していました」):
+# the 2026-10-02 defective answer passed on 「遅くとも 9/23 から…毎日起動して
+# いました」, a diagnosis of the OLD failure.
+FIRING_OBSERVED_RE = re.compile(
+    _CLOCK + u"(?:[:：]\\d{2})?[^。\\n]{0,8}?(?:に|で)"
+    u"(?:起動し|実行され|発火し|動い)(?:てい)?(?:まし)?た")
+SCHED_WORD_RE = re.compile(u"次回|次の|予定|実行|起動|発火|next run|scheduled", re.I)
+
+
+def _schedule_changes(uses):
+    out = []
+    for name, inp in uses:
+        if name == "RemoteTrigger" and str(inp.get("action")).lower() in (
+                "create", "update"):
+            out.append("RemoteTrigger %s" % inp.get("action"))
+        elif name == "CronCreate" or SCHED_MCP_RE.match(name or ""):
+            out.append(name)
+        elif name in EDIT_TOOLS:
+            fp = inp.get("file_path") or ""
+            if (isinstance(fp, str) and WORKFLOW_RE.search(fp)
+                    and re.search(r"\bcron\s*:", _edit_body(inp))):
+                out.append(os.path.basename(fp))
+        elif name not in AGENT_TOOLS and isinstance(inp.get("command"), str):
+            for seg in _segments(inp["command"]):
+                if not _READONLY_HEAD_RE.match(seg) and SCHED_CMD_RE.search(seg):
+                    out.append(seg.strip()[:80])
+                    break
+    return out
+
+
+def _text_after_last_sched(rows):
+    """Assistant texts written AFTER the turn's last schedule change (parent
+    transcript). The plan must follow the change: in the 2026-10-02 turn the
+    mid-turn diagnosis named times and 確認 long before the last update, and
+    joining every message let that real defective turn pass in calibration.
+    Falls back to the final text when the change was made by a subagent."""
+    last = None
+    for i, r in enumerate(rows):
+        if r.get("type") == "assistant" and _schedule_changes(_tool_uses([r])):
+            last = i
+    if last is None:
+        return _final_text(rows)
+    return _final_text(rows[last + 1:], every=True) or _final_text(rows)
+
+
+def _sentences(t):
+    return [x for x in re.split(u"(?<=[。！!？?])|\\n", t) if x and x.strip()]
+
+
+def _firing_planned(final_text):
+    """Fable 2026-10-12 (2): an unrelated date (「最終更新日 2026-10-12」) plus
+    「テストを実行して結果を確認します」 passed. Now: an observed run with a
+    clock time passes alone; otherwise a datetime must sit in the same or an
+    adjacent sentence as a schedule word (次回/次の/予定/実行/起動/発火), AND a
+    future check promise must name the run (起動/実行/発火/ログ)."""
+    t = _CODE_BLOCK_RE.sub(u"", final_text or "")
+    if FIRING_OBSERVED_RE.search(t):
+        return True
+    if not FIRING_PROMISE_RE.search(t):
+        return False
+    ss = _sentences(t)
+    for n, x in enumerate(ss):
+        if FIRING_DATETIME_RE.search(x):
+            near = u"".join(ss[max(0, n - 1):n + 2])
+            if SCHED_WORD_RE.search(near):
+                return True
+    return False
+
+
+# X: equivalent copies in sibling repos ------------------------------------
+CODE_EXT = (".py", ".js", ".mjs", ".cjs", ".ts", ".sh", ".ps1", ".gs")
+GENERIC_BASENAMES = {
+    "__init__.py", "main.py", "setup.py", "conftest.py", "utils.py", "util.py",
+    "config.py", "app.py", "run.py", "cli.py", "common.py", "helpers.py",
+    "settings.py", "manage.py", "server.py", "test.py", "index.js", "build.js",
+    "main.js", "app.js", "utils.js", "config.js", "index.ts", "main.ts",
+    "code.gs", "install.sh", "setup.sh", "run.sh", "build.sh"}
+INDEX_TTL = 6 * 3600
+MIN_SHARED = 0.30
+_SKIP_COPY_RE = re.compile(
+    r"(?:^|[/\\])(?:\.claude[/\\]hooks|node_modules|\.venv|venv|site-packages"
+    r"|__pycache__|\.git|tests?|fixtures)(?:[/\\]|$)", re.IGNORECASE)
+
+
+def _repo_root(path):
+    d = os.path.dirname(os.path.abspath(path))
+    for _ in range(12):
+        if os.path.exists(os.path.join(d, ".git")):
+            return d
+        nd = os.path.dirname(d)
+        if nd == d:
+            return None
+        d = nd
+    return None
+
+
+def _edited_code_paths(uses, cwd=None):
+    """Code files this turn wrote by Write/Edit or by a shell cp/mv/redirect
+    destination. Relative shell paths resolve against `cwd` (Fable
+    2026-10-12: `cp ../claude-governance/... scripts/` was invisible). Files
+    rewritten by a script (`python -c`, a scratch .py) are found by the mtime
+    scan in _unsynced_copies, not here."""
+    out = set()
+    for name, inp in uses:
+        fp = inp.get("file_path") if name in EDIT_TOOLS else None
+        cands = [fp] if isinstance(fp, str) else []
+        c = inp.get("command")
+        if name not in AGENT_TOOLS and isinstance(c, str):
+            for seg in _segments(c):
+                for m in SHELL_REDIRECT_RE.finditer(seg):
+                    cands.append(m.group(1))
+                if SHELL_WRITE_VERB_RE.search(seg):
+                    toks = PATH_TOKEN_RE.findall(seg)
+                    if toks:
+                        cands.append(toks[-1])
+        for p in cands:
+            p = (p or "").strip().strip("'\"")
+            if not p.lower().endswith(CODE_EXT):
+                continue
+            if not os.path.isabs(p):
+                if not cwd:
+                    continue
+                p = os.path.join(cwd, p)
+            # (no temp-dir filter: a scratch file has no .git above it and is
+            # dropped by _repo_root; the tests build their repos under %TEMP%)
+            if not _SKIP_COPY_RE.search(p) and not NOT_COUNTERMEASURE_RE.search(p):
+                out.add(os.path.normpath(p))
+    return out
+
+
+def _basename_index(parent):
+    """{basename: [abs paths]} of tracked code files of every repo under
+    `parent`, cached INDEX_TTL seconds in STATE_DIR."""
+    key = re.sub(r"[^A-Za-z0-9]+", "_", os.path.normcase(parent))[-80:]
+    cache = os.path.join(STATE_DIR, "basename_index_%s.json" % key)
+    try:
+        if os.path.getmtime(cache) > datetime.now().timestamp() - INDEX_TTL:
+            with io.open(cache, encoding="utf-8") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    import subprocess
+    idx = {}
+    for name in sorted(os.listdir(parent)):
+        repo = os.path.join(parent, name)
+        if not os.path.isdir(os.path.join(repo, ".git")):
+            continue
+        try:
+            p = subprocess.run(["git", "-C", repo, "ls-files", "-z"],
+                               capture_output=True, timeout=10)
+        except Exception:
+            continue
+        for rel in p.stdout.decode("utf-8", "replace").split("\0"):
+            if not rel.lower().endswith(CODE_EXT) or _SKIP_COPY_RE.search(rel):
+                continue
+            b = rel.rsplit("/", 1)[-1]
+            if b.lower() in GENERIC_BASENAMES or len(b.rsplit(".", 1)[0]) < 6:
+                continue
+            idx.setdefault(b, []).append(os.path.normpath(os.path.join(repo, rel)))
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        with io.open(cache, "w", encoding="utf-8") as f:
+            json.dump(idx, f)
+    except Exception:
+        pass
+    return idx
+
+
+def _lines(path):
+    try:
+        with io.open(path, encoding="utf-8", errors="replace") as f:
+            return f.read()
+    except Exception:
+        return None
+
+
+# Fable 2026-10-12 (2): `git pull --rebase --autostash` alone, a turn with
+# no tool call, and sync_all.py were all flagged -- every pulled file has a
+# fresh mtime. The mtime scan now needs WRITE EVIDENCE in the turn, is off
+# when the turn moved the tree (pull/fetch/checkout/merge/rebase/stash/
+# sync_all), and keeps only files git reports dirty or committed since the
+# turn started.
+_TREE_MOVE_RE = re.compile(
+    r"\bgit\s+(?:-C\s+\S+\s+)?(?:pull|fetch|checkout|switch|merge|rebase|stash"
+    r"|reset|restore|clone|cherry-pick|revert|am)\b|sync_all\.py", re.I)
+_SCRIPT_RUN_RE = re.compile(r"(?:^|[\s;&|(])(?:node|npx|deno|bun)\s+\S", re.I)
+
+
+def _write_evidence(uses):
+    for name, inp in uses:
+        if name in EDIT_TOOLS:
+            return True
+        c = inp.get("command")
+        if name in AGENT_TOOLS or not isinstance(c, str):
+            continue
+        if _invocations(c) or _SCRIPT_RUN_RE.search(c):
+            return True
+        for seg in _segments(c):
+            if SHELL_REDIRECT_RE.search(seg) or SHELL_WRITE_VERB_RE.search(seg):
+                return True
+    return False
+
+
+def _tree_moved(uses):
+    return any(isinstance(inp.get("command"), str) and name not in AGENT_TOOLS
+               and _TREE_MOVE_RE.search(inp["command"]) for name, inp in uses)
+
+
+def _git_changed(repo, start_ts):
+    """normcase'd abs paths dirty in `repo` or in its commits since start."""
+    import subprocess
+    out = set()
+    try:
+        st = subprocess.run(["git", "-C", repo, "status", "--porcelain", "-z"],
+                            capture_output=True, timeout=10).stdout
+        for ent in st.decode("utf-8", "replace").split("\0"):
+            if len(ent) > 3:
+                out.add(os.path.normcase(os.path.normpath(os.path.join(repo, ent[3:]))))
+        lg = subprocess.run(["git", "-C", repo, "log", "--since=@%d" % int(start_ts - 5),
+                             "--name-only", "--format="],
+                            capture_output=True, timeout=10).stdout
+        for rel in lg.decode("utf-8", "replace").splitlines():
+            if rel.strip():
+                out.add(os.path.normcase(os.path.normpath(os.path.join(repo, rel.strip()))))
+    except Exception:
+        pass
+    return out
+
+
+def _distinctive(b):
+    return b.lower() not in GENERIC_BASENAMES and len(b.rsplit(".", 1)[0]) >= 6
+
+
+def _unsynced_copies(uses, start_ts, final_text, until=None, cwd=None):
+    """[(edited, copy)] for equivalent copies in OTHER repos left stale.
+
+    edited = Write/Edit/shell destinations, PLUS every tracked code file of a
+    repo this turn touched (cwd's repo, a repo of an edited path, a repo whose
+    name appears in a command or path) whose mtime falls inside the turn --
+    that is how `python -c` / scratch-script rewrites are seen."""
+    until = until or datetime.now(timezone.utc).timestamp()
+    edited = _edited_code_paths(uses, cwd)
+    roots = {r for r in (_repo_root(p) for p in edited) if r}
+    if cwd and os.path.isdir(cwd):
+        r = _repo_root(os.path.join(cwd, "x"))
+        if r:
+            roots.add(r)
+    if not roots:
+        return []
+    parent = os.path.dirname(sorted(roots)[0])
+    idx = _basename_index(parent)
+    if start_ts is not None and _write_evidence(uses) and not _tree_moved(uses):
+        text = "\n".join(str(inp.get(k)) for _, inp in uses
+                         for k in ("command", "file_path", "path")
+                         if isinstance(inp.get(k), str)).lower()
+        try:
+            names = [n for n in os.listdir(parent)
+                     if os.path.isdir(os.path.join(parent, n, ".git"))]
+        except Exception:
+            names = []
+        touched = set(roots) | {os.path.join(parent, n) for n in names
+                                if n.lower() in text}
+        tpre = tuple(os.path.normcase(t + os.sep) for t in touched)
+        changed = set()
+        for t in touched:
+            changed |= _git_changed(t, start_ts)
+        for paths in idx.values():
+            for c in paths:
+                if (os.path.normcase(c).startswith(tpre)
+                        and os.path.normcase(c) in changed):
+                    try:
+                        mt = os.path.getmtime(c)
+                    except Exception:
+                        continue
+                    if start_ts - 5 <= mt <= until + 5:
+                        edited.add(os.path.normpath(c))
+    named = (final_text or "").lower()
+    out, seen = [], set()
+    for e in sorted(edited):
+        b = os.path.basename(e)
+        if not _distinctive(b):
+            continue
+        root = _repo_root(e)
+        body = _lines(e)
+        if not root or body is None:
+            continue
+        mine = {ln.strip() for ln in body.splitlines() if ln.strip()}
+        for c in _basename_index(os.path.dirname(root)).get(b, []):
+            if os.path.normcase(c).startswith(os.path.normcase(root + os.sep)):
+                continue
+            if os.path.normcase(c) in seen:
+                continue
+            cb = _lines(c)
+            if cb is None or cb == body:
+                continue
+            try:
+                mt = os.path.getmtime(c)
+                if start_ts is not None and start_ts - 5 <= mt <= until + 5:
+                    continue          # written during the turn (cp loops too)
+            except Exception:
+                continue
+            theirs = {ln.strip() for ln in cb.splitlines() if ln.strip()}
+            if not mine or not theirs:
+                continue
+            if len(mine & theirs) / float(len(mine | theirs)) < MIN_SHARED:
+                continue
+            repo = os.path.relpath(c, os.path.dirname(root)).split(os.sep)[0]
+            if repo.lower() in named:
+                continue
+            seen.add(os.path.normcase(c))
+            out.append((e, c))
+    return out
+
+
+MISSING_SCHEDULE = u"""⛔ 定期実行の設定を変えたが、初回の実発火を確かめる予定が回答に無い
+
+このターンで変えた予定: {items}
+
+手動実行（run）やテストの合格は「予定の時刻に、その環境（UTC の日付・利用枠・
+資格情報）で動く」ことを示さない。2026-10-02 の 4:20 予約は手動実行で成功を
+確かめて完了扱いにしたが、10-07 の 4:20 実行では UTC 日付の取り違えと利用枠の
+区切りずれで目的を果たさなかった（ユーザーが翌朝に気づいた）。
+
+いま行うこと: 回答に **次の予定実行の日時** と **それを確認すること**
+（例:「明朝 4:31 の実起動時刻とログを確認します」）を書く。
+既に予定時刻の実行を観測したなら、その時刻と結果を書く。
+"""
+
+MISSING_COPIES = u"""同じツールの写しが他のリポにあるが、直したのは一部だけかもしれない
+
+このターンで直したファイルと、同等の写し（同名・行の30%以上が共通・内容が異なる・
+このターン中に書かれていない）:
+{items}
+
+2026-10-07、evidence_search.py を正典と3リポに配って「使う3つのリポすべてに配った」と
+報告したが、youtube-to-presentation の古い写しが漏れていた（ユーザーが指摘）。
+
+いま行うこと: 各写しに同じ修正を入れる。直さないものは、そのリポ名を回答に挙げて
+「対象外（理由）」と書く（リポ名が回答に出ていれば通る）。
+"""
 
 
 REASON = u"""⛔ 再発防止を指示されたターンだが、対策の実効性を一度も測っていない
@@ -1117,9 +1647,26 @@ def main():
             or "ran out of context" in ask):
         return
 
-    # Condition 1: the user asked for a countermeasure, in their own words.
-    if not is_countermeasure_request(ask):
-        return
+    # Condition 1: a countermeasure was commissioned -- by the user's own
+    # words (T1), by a continuation of such a prompt (T2), or by the answer
+    # itself claiming one is in place (T3, C08 2026-10-12). S and X below
+    # apply to every turn.
+    ctx = getattr(_read_turn_full, "ctx", {}) or {}
+    final = ctx.get("final_text", "")
+    origin = _commission_origin(ask, ctx.get("prior_asks"))
+    commissioned = origin is not None or _self_claimed(final)
+    proof_uses = uses
+    if origin:
+        # T2 (Fable 2026-10-12): proofs accumulate from the inherited request
+        # onward -- a continuation 「はい」 after a finished countermeasure
+        # must not be blocked for proofs made in the earlier turns.
+        try:
+            oi = ctx["prior_idx"][origin - 1]
+            rows = ctx["rows"]
+            proof_uses = (_tool_uses(rows[oi + 1:]) + _subagent_uses(
+                ctx["tp"], _ts(rows[oi].get("timestamp"))))
+        except Exception:
+            proof_uses = uses
 
     # ...but not when 再発防止 is merely BACKGROUND to a different request.
     # The false positive to avoid: 「前回の再発防止でフックを入れましたが、いまの
@@ -1169,13 +1716,34 @@ def main():
     # auto-implementation runs) is deliberately NOT a skip condition here: an
     # unattended run is the one with nobody watching for a prose-only
     # countermeasure, so it must satisfy the same five proofs.
-    missing = _missing(tools, uses)
-    if not missing:
+    problems = []
+    if commissioned:
+        missing = _missing(tools, proof_uses)
+        if missing:
+            problems.append(_reason(missing))
+    sched = _schedule_changes(uses)
+    if sched and not _firing_planned(ctx.get("turn_text") or final):
+        problems.append(MISSING_SCHEDULE.replace(
+            u"{items}", u" / ".join(sched[:5])))
+    copies = _unsynced_copies(uses, ctx.get("start_ts"), final,
+                              cwd=ctx.get("cwd"))
+    # X is a WARNING (Fable 2026-10-12 (2)): 16 of 48 repos hold same-name,
+    # differing, >=30%-shared copies today (claim_check.py x5, vite.config.ts
+    # ...), and real-data precision is not calibrated. Shown, never blocks.
+    warn = u""
+    if copies:
+        warn = MISSING_COPIES.replace(u"{items}", u"\n".join(
+            u"  %s  ->  %s" % (e, c) for e, c in copies[:10]))
+    if not problems and not warn:
         return
 
     _record_fired(ev)
 
-    out = {"decision": "block", "reason": _reason(missing)}
+    out = {}
+    if problems:
+        out = {"decision": "block", "reason": u"\n".join(problems)}
+    if warn:
+        out["systemMessage"] = u"⚠️ (警告・ブロックしない) " + warn
     # ensure_ascii=True + buffer.write: CP932 consoles mangle kanji whose
     # second byte is 0x5C (「表」= 0x95 0x5C) through a text stream, which
     # corrupts the JSON. Learned on md_date_guard.py.
