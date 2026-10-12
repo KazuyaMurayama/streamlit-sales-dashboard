@@ -95,6 +95,7 @@ import json
 import os
 import pickle
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -311,6 +312,13 @@ def changed_files(root, since_epoch):
             continue
         fresh.add(r)
     if since_epoch is not None:
+        # ターン開始時点の版から HEAD までに変わったもの（コミット日付を過去にしたターン内コミットも拾う。2026-10-12）
+        rev = base_rev(root, since_epoch)
+        rng = _git(root, ["-c", "core.quotepath=false", "diff", "--name-only", "-z", "--diff-filter=AMRC",
+                          rev or "4b825dc642cb6eb9a060e54bf8d69288fbee4904", "HEAD"]) or ""
+        for p in rng.split("\0"):
+            if p and _eligible(p) and os.path.isfile(os.path.join(root, p)):
+                fresh.add(p)
         iso = datetime.fromtimestamp(since_epoch, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         log = _git(root, ["-c", "core.quotepath=false", "log", "--since=" + iso,
                           "--name-only", "--diff-filter=AMRC", "--pretty=format:"]) or ""
@@ -319,6 +327,296 @@ def changed_files(root, since_epoch):
             if p and _eligible(p) and os.path.isfile(os.path.join(root, p)):
                 fresh.add(p)
     return sorted(fresh)
+
+
+# テストの fixture（わざと欠陥を含む版）は検査しない（2026-10-12: C05 の赤緑用に置いた欠陥版の抜粋 2本が
+# 互いにほぼ同じ・重複表ありとして、置いたターン自体を止めた）。区切りは / と \ の両方。
+FIXTURE_PATH = re.compile(r"(?:^|[\\/])tests?[\\/]fixtures[\\/]", re.I)
+
+
+def is_fixture(path):
+    return bool(FIXTURE_PATH.search(path or ""))
+
+
+TABLE_BUDGET = 10.0  # 表の重複の検査の時間の上限（秒）。超えたら残りは「未検査」と知らせる（黙って通さない）
+SAFE_WINDOW = 1800  # ターン開始の時刻が取れないとき、さかのぼって検査する秒数（安全側＝広めに見る）
+_BASE_CACHE = {}
+
+
+def _reflog_at(root, since_epoch):
+    """reflog から、since_epoch の時点で HEAD が指していたコミット。分からなければ None。
+    reflog の時刻は HEAD が動いた手元の時刻で、コミットの日付（--date で過去にできる）に左右されない。"""
+    # reflog の時刻も GIT_COMMITTER_DATE で過去にできる（2026-10-12 実測）。そこで、コミットの loose object の
+    # ファイル更新時刻（手元の時計。環境変数で変えられない）と大きい方を「HEAD がそこへ動いた時刻」とみなす。
+    # 1秒の幅は、依頼者の発言の時刻が秒で切り捨てられるため（ターン前のコミットと同じ秒に収まることがある）。
+    out = _git(root, ["reflog", "show", "--date=unix", "--format=%H %gd", "HEAD"])
+    gd = _git(root, ["rev-parse", "--absolute-git-dir"]) if out else None
+    objdir = os.path.join(gd.strip(), "objects") if gd else None
+    for ln in (out or "").splitlines():
+        m = re.match(r"([0-9a-f]{40,64}) \S*@\{(\d+)\}", ln.strip())
+        if not m:
+            continue
+        sha, t = m.group(1), int(m.group(2))
+        try:
+            t = max(t, os.path.getmtime(os.path.join(objdir, sha[:2], sha[2:])))
+        except Exception:
+            pass  # pack 済み（古いコミット）は reflog の時刻だけで判断する
+        if t < since_epoch + 1:
+            return sha
+    return None
+
+
+def base_rev(root, since_epoch):
+    """ターン開始時点の HEAD。None＝ターン開始前のコミットが無い（ファイルはすべて新しい）。
+    WHY（2026-10-12）: 比べる相手を HEAD にすると、ターンの中でコミットしたとき HEAD が今の版になり、
+    「悪化したか」「その表を変えたか」が常に「いいえ」になる（deep-research ea33aa2・581b50d はどちらもターン内で
+    コミットしていて、止めるべき表の重複・番号の食い違いが知らせるだけになっていた）。
+    取り方: ①reflog（HEAD が動いた手元の時刻。コミット日付を過去にしても騙されない）②無ければコミット日付。
+    リポごとに1回だけ git を動かす（キャッシュ）。"""
+    key = (root, since_epoch)
+    if key in _BASE_CACHE:
+        return _BASE_CACHE[key]
+    if since_epoch is None:
+        rev = "HEAD"
+    else:
+        rev = _reflog_at(root, since_epoch)
+        if rev is None:
+            iso = datetime.fromtimestamp(since_epoch, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            out = _git(root, ["rev-list", "-1", "--before=" + iso, "HEAD"])
+            rev = (out.strip() or None) if out is not None else None
+    _BASE_CACHE[key] = rev
+    return rev
+
+
+class Baseline(object):
+    """1つのリポの「ターン開始時点の版」を、git の起動数回でまとめて引く（2026-10-12 Fable 攻撃検証: ファイルごとに
+    git を2〜3回起動し、日付名の新規600本で 94秒＝フックの既定 60秒で殺されて無言になった）。
+      names()   開始時点の版にあるパスの集合（ls-tree 1回）
+      origin()  このターンでリネームしたファイルの旧パス（diff -M 1回。git mv した古い文書を新規扱いしない）
+      texts()   開始時点の版の中身をまとめて（cat-file --batch 1回）"""
+
+    def __init__(self, root, since_epoch):
+        self.root, self.rev = root, base_rev(root, since_epoch)
+        self._names = self._ren = None
+
+    def names(self):
+        if self._names is None:
+            out = _git(self.root, ["-c", "core.quotepath=false", "ls-tree", "-r", "-z", "--name-only", self.rev],
+                       timeout=30) if self.rev else ""
+            self._names = set((out or "").split("\0")) - {""}
+        return self._names
+
+    def renames(self):
+        if self._ren is None:
+            self._ren = {}
+            if self.rev:
+                out = _git(self.root, ["-c", "core.quotepath=false", "diff", "-M", "--name-status", "-z",
+                                       self.rev], timeout=30) or ""
+                tok = out.split("\0")
+                i = 0
+                while i < len(tok):
+                    st = tok[i]
+                    if st[:1] in ("R", "C") and i + 2 < len(tok):
+                        if st[:1] == "R":
+                            self._ren[tok[i + 2]] = tok[i + 1]
+                        i += 3
+                    else:
+                        i += 2
+        return self._ren
+
+    def origin(self, rel):
+        rel = rel.replace("\\", "/")
+        return self.renames().get(rel, rel)
+
+    def is_new(self, rel):
+        return self.rev is None or self.origin(rel) not in self.names()
+
+    def texts(self, rels):
+        """{rel: 開始時点の中身 or None}。リネームしたものは旧パスの中身。"""
+        out = {r: None for r in rels}
+        want = [(r, self.origin(r)) for r in rels if not self.is_new(r) and "\n" not in r]
+        if not want:
+            return out
+        try:
+            p = subprocess.run(["git", "-C", self.root, "cat-file", "--batch"], capture_output=True, timeout=30,
+                               input="".join("%s:%s\n" % (self.rev, o) for _r, o in want).encode("utf-8"))
+            buf, pos = p.stdout, 0
+            for r, _o in want:
+                nl = buf.index(b"\n", pos)
+                head = buf[pos:nl].split()
+                pos = nl + 1
+                if len(head) == 3 and head[1] == b"blob":
+                    n = int(head[2])
+                    out[r] = buf[pos:pos + n].decode("utf-8", "replace")
+                    pos += n + 1
+        except Exception:
+            for r, o in want:  # まとめて引けなければ1本ずつ（遅いが黙って通さない）
+                out[r] = _git(self.root, ["show", "%s:%s" % (self.rev, o)])
+        return out
+
+
+def _pkey(p):
+    return os.path.normcase(os.path.abspath(p))
+
+
+def authored_paths(root, since_epoch, touched):
+    """このターンで Claude 自身が書いたと言えるファイル（正規化した絶対パスの集合）。止めるのはこれだけ。
+      ① transcript の Write/Edit/MultiEdit/NotebookEdit の file_path と、シェルのコマンドに現れたパス（touched）
+      ② ターン開始以降に更新され、まだコミットしていない作業ツリーの変更（スクリプトで書いたファイル）
+    含めないもの: ターン内の git pull・別セッションや定期ジョブのコミット・checkout で入ったファイル
+    （2026-10-12 Fable 再検証: README しか触っていないのに、pull で入った他人の欠陥レポートで止めた）。"""
+    out = {_pkey(p) for p in touched}
+    ents = (_git(root, ["-c", "core.quotepath=false", "status", "--porcelain", "-z", "-uall"]) or "").split("\0")
+    i = 0
+    while i < len(ents):
+        e = ents[i]
+        i += 1
+        if len(e) < 4:
+            continue
+        if e[0] in "RC":
+            i += 1
+        full = os.path.join(root, e[3:])
+        try:
+            if since_epoch is None or _fresh_time(full) >= since_epoch - 1:
+                out.add(_pkey(full))
+        except Exception:
+            pass
+    return out
+
+
+_WRITE_TOOL_NAMES = ("Write", "Edit", "MultiEdit", "NotebookEdit")
+_SHELL_TOOL_NAMES = ("Bash", "PowerShell")
+_REDIR = re.compile(r"(?:^|[^0-9&>])>{1,2}\|?\s*([\"']?)([^\s;&|<>\"']+)\1")
+_PS_WRITE = re.compile(r"\b(?:Set-Content|Add-Content|Out-File|Tee-Object)\b(.*)", re.I)
+
+
+def _shell_write_targets(cmd):
+    """シェルのコマンドのうち、書き込み先として現れたパスの文字列（2026-10-12 Fable 第3回: cat・grep で読んだだけの
+    ファイルを「自分が書いた」に数え、pull で入った他人の欠陥レポートで止めた）。読むだけの操作は数えない。
+    数えるもの: リダイレクト先（> >>）、tee、sed -i、cp・mv の宛先、Set-Content/Add-Content/Out-File/Tee-Object。
+    python スクリプトの open(...,'w') 等は判定できないので数えない（未コミットならターン開始以降の変更として拾う）。"""
+    out = []
+    for m in _REDIR.finditer(cmd):
+        if m.group(2) not in ("/dev/null", "$null", "nul", "NUL"):
+            out.append(m.group(2))
+    for seg in re.split(r"&&|\|\||[;|\n]", cmd):
+        try:
+            toks = shlex.split(seg, posix=True)
+        except ValueError:
+            toks = seg.split()
+        if not toks:
+            continue
+        name = os.path.basename(toks[0]).lower()
+        args = [t for t in toks[1:] if not t.startswith("-")]
+        if name == "tee":
+            out += args
+        elif name == "sed" and any(t.startswith("-i") or t.startswith("--in-place") for t in toks[1:]):
+            has_e = any(t in ("-e", "--expression") or t.startswith("-e") for t in toks[1:] if not t.startswith("-i"))
+            out += args if has_e else args[1:]
+        elif name in ("cp", "mv", "copy-item", "move-item") and len(args) >= 2:
+            out.append(args[-1])
+        pm = _PS_WRITE.search(seg)
+        if pm:
+            rest = pm.group(1)
+            nm = re.search(r"-(?:Literal)?(?:File)?Path\s+([\"']?)([^\"'\s]+)\1", rest, re.I)
+            if nm:
+                out.append(nm.group(2))
+            else:
+                pos = [t for t in rest.split() if not t.startswith("-")]
+                if pos:
+                    out.append(pos[0].strip("\"'"))
+    return out
+
+
+def written_paths(calls, cwd):
+    """このターンで Claude が書いたファイル（正規化前の絶対パス）。書き込み系ツールの file_path（文字列だけ採る。
+    文字列でないものは飛ばして続ける）と、シェルの書き込み先（_shell_write_targets）。"""
+    out = set()
+    base = cwd or os.getcwd()
+    for name, inp in calls or []:
+        if not isinstance(inp, dict):
+            continue
+        if name in _WRITE_TOOL_NAMES:
+            fp = inp.get("file_path") or inp.get("notebook_path")
+            if isinstance(fp, str) and fp:
+                out.add(fp if os.path.isabs(fp) else os.path.join(base, fp))
+        elif name in _SHELL_TOOL_NAMES:
+            cmd = inp.get("command")
+            if not isinstance(cmd, str):
+                continue
+            dirs = [base]
+            for m in re.finditer(r"(?:^|[;&|\s])(?:cd|Set-Location|pushd)\s+([\"']?)([^\"';&|\n]+)\1", cmd):
+                d = m.group(2).strip()
+                if re.match(r"^/[a-zA-Z]/", d):
+                    d = d[1] + ":" + d[2:]
+                dirs.append(d if os.path.isabs(d) else os.path.join(base, d))
+            for tok in _shell_write_targets(cmd):
+                if re.match(r"^/[a-zA-Z]/", tok):
+                    tok = tok[1] + ":" + tok[2:]
+                tok = os.path.expanduser(tok)
+                for p in ([tok] if os.path.isabs(tok) else [os.path.join(d, tok) for d in dirs]):
+                    if os.path.isfile(p):
+                        out.add(os.path.abspath(p))
+    return out
+
+
+def local_commit_paths(root, since_epoch):
+    """ターン内に、この作業ツリーで「git commit」したコミットで変わったファイル（reflog の commit 系の項目だけ。
+    pull・rebase・checkout・merge で入ったものは含めない）。ほぼ同じファイルの併存（ファイル単位）の判定に使う:
+    スクリプトで生成してそのままコミットした複製（nt-040 の _posts）は transcript にパスが出ないため。
+    残る穴: 同じ作業ツリーで別セッションが git commit したものも含んでしまう。"""
+    out = set()
+    if since_epoch is None:
+        return out
+    log = _git(root, ["reflog", "show", "--date=unix", "--format=%H %gd %gs", "HEAD"]) or ""
+    gd = _git(root, ["rev-parse", "--absolute-git-dir"]) if log else None
+    objdir = os.path.join(gd.strip(), "objects") if gd else None
+    for ln in log.splitlines():
+        m = re.match(r"([0-9a-f]{40,64}) \S*@\{(\d+)\} (.*)$", ln.strip())
+        if not m:
+            continue
+        sha, t, subj = m.group(1), int(m.group(2)), m.group(3)
+        try:
+            t = max(t, os.path.getmtime(os.path.join(objdir, sha[:2], sha[2:])))
+        except Exception:
+            pass
+        if t < since_epoch + 1:
+            break
+        if subj.startswith("commit"):
+            for p in (_git(root, ["-c", "core.quotepath=false", "diff-tree", "--no-commit-id", "--name-only", "-r",
+                                  "--root", sha]) or "").splitlines():
+                if p.strip():
+                    out.add(_pkey(os.path.join(root, p.strip())))
+    return out
+
+
+def base_text(root, rel, since_epoch):
+    """ターン開始時点の版のファイルの中身。その時点に無ければ None（＝このターンで新しく作った）。"""
+    return Baseline(root, since_epoch).texts([rel])[rel]
+
+
+def turn_start(transcript_path, since):
+    """ターン開始の時刻。依頼者の発言の時刻が取れなければ、ターン内の行で最も早い時刻、それも無ければ
+    今から SAFE_WINDOW 秒前（安全側: ターン内のコミットを含む直近を検査する。HEAD と比べて無言になるより良い）。"""
+    if since is not None:
+        return since, "user"
+    best = None
+    try:
+        for ln in _rows_backward(transcript_path):
+            try:
+                r = json.loads(ln.decode("utf-8", "replace"))
+            except Exception:
+                continue
+            if _genuine_user_text(r):
+                break
+            t = _parse_ts(r.get("timestamp") or "")
+            if t is not None and (best is None or t < best):
+                best = t
+    except Exception:
+        pass
+    if best is not None:
+        return best - 1, "first_row"
+    return time.time() - SAFE_WINDOW, "safe_window"
 
 
 class Index(object):
@@ -529,6 +827,11 @@ def read_turn(transcript_path):
 #   deep-research ea33aa2 など。外れたのは機種が1つも重ならないカメラ仕様2表（以前はリンク文字列の多対一で誤検知）
 #   と happiness-system の日次ログの一部。負債 112/1,911（5.86%）→ 122/1,908（6.39%）。
 #   Fable 攻撃で残る穴: 英日・略称、4字ラベル vs 40字超の説明、数値の単位表記違い、接頭辞だけ共有する別物（人口/面積）。
+# 改訂（2026-10-12, 訂正ダイジェスト C05）: 「悪化したか」を比べる相手を HEAD からターン開始時点の版（base_text）に
+#   変えた。HEAD のままだと、ターンの中でコミットした文書は比べる相手が自分自身になり、新しい文書の重複表でも
+#   「前からある重複」として知らせるだけになっていた（ea33aa2 の実物抜粋で再現: 旧版 systemMessage → 新版 block。
+#   tests/test_c05_report_structure.py::test_ex1_near_duplicate_tables_committed_in_turn_blocks）。
+#   責務の分担: 1文書内の重複表はこのフック、図・番号・連番・文書の分割・ファイル名の並びは report_render_guard。
 DUP_MIN_SHARED = 5
 DUP_RATIO = 0.6
 DUP_OK = re.compile(r"<!--\s*dup-table-ok\s*[:：]\s*(.{10,}?)\s*-->")
@@ -785,7 +1088,9 @@ def on_stop(ev):
     since, calls = (None, [])
     if ev.get("transcript_path"):
         since, calls = read_turn(ev["transcript_path"])
+        since, _how = turn_start(ev["transcript_path"], since)  # 時刻が取れなくても HEAD 比較（無言）に戻さない
     cwd = ev.get("cwd") or os.getcwd()
+    tbl_deadline = time.time() + TABLE_BUDGET
     paths = set()
     try:
         paths = set(_touched_files(calls, cwd))
@@ -796,14 +1101,15 @@ def on_stop(ev):
         r = _git_root(p)
         if r and r not in roots:
             roots.append(r)
-    found, cut, tbl_block, tbl_warn = [], [], [], []
+    found, found_warn, cut, tbl_block, tbl_warn, tbl_cut = [], [], [], [], [], []
     for root in roots:
         if time.time() > deadline:
             cut.append((root, -1))
             continue
-        targets = changed_files(root, since)
+        targets = [t for t in changed_files(root, since) if not is_fixture(t)]
         if not targets:
             continue
+        texts = {}
         for rel in targets:
             if os.path.splitext(rel)[1].lower() not in (".md", ".markdown"):
                 continue
@@ -814,18 +1120,37 @@ def on_stop(ev):
                 continue
             if mark_in_text(text) or "|" not in text:
                 continue
-            head = _git(root, ["show", "HEAD:" + rel.replace("\\", "/")])
-            b, w = table_findings(text, head)
+            texts[rel] = text
+        # ターン開始時点の版（ターン内のコミットに比べる相手を奪われない）を git 1回でまとめて引く
+        heads = Baseline(root, since).texts(sorted(texts)) if texts else {}
+        mine = authored_paths(root, since, written_paths(calls, cwd)) if ev.get("transcript_path") else set()
+        left = sorted(texts)
+        while left and time.time() <= tbl_deadline:
+            rel = left.pop(0)
+            b, w = table_findings(texts[rel], heads.get(rel))
+            if _pkey(os.path.join(root, rel)) not in mine:
+                b, w = [], w + b  # 自分で書いていない（pull・別セッション・checkout で入った）ものは知らせるだけ
             tbl_block += [(os.path.join(root, rel),) + x for x in b]
             tbl_warn += [(os.path.join(root, rel),) + x for x in w]
+        if left:
+            tbl_cut.append((root, len(left)))
         pairs, skipped = find_pairs(root, targets, deadline)
-        found += [(os.path.join(root, a), os.path.join(root, b), m) for a, b, m in pairs]
+        # ファイル単位の併存は、スクリプトで生成してコミットした複製も止める（ターン内の手元の git commit を含める）
+        mine_files = (mine | local_commit_paths(root, since)) if (pairs and ev.get("transcript_path")) else mine
+        for a, b, m in pairs:
+            pair = (os.path.join(root, a), os.path.join(root, b), m)
+            (found if _pkey(pair[0]) in mine_files or _pkey(pair[1]) in mine_files else found_warn).append(pair)
         if skipped:
             cut.append((root, skipped))
     note = ""
     if cut:
         note = "near_duplicate_guard: %g秒を超えたので比較を打ち切った（%s）。残りは次のターンにキャッシュ付きで見る。" % (
             TIME_BUDGET, "、".join("%s 残り%s" % (r, ("%dファイル" % n) if n >= 0 else "全部") for r, n in cut))
+    if tbl_cut:
+        note = (note + " " if note else "") + "near_duplicate_guard: 表の重複の検査が %g秒を超えたので打ち切った（%s）。" % (
+            TABLE_BUDGET, "、".join("%s 未検査%dファイル" % rc for rc in tbl_cut))
+        cut += tbl_cut
+    if note:
         sys.stderr.buffer.write((note + "\n").encode("utf-8"))
         sys.stderr.buffer.flush()
     if tbl_block:
@@ -834,7 +1159,7 @@ def on_stop(ev):
             "【同じ対象・同じ情報の表が1つの文書に2つ】このターンで作成・変更した文書に、同じ対象を行に並べ、"
             "同じ値を持つ表が2つ以上ある。直すたびに片方しか直らず、読み手は同じ情報を2度読む"
             "（2026-10-02 依頼者指摘。要レビュー一覧の「生きている原稿の一覧」と「一覧表」の実例）。\n"
-            + _fmt_tables(tbl_block) + "\n" + TABLE_RESOLVE)})
+            + _fmt_tables(tbl_block) + "\n" + TABLE_RESOLVE + (("\n" + note) if note else ""))})
         return
     if found:
         _record_firing("near_duplicate_guard", ev)
@@ -843,10 +1168,15 @@ def on_stop(ev):
             "同じリポにある。版管理せずに2つ置くと、修正のたびに片方しか直らない"
             "（2026-09-30 依頼者指摘。nt-040 の原稿と投稿用、計画書 v1/v2 の実例）。\n"
             + _fmt_pairs(found) + "\n" + RESOLVE + (("\n" + note) if note else ""))})
-    elif tbl_warn:
-        _emit({"systemMessage": "⚠ near_duplicate_guard: このターンで触った文書に、前からある重複の表がある"
-               "（このターンでは悪化していないので止めない）。1つの表にまとめることを勧める。\n"
-               + _fmt_tables(tbl_warn)})
+    elif tbl_warn or found_warn:
+        msg = []
+        if tbl_warn:
+            msg.append("このターンで変わった文書に、前からある・または自分で書いていない（pull・別セッションのコミット等で"
+                       "入った）重複の表がある（止めない）。1つの表にまとめることを勧める。\n" + _fmt_tables(tbl_warn))
+        if found_warn:
+            msg.append("このターンで変わった（自分では書いていない）ファイルに、ほぼ同じ内容の生きたファイルがある"
+                       "（止めない）。\n" + _fmt_pairs(found_warn))
+        _emit({"systemMessage": "⚠ near_duplicate_guard: " + "\n".join(msg) + (("\n" + note) if note else "")})
     elif cut:
         # 黙って通さない: 見られなかったことを利用者に見える形で知らせる（止めはしない）
         _record_firing("near_duplicate_guard", ev)
