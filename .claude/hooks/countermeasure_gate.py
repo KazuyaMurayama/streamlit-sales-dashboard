@@ -1191,8 +1191,26 @@ def _strip_heredoc_bodies(cmd):
     return "\n".join(out)
 
 
+def _join_quoted_newlines(cmd):
+    """Newlines inside '...' / "..." are part of one argument (a multi-line
+    `git commit -m "..."`), not new commands. 2026-10-12 実測: commit メッセージの
+    2行目「…（SCH = "schtasks /create ..."）を」を予定変更と数えて Stop を止めた。"""
+    out, q, prev = [], None, ""
+    for ch in cmd:
+        if q:
+            if ch == q and not (q == '"' and prev == "\\"):
+                q = None
+            out.append(" " if ch == "\n" else ch)
+        else:
+            if ch in ("'", '"'):
+                q = ch
+            out.append(ch)
+        prev = ch
+    return "".join(out)
+
+
 def _sched_in_command(cmd):
-    cmd = _strip_heredoc_bodies(cmd or "")
+    cmd = _join_quoted_newlines(_strip_heredoc_bodies(cmd or ""))
     for seg in _segments(cmd):
         if _READONLY_HEAD_RE.match(seg) or _SCRIPT_HEAD_RE.match(seg) or _ASSIGN_HEAD_RE.match(seg):
             continue
