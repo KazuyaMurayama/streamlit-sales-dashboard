@@ -1107,7 +1107,7 @@ def _self_claimed(final_text):
 
 # S: schedule changes ------------------------------------------------------
 SCHED_CMD_RE = re.compile(
-    r"schtasks(?:\.exe)?\s+/(?:create|change)\b|Register-ScheduledTask\b"
+    r"schtasks(?:\.exe)?[\"']?\s+(?:-ArgumentList\s+)?[\"'(@]*/(?:create|change)\b|Register-ScheduledTask\b"
     r"|Set-ScheduledTask\b|New-ScheduledTaskTrigger\b|\$\w+\.Triggers\b"
     r"|\bcrontab\s+(?!-l\b)\S|launchctl\s+(?:load|bootstrap)\b"
     r"|systemctl\s+(?:enable|edit)\s+\S+\.timer", re.IGNORECASE)
@@ -1160,11 +1160,45 @@ def _schedule_changes(uses):
                     and re.search(r"\bcron\s*:", _edit_body(inp))):
                 out.append(os.path.basename(fp))
         elif name not in AGENT_TOOLS and isinstance(inp.get("command"), str):
-            for seg in _segments(inp["command"]):
-                if not _READONLY_HEAD_RE.match(seg) and SCHED_CMD_RE.search(seg):
-                    out.append(seg.strip()[:80])
-                    break
+            hit = _sched_in_command(inp["command"])
+            if hit:
+                out.append(hit)
     return out
+
+
+# 2026-10-12 実測の偽陽性: 検証役のテストが heredoc の Python に書いた文字列
+# （SCH = "schtasks /create ..."）を「このターンで変えた予定」と数えて止めた。
+# 予定を変えるのは「実行されるコマンド」だけ。heredoc の本文・変数への代入・python/node に
+# 渡したスクリプトの行は数えない。クォート内は除かない（Fable: 引用付きフルパスの schtasks.exe・
+# Start-Process -ArgumentList・bash -c・Invoke-Expression を取りこぼす回帰になった）。
+_HEREDOC_START_RE = re.compile(r"<<-?\s*(['\"]?)(\w+)\1")
+_ASSIGN_HEAD_RE = re.compile(r"^\s*(?:\$?[A-Za-z_]\w*)\s*=(?!=)")
+_SCRIPT_HEAD_RE = re.compile(r"^\s*(?:python\w*|py|node|pytest|perl|ruby)(?:\.exe)?\b", re.IGNORECASE)
+
+
+def _strip_heredoc_bodies(cmd):
+    """Drop heredoc bodies line by line (linear; an unterminated heredoc drops the rest)."""
+    out, tag = [], None
+    for line in cmd.split("\n"):
+        if tag is not None:
+            if line.strip() == tag:
+                tag = None
+            continue
+        out.append(line)
+        m = _HEREDOC_START_RE.search(line)
+        if m:
+            tag = m.group(2)
+    return "\n".join(out)
+
+
+def _sched_in_command(cmd):
+    cmd = _strip_heredoc_bodies(cmd or "")
+    for seg in _segments(cmd):
+        if _READONLY_HEAD_RE.match(seg) or _SCRIPT_HEAD_RE.match(seg) or _ASSIGN_HEAD_RE.match(seg):
+            continue
+        if SCHED_CMD_RE.search(seg):
+            return seg.strip()[:80]
+    return ""
 
 
 def _text_after_last_sched(rows):
