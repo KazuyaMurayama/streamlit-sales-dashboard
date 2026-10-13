@@ -46,6 +46,18 @@ Adversarial review (Fable, 2026-09-24) found 10 confirmed holes; each fix
 below is tagged "Fable #N" at the line it changed, and each has a RED case
 in tests/test_response_length_guard.py.
 
+COUNT CAP (2026-10-13, measured)
+---------------------------------
+User: 「VS Code の途中報告が必要以上に多い … 8割くらいカットして 1/5 以下に …
+最終報告があれば、あとは途中のわずかな進捗報告だけを1行で短く」.
+Replay of 335 turns (2026-10-01 .. 10-13, intermediates as defined by
+split_inters): 2,066 intermediates, mean 6.17 per turn (median 2, p90 20). A
+cap of N per turn keeps, even if obeyed perfectly: N=1 11.3%, N=2 20.5%,
+N=3 28.6%. N=2 already misses the requested <=1/5, so N=1. The 100-char
+format rule alone never reduced the COUNT, which is what fills the screen.
+PostToolUse counts every intermediate of the turn (not just the latest) and
+warns when the cap is reached, before the next one is written.
+
 It never blocks and never exits non-zero. Calibration:
 tests/calibrate_response_length_guard.py (replays real transcripts).
 Deployed from claude-governance/templates/hooks/ -- edit there, not here.
@@ -74,7 +86,9 @@ TAIL_WINDOW = 15          # the tail is searched only in the last N non-empty li
 DESC_MAX = 15
 ROW_ALLOW = 60            # per deliverables-table row; anything beyond counts as body
 INTER_MAX = 100
-INTER_TOTAL_MAX = 800     # 30 x 99-char one-liners must not escape (Fable #6)
+INTER_N_MAX = 1           # per turn; measured above (2026-10-13)
+INTER_TOTAL_MAX = INTER_N_MAX * INTER_MAX   # 30 short one-liners must not escape (Fable #6)
+CAP_WARN_PER_TURN = 2     # "cap reached" once, "cap exceeded" once
 INTER_WARN_PER_TURN = 2   # each warning costs context; stop after this many
 TAIL_BYTES = 2 * 1024 * 1024
 MAX_BACK_BYTES = 64 * 1024 * 1024   # Stop: read further back until the turn start
@@ -124,9 +138,41 @@ def _count(text):
     return len(re.sub(r"[\r\n]+", "", _visible(text).strip()))
 
 
+WAKE_KINDS = {"peer", "task-notification"}
+WAKE_PREFIX = ("<task-notification>", "Another Claude session")
+
+
+def _user_text(row):
+    c = (row.get("message") or {}).get("content")
+    if isinstance(c, list):
+        return " ".join(b.get("text", "") for b in c
+                        if isinstance(b, dict) and b.get("type") == "text").lstrip()
+    return (c if isinstance(c, str) else "").lstrip()
+
+
+def _row_kind(row):
+    """'wake' (background task / subagent woke the model), 'stopfb' (another
+    Stop hook forced a re-answer) or None.
+
+    Both arrive as user rows inside ONE human turn (2026-10-13, Fable #3: 2,575
+    such rows in 13 days; treating them as turn starts reset the count)."""
+    if row.get("type") != "user":
+        return None
+    if (row.get("origin") or {}).get("kind") in WAKE_KINDS:
+        return "wake"
+    t = _user_text(row)
+    if t.startswith(WAKE_PREFIX):
+        return "wake"
+    if t.startswith("Stop hook feedback"):
+        return "stopfb"
+    return None
+
+
 def _is_boundary(row):
     """A genuine human prompt (not a tool result, hook feedback or meta row)."""
     if row.get("type") != "user" or row.get("isMeta"):
+        return False
+    if _row_kind(row):
         return False
     c = (row.get("message") or {}).get("content")
     if isinstance(c, list):
@@ -194,7 +240,11 @@ def turn_events(rows):
         return None
     ev = []
     for r in rows[start + 1:]:
-        if r.get("type") != "assistant" or r.get("isSidechain"):
+        k = _row_kind(r)
+        if k:
+            ev.append(("mark", k))
+            continue
+        if r.get("type") != "assistant" or r.get("isSidechain") or r.get("isApiErrorMessage"):
             continue
         for b in ((r.get("message") or {}).get("content") or []):
             if not isinstance(b, dict):
@@ -293,11 +343,29 @@ def inter_problem(text):
     return None
 
 
+def split_inters(ev):
+    """-> (intermediates, final texts).
+
+    Shown before a tool call or before a wake (the model went idle waiting):
+    intermediate. Followed directly by another Stop hook's feedback: it was a
+    final answer that got re-opened, not a progress note (Fable #1, 8.8% of
+    turns over the cap from this alone)."""
+    cut = max([i for i, e in enumerate(ev) if e[0] == "tool" or e == ("mark", "wake")],
+              default=-1)
+    inters = []
+    for i, e in enumerate(ev[:cut + 1]):
+        if e[0] != "text":
+            continue
+        nxt = next((x for x in ev[i + 1:] if x[0] != "text"), None)
+        if nxt != ("mark", "stopfb"):
+            inters.append(e[1])
+    return inters, [e[1] for e in ev[cut + 1:] if e[0] == "text"]
+
+
 def analyze(ev):
     kind = classify(ev)
-    last_tool = max([i for i, e in enumerate(ev) if e[0] == "tool"], default=-1)
-    final = "\n\n".join(e[1] for e in ev[last_tool + 1:] if e[0] == "text")
-    inters = [e[1] for e in ev[:last_tool + 1] if e[0] == "text"]
+    inters, finals = split_inters(ev)
+    final = "\n\n".join(finals)
     body, tail, descs, excess = split_final(final)
     tail_lines = [ln for ln in tail.splitlines() if ln.strip()]
     res = {
@@ -324,6 +392,8 @@ def violations(r):
         out.append(u"本文 %d字／上限 %d字（%s・+%d%%）" % (
             r["body"], r["budget"], LABEL[r["kind"]],
             round(100.0 * (r["body"] - r["budget"]) / r["budget"])))
+    if r["inter_n"] > INTER_N_MAX:
+        out.append(u"途中メッセージ %d本／上限 %d本" % (r["inter_n"], INTER_N_MAX))
     if r["inter_chars"] > INTER_TOTAL_MAX:
         out.append(u"途中メッセージ合計 %d字／上限 %d字" % (r["inter_chars"], INTER_TOTAL_MAX))
     if r["inter_bad"]:
@@ -343,8 +413,9 @@ def violations(r):
 # printing "a write makes it 1,000" is a recipe for inflating the budget).
 RULES = (u"【回答の長さ上限】本文は 質問への回答600字／作業報告1,000字／調査・設計1,500字 以内"
          u"（区分は実際に行った作業で判定）。留保・代替案・Next Action は各1行・計300字以内、"
-         u"成果物表の説明は15字以内。途中メッセージは1行100字以内で「何をしているか」だけ"
-         u"（原因・結論・表は最終回答まで書かない）。"
+         u"成果物表の説明は15字以内。途中メッセージは1ターン1本まで・1行100字以内で"
+         u"「何をしているか」だけ（原因・結論・表は最終回答まで書かない。長い待ちに入る時・"
+         u"大きな節目だけ書き、ツールを呼ぶたびには書かない。通知で起きてまだ待つだけなら書かない）。"
          u"削る順: 自分の作業経緯→確認済みの細部→重複。残す: 結論・判断に効く数値・ユーザーがすること。")
 
 
@@ -399,6 +470,8 @@ def _emit(event_name, text):
 
 
 def on_prompt(ev):
+    if (ev.get("prompt") or "").lstrip().startswith(WAKE_PREFIX):
+        return
     st = _load(_state_path(ev))
     msg = RULES
     prev = st.get("violations") or []
@@ -444,25 +517,89 @@ def last_text_before_tool(rows):
     return None
 
 
+def turn_inter_keys(rows):
+    """-> (turn key, [keys of this turn's intermediates]) for split_inters'
+    definition, keyed by row position so a repeated one-liner counts twice
+    (Fable #5). Turn key None when the turn start is outside the tail."""
+    start, tkey = 0, None
+    for i in range(len(rows) - 1, -1, -1):
+        if _is_boundary(rows[i]):
+            start = i + 1
+            tkey = rows[i].get("uuid") or _key(json.dumps(rows[i], sort_keys=True))
+            break
+    ev, keys = [], []
+    for r in rows[start:]:
+        k = _row_kind(r)
+        if k:
+            ev.append(("mark", k))
+            continue
+        if r.get("type") != "assistant" or r.get("isSidechain") or r.get("isApiErrorMessage"):
+            continue
+        for j, b in enumerate((r.get("message") or {}).get("content") or []):
+            if not isinstance(b, dict):
+                continue
+            if b.get("type") == "text" and (b.get("text") or "").strip():
+                ev.append(("text", "%s#%d" % (r.get("uuid") or _key(b["text"]), j)))
+            elif b.get("type") == "tool_use":
+                ev.append(("tool", b.get("name") or "", {}))
+    inters, _ = split_inters(ev)
+    return tkey, inters
+
+
+def _key(text):
+    return hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()[:12]
+
+
+def check_count(ev, rows):
+    """-> warning text when this turn's intermediates reach / pass the cap."""
+    p = _state_path(ev, "_count")
+    st = _load(p)
+    tkey, keys = turn_inter_keys(rows)
+    if tkey and tkey != st.get("turn"):
+        st = {"turn": tkey}    # a new human prompt (wakes do not reach here)
+    seen = st.get("seen") or []
+    for k in keys:
+        if k not in seen:
+            seen.append(k)
+    st["seen"] = seen[-200:]
+    n, warned = len(seen), st.get("cap_warned", 0)
+    msg = None
+    if n >= INTER_N_MAX and warned < CAP_WARN_PER_TURN and (
+            warned == 0 or n > INTER_N_MAX):
+        st["cap_warned"] = warned + 1
+        msg = u"【途中 %d本目／上限%d本】最終回答まで途中は書かない（通知で起きても）。" % (
+            n, INTER_N_MAX)
+    _save(p, st)
+    return msg
+
+
+def _emit_cap(ev, cap_msg):
+    if cap_msg:
+        _record_firing(NAME, ev)
+        _emit("PostToolUse", cap_msg)
+
+
 def on_post_tool(ev):
-    text = last_text_before_tool(read_rows(ev.get("transcript_path") or "",
-                                           POST_TAIL_BYTES))
-    if not text:
-        return
-    why = inter_problem(text)
+    rows = read_rows(ev.get("transcript_path") or "", POST_TAIL_BYTES)
+    cap_msg = check_count(ev, rows)
+    text = last_text_before_tool(rows)
+    why = inter_problem(text) if text else None
     if not why:
+        _emit_cap(ev, cap_msg)
         return
     p = _state_path(ev, "_inter")
     st = _load(p)
-    key = hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()[:12]
+    key = _key(text)
     if st.get("warned", 0) >= INTER_WARN_PER_TURN or key in (st.get("keys") or []):
+        _emit_cap(ev, cap_msg)
         return
     st["warned"] = st.get("warned", 0) + 1
     st["keys"] = (st.get("keys") or [])[-20:] + [key]
     _save(p, st)
     _record_firing(NAME, ev)
-    _emit("PostToolUse", u"【途中メッセージ（%s）】途中は1行100字以内で「何をしているか」"
-                         u"だけ書く。発見・原因・結論は最終回答にまとめる。" % why)
+    fmt = (u"【途中メッセージ（%s）】途中は1行100字以内で「何をしているか」"
+           u"だけ書く。発見・原因・結論は最終回答にまとめる。" % why)
+    _emit("PostToolUse", fmt + (u"\n" + cap_msg if cap_msg else u""))
 
 
 def on_stop(ev):
@@ -480,7 +617,8 @@ def on_stop(ev):
         os.makedirs(STATE_DIR, exist_ok=True)
         with io.open(_hist_path(), "a", encoding="utf-8") as f:
             f.write(json.dumps({"t": int(time.time()), "kind": r["kind"], "body": r["body"],
-                                "budget": r["budget"], "inter": r["inter_chars"]}) + "\n")
+                                "budget": r["budget"], "inter": r["inter_chars"],
+                                "inter_n": r["inter_n"]}) + "\n")
     except Exception:
         pass
     if r["violations"]:
