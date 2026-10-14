@@ -69,7 +69,15 @@ WHY（2026-10-14 依頼者指摘）
          personal-brand-publisher_v1 1。初期セットアップ等の一括追加が中心）
     → deny（拒否）を維持。誤検知は 10/8,186 コミット（0.12%）で、(b) の1行で解消でき、拒否のコストは1回の
       書き直し。見逃しのコストは「読み手と AI が正本を取り違える」で、依頼者の指摘はこちら。
-    既知の未対応（攻撃ハーネスで LEAK のまま）: 話題語のない汎用名だけのメモ（CONTEXT_NOTES.md）・両方に別番号
+    第3版（Fable 再検証の3点。8,217 コミット・直近24時間窓・例外宣言あり）:
+      ①名前が変わらない移動・改名（git mv old/ docs/、同じコマンドの mv→add -A）は新規に数えない
+      ②Push-Location・$env:VAR・$HOME・${VAR} を展開して cd を解決 ③部分集合＋1語（共有2語以上、または
+      同じ日付で共有1語以上）を追加。SEARCH・PROMPT(S)・EXPLAINER・GUIDE を汎用語に追加（シリーズ物の誤検知対策）。
+      ③なし: 発火 39（0.47%）／③あり: 発火 55（0.67%）← 1% 未満のため採用（例外宣言なしは 75）
+      ③で増えた16件: 欠陥クラス 7（QA 批評と本体・計画と本体・同日の同話題レポート 2 本 等）、
+        誤検知 9（Soulful の計画書と正典プロンプト 4・shopping の別検索 4・tax-advisor 1）
+      発火55件の内訳: 欠陥クラス 26・派生/分冊 10・誤検知 19（0.23%）
+    既知の未対応（副題語が2語以上＝NAVAL_RAVIKANT_TIMELINE、攻撃ハーネスで LEAK のまま）: 話題語のない汎用名だけのメモ（CONTEXT_NOTES.md）・両方に別番号
       ・archive/ や .claude/ 配下・.html/.txt 等の拡張子・add -N→commit -am・同コマンド内の mv→add・
       変数展開した commit。
 
@@ -106,6 +114,7 @@ ALLOW_FILE = os.path.join(".claude", "topic_split_allow.json")
 MIN_REASON = 10
 CONTAIN_THRESHOLD = 1.0  # 較正で決定（docstring 参照）
 RECENT = "24.hours"      # 別コミットに分けた付属メモも比べる窓（Fable 攻撃検証 2026-10-14 #3）
+SUBSET_PLUS_ONE = True  # 第3版 #3（較正で採否を決める。docstring 参照）
 PARALLEL_MIN = 3         # 同名ファイルを「実体ごとの並列構造」とみなす最小の数（#4）
 
 # 「中間メモの種類」を表す語。片方がこれを持ち、話題語を1つでも共有すれば同じ話題（#2）。
@@ -122,7 +131,7 @@ GENERIC = KIND | {
     "VERIFY", "VERIFICATION", "AUDIT", "TODO", "TASKS", "OVERVIEW", "DETAIL", "DETAILS", "FULL", "MAIN",
     "BODY", "TMP", "TEMP", "COPY", "OLD", "NEW", "QUOTE", "SCOPE", "THE", "AND", "FOR", "WITH", "FROM",
     "ABOUT", "AGENT", "AGENTS", "レポート", "本文", "SOURCES", "REFS", "REFERENCES", "EVIDENCE", "QUOTES",
-    "SUMMARY", "ANALYSIS", "CLAUDE", "CHANGELOG", "CONTRIBUTING", "LICENSE", "SKILL",
+    "SUMMARY", "ANALYSIS", "SEARCH", "PROMPT", "PROMPTS", "EXPLAINER", "GUIDE", "CLAUDE", "CHANGELOG", "CONTRIBUTING", "LICENSE", "SKILL",
 }
 _DATE = re.compile(r"(?<!\d)(?:20\d{2}[-_]?\d{2}[-_]?\d{2})(?!\d)")
 _VER = re.compile(r"(?:^|[-_ .])v\d+(?=$|[-_ .])", re.I)
@@ -226,7 +235,24 @@ def _parallel_pairs(paths):
     return out
 
 
-def find_groups(paths, threshold=CONTAIN_THRESHOLD, recent=()):
+def file_date(path):
+    m = _DATE.search(os.path.basename(path))
+    return re.sub(r"\D", "", m.group(0)) if m else ""
+
+
+def near_subset(a, b, da="", db=""):
+    """片方の話題語が、もう片方の話題語＋1語以内に収まり、共有語が2語以上（同じ日付なら1語以上）（第3版 #3）。
+    種別語リスト外の副題語（NAVAL_RAVIKANT_TIMELINE 等）を拾う。"""
+    if not a or not b:
+        return False
+    small, large = (a, b) if len(a) <= len(b) else (b, a)
+    shared = len(small & large)
+    if len(small - large) > 1:
+        return False
+    return shared >= 2 or (shared >= 1 and da and da == db)
+
+
+def find_groups(paths, threshold=CONTAIN_THRESHOLD, recent=(), subset_plus_one=None):
     """同じ話題の文書の群（2本以上、かつ paths の新規文書を1本以上含む）を返す。
     paths はこのコミットの新規文書、recent は直近 RECENT に同じリポへ追加された文書（リポ相対パス）。"""
     new = set(p.replace("\\", "/") for p in paths if is_doc(p))
@@ -235,6 +261,9 @@ def find_groups(paths, threshold=CONTAIN_THRESHOLD, recent=()):
     toks = {p: topic_tokens(p) for p in allp}
     kind = {p: has_kind(p) for p in allp}
     nums = {p: numbers(p) for p in allp}
+    dates = {p: file_date(p) for p in allp}
+    if subset_plus_one is None:
+        subset_plus_one = SUBSET_PLUS_ONE
     par = _parallel_pairs(allp)
     parent = {p: p for p in allp}
 
@@ -262,7 +291,8 @@ def find_groups(paths, threshold=CONTAIN_THRESHOLD, recent=()):
                 # 中間メモの種別語を持つ側があれば、話題語を1つ共有するだけで同じ話題（#2）
                 hit = bool(toks[a] & toks[b])
             else:
-                hit = same_topic(toks[a], toks[b], threshold)
+                hit = same_topic(toks[a], toks[b], threshold) or (
+                    subset_plus_one and near_subset(toks[a], toks[b], dates[a], dates[b]))
             if hit:
                 parent[find(a)] = find(b)
     groups = {}
@@ -325,7 +355,7 @@ _COMMIT = re.compile(_GIT_PREFIX + r"commit\b" + _Q)
 _ADD = re.compile(_GIT_PREFIX + r"(?:add|stage)\b" + _Q + r"(?P<args>[^;&|\n]*)")
 _DASH_C = re.compile(r"-C[\s\\`]+(\"[^\"]*\"|'[^']*'|\S+)")
 # commit より前の cd/pushd/Set-Location（#1）
-_CD = re.compile(r"(?:^|[;&|\n(])\s*(?i:cd|pushd|set-location|sl|chdir)(?:\s+/d)?\s+(?:-(?:Path|LiteralPath)\s+)?"
+_CD = re.compile(r"(?:^|[;&|\n(])\s*(?i:cd|pushd|push-location|set-location|sl|chdir)(?:\s+/d)?\s+(?:-(?:Path|LiteralPath)\s+)?"
                  r"(\"[^\"]*\"|'[^']*'|[^\s;&|)]+)")
 TRAILER = re.compile(r"(?:^|\n|-m\s*[\"']?|\\n)\s*Topic-Split-Ok\s*:\s*(?P<r>[^\n\"'#]{%d,})" % MIN_REASON)
 _MSGFILE = re.compile(r"(?:\s-F\s*|\s--file[=\s])(\"[^\"]*\"|'[^']*'|[^\s;&|]+)")
@@ -335,8 +365,16 @@ def _unq(s):
     return s[1:-1] if len(s) >= 2 and s[0] == s[-1] and s[0] in "\"'" else s
 
 
+def _expand(p):
+    """$env:VAR（PowerShell）・$HOME・${VAR}・%VAR%・~ を展開する（第3版 #2）。"""
+    home = os.path.expanduser("~")
+    p = re.sub(r"\$env:(\w+)", lambda m: os.environ.get(m.group(1), m.group(0)), p, flags=re.I)
+    p = re.sub(r"\$\{?HOME\}?(?=$|[/\\])", lambda m: home.replace("\\", "/"), p)
+    return os.path.expandvars(os.path.expanduser(p))
+
+
 def _abspath(base, p):
-    p = os.path.expandvars(os.path.expanduser(_unq(p)))
+    p = _expand(_unq(p))
     if os.name == "nt" and re.match(r"^/[a-zA-Z]/", p):  # Git Bash の /c/Users/...
         p = p[1] + ":" + p[2:]
     return p if os.path.isabs(p) else os.path.join(base, p)
@@ -371,6 +409,9 @@ def added_by_git_add(root, cmd, commit_pos, cwd):
         if untracked is None:
             untracked = _lines(_git(root, ["ls-files", "-o", "--exclude-standard"]))
             tracked = set(_lines(_git(root, ["ls-files"])))
+            # 同じコマンドの mv → add -A で移動しただけの文書（消えた追跡ファイルと同じ名前）は新規に数えない
+            gone = set(os.path.basename(x).lower() for x in _lines(_git(root, ["ls-files", "--deleted"])))
+            untracked = [u for u in untracked if os.path.basename(u).lower() not in gone]
         here = effective_cwd(cmd, m.start(), cwd)
         dm = _DASH_C.search(m.group("opts") or "")
         if dm:
@@ -396,15 +437,30 @@ def added_by_git_add(root, cmd, commit_pos, cwd):
     return out
 
 
+def added_from_status(text):
+    """--name-status -M の出力から新規に数える文書を返す。A は新規。R は名前（basename）が変わるときだけ新規
+    （ファイル名が変わらない移動 git mv old/ docs/ は新規ではない）（第3版 #1）。"""
+    out = []
+    for line in text.splitlines():
+        f = line.split("\t")
+        if not f or not f[0]:
+            continue
+        if f[0][0] == "A" and len(f) >= 2:
+            out.append(f[1])
+        elif f[0][0] == "R" and len(f) >= 3:
+            if os.path.basename(f[1]).lower() != os.path.basename(f[2]).lower():
+                out.append(f[2])
+    return out
+
+
 def new_docs(root, cmd, commit_pos, cwd):
-    staged = _lines(_git(root, ["diff", "--cached", "--name-only", "--no-renames", "--diff-filter=A"]))
+    staged = added_from_status(_git(root, ["diff", "--cached", "--name-status", "-M"]))
     return sorted(set(staged) | set(added_by_git_add(root, cmd, commit_pos, cwd)))
 
 
 def recent_docs(root, since=RECENT):
     """直近に同じリポで新規追加され、今も残っている文書（#3）。"""
-    out = _lines(_git(root, ["log", "--since=" + since, "--no-renames", "--diff-filter=A",
-                             "--name-only", "--format="]))
+    out = added_from_status(_git(root, ["log", "--since=" + since, "-M", "--name-status", "--format="]))
     return sorted(set(p for p in out if os.path.isfile(os.path.join(root, p))))
 
 
