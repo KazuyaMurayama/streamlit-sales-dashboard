@@ -323,7 +323,8 @@ auto-compact 頻発を防ぐため、コンテキストに載せる量を機械�
 - **C4 サブエージェント戻り上限**: 委託 prompt に「成果物・詳細はファイルに保存しパスを返す。最終返信は要約2KB以内」を明記。
 - **C5 シリーズ作業の /clear 設計**: 定型反復作業は台帳ファイル（tasks.md 等）を状態アンカーにし、約3ユニットごとに /clear で新しいコンテキストから再開。台帳＋CLAUDE.md だけで再開できる状態を保つ。
 - **C6 能動 /compact**: 利用率が高まったら警告を待たず `/compact <保持指示>`。圧縮時保持=目的・前提制約・意思決定・進行中タスク・正典ファイル参照・直近エラー。状態は tasks.md 等の永続層に書き出し会話履歴に依存させない。
-- 機械ガード: `.claude/hooks/pre_read_guard.py`（PreToolUse: Read）が C2 を自動検査する。
+- **1依頼1文書**: 1つの依頼の文書は本体1本。同じ話題の背景ノート・観点表・調査メモ・下書きを別の文書ファイルとしてコミットしない（中身は本体へ統合し、作業用メモは OS の一時フォルダへ）。正典の工程が要求しスクリプトが読む台帳だけ `.claude/topic_split_allow.json` に理由と正典パス付きで宣言する。
+- 機械ガード: `.claude/hooks/pre_read_guard.py`（PreToolUse: Read）が C2 を、`.claude/hooks/topic_split_guard.py`（PreToolUse: Bash/PowerShell の git commit）が 1依頼1文書 を自動検査する。
 <!-- CONTEXT-HYGIENE:END -->
 
 <!-- REINJECT-GUARD:BEGIN -->
