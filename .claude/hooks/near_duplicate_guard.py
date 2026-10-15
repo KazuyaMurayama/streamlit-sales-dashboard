@@ -257,15 +257,38 @@ def _git(root, args, timeout=10):
         return None
 
 
+_ROOTS = {}
+
+
 def _git_root(path):
-    d = path if os.path.isdir(path) else os.path.dirname(path)
+    """path を含む作業ツリーの最上位（.git のディレクトリかファイルがある所）。git を呼ばずに上へたどる。
+    WHY（2026-10-15 実測）: ターンで触ったファイルごとに git rev-parse を呼び、Windows では1回約0.4秒、
+    12回で約4.9秒を使って比較の前に期限（TIME_BUDGET 5秒）を使い切り、毎回「打ち切った」になっていた。"""
+    d = os.path.abspath(path if os.path.isdir(path) else os.path.dirname(path))
     while d and not os.path.isdir(d):
         nxt = os.path.dirname(d)
         if nxt == d:
             return None
         d = nxt
-    out = _git(d, ["rev-parse", "--show-toplevel"]) if d else None
-    return os.path.abspath(out.strip()) if out else None
+    seen = []
+    while d:
+        if d in _ROOTS:
+            r = _ROOTS[d]
+            break
+        seen.append(d)
+        if os.path.exists(os.path.join(d, ".git")):
+            r = d
+            break
+        nxt = os.path.dirname(d)
+        if nxt == d:
+            r = None
+            break
+        d = nxt
+    else:
+        r = None
+    for x in seen:
+        _ROOTS[x] = r
+    return r
 
 
 def repo_files(root):
@@ -625,6 +648,7 @@ class Index(object):
     def __init__(self, root):
         self.root = root
         self.dirty = False
+        self._st = {}
         self.path = None
         gd = _git(root, ["rev-parse", "--absolute-git-dir"])
         if gd:
@@ -639,11 +663,38 @@ class Index(object):
             self.data = {}
 
     def stat(self, rel):
+        if rel in self._st:
+            return self._st[rel]
         try:
             st = os.stat(os.path.join(self.root, rel))
-            return st.st_size, st.st_mtime_ns
+            v = (st.st_size, st.st_mtime_ns)
         except Exception:
-            return None
+            v = None
+        self._st[rel] = v
+        return v
+
+    def prefetch(self, rels):
+        """rels の stat をディレクトリごとの scandir でまとめて引く。
+        WHY（2026-10-15 実測）: Windows では os.stat が1回約1.8ms かかり、2,666ファイルのリポで並べ替えの
+        prio が stat を2回ずつ呼んで約10秒を使い、打ち切りの期限（TIME_BUDGET）の外で Stop を25秒止めていた。
+        Windows の DirEntry.stat() はディレクトリの一覧に載ったサイズ・更新時刻を返し、ファイルごとの呼び出しをしない。"""
+        by_dir = {}
+        for r in rels:
+            if r not in self._st:
+                d, _sep, name = r.rpartition("/")
+                by_dir.setdefault(d, set()).add(name)
+        for d, names in by_dir.items():
+            try:
+                with os.scandir(os.path.join(self.root, d) if d else self.root) as it:
+                    for e in it:
+                        if e.name in names:
+                            try:
+                                st = e.stat(follow_symlinks=False)
+                                self._st[(d + "/" if d else "") + e.name] = (st.st_size, st.st_mtime_ns)
+                            except Exception:
+                                pass
+            except Exception:
+                pass
 
     def cached(self, rel):
         key = self.stat(rel)
@@ -691,6 +742,7 @@ def find_pairs(root, targets, deadline):
     cand = repo_files(root)
     live = set(cand)
     idx = Index(root)
+    idx.prefetch(cand)
     tg = []
     for a in targets:
         if a not in live:
@@ -1081,6 +1133,22 @@ RESOLVE = (
     "  3. 生成物ならコミットせず必要時に生成する（.gitignore に入れて追跡を外す）")
 
 
+def _log_cut(note, ev):
+    """打ち切りを ~/.claude/logs/near_dup_cut.log に1行で残す（画面には出さない）。
+    WHY（2026-10-15 依頼者「以下のメッセージ鬱陶しい。数多すぎ…短くするとか、メッセージ出さないとかすべきでは？」）:
+    打ち切りの知らせは1セッションで157回、Stop のたびに約150字出ていた。依頼者がすることは無く、
+    「次のターンにキャッシュ付きで見る」も実際には毎回打ち切られていた（原因は Index.prefetch の WHY）。
+    打ち切りが続いていないかは、このログの行数で確かめる。"""
+    try:
+        d = os.path.join(os.path.expanduser("~"), ".claude", "logs")
+        if not os.path.isdir(d):
+            os.makedirs(d)
+        with io.open(os.path.join(d, "near_dup_cut.log"), "a", encoding="utf-8") as f:
+            f.write(u"%s\t%s\t%s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), ev.get("session_id") or "", note))
+    except Exception:
+        pass
+
+
 def on_stop(ev):
     if ev.get("stop_hook_active"):
         return
@@ -1151,8 +1219,7 @@ def on_stop(ev):
             TABLE_BUDGET, "、".join("%s 未検査%dファイル" % rc for rc in tbl_cut))
         cut += tbl_cut
     if note:
-        sys.stderr.buffer.write((note + "\n").encode("utf-8"))
-        sys.stderr.buffer.flush()
+        _log_cut(note, ev)
     if tbl_block:
         _record_firing("near_duplicate_guard", ev)
         _emit({"decision": "block", "reason": (
@@ -1176,12 +1243,10 @@ def on_stop(ev):
         if found_warn:
             msg.append("このターンで変わった（自分では書いていない）ファイルに、ほぼ同じ内容の生きたファイルがある"
                        "（止めない）。\n" + _fmt_pairs(found_warn))
-        _emit({"systemMessage": "⚠ near_duplicate_guard: " + "\n".join(msg) + (("\n" + note) if note else "")})
+        _emit({"systemMessage": "⚠ near_duplicate_guard: " + "\n".join(msg)})
     elif cut:
-        # 黙って通さない: 見られなかったことを利用者に見える形で知らせる（止めはしない）
+        # 打ち切りは画面に出さず _log_cut のログにだけ残す（2026-10-15 依頼者指示。_log_cut の WHY）
         _record_firing("near_duplicate_guard", ev)
-        _emit({"systemMessage": "⚠ " + note + " このターンで作成・変更したファイルに、ほぼ同じ内容の"
-               "ファイルが無いことは確認できていない。"})
 
 
 def on_pre_tool(ev):
