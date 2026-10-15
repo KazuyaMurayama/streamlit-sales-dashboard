@@ -127,9 +127,9 @@ RE_SPACED = re.compile(r"(?<![A-Za-z0-9])([A-Z]) +([0-9]+)(?![0-9.,A-Za-z])")
 RE_JA = re.compile(r"[\u3040-\u309f\u30a1-\u30fa\u30fd-\u30ff\u3400-\u9fff]")
 GLOSSARY_HEAD_KEY = re.compile(r"用語|略語|略号|略称|記号|表記|識別子|呼び名|名前|名称|term|abbrev", re.I)
 GLOSSARY_HEAD_VAL = re.compile(r"意味|説明|日本語|正式|定義|中身|内容|指すもの|meaning|definition", re.I)
-MAX_KEYS_PER_ROW = 3
+MAX_KEYS_PER_ROW = 4
 STRICT = False
-MAX_KEY_CELL = 40
+MAX_KEY_CELL = 80
 
 
 def _fold(s):
@@ -252,12 +252,14 @@ def _cell_tokens(cell):
 def find_glossary(lines, skip):
     """Return (keys:set, glossary_line_indexes:set).
 
-    A glossary is a Markdown table outside code whose header's FIRST column
-    names a term (用語/略語/略号/記号/表記...) and some column names a meaning
-    (意味/説明/日本語/正式...). A body row DEFINES its first-cell tokens only if
-      - the first cell is short (<= MAX_KEY_CELL chars) and names at most
-        MAX_KEYS_PER_ROW tokens (one row per term, not a dumping ground), and
-      - the MEANING column carries Japanese text (>= 2 Japanese characters).
+    A glossary is a Markdown table outside code whose header has a TERM column
+    (用語/略語/略号/記号/表記/識別子...) and at least one other MEANING column
+    (意味/説明/日本語/正式/定義...). Column order is free: nasdaq_backtest's
+    real fix (d288dca) used | 日本語名 | 識別子 | 意味 |. A body row DEFINES
+    the identifier tokens of its TERM cell only if
+      - the TERM cell is short (<= MAX_KEY_CELL chars) and names at most
+        MAX_KEYS_PER_ROW identifiers (one row per term, not a dumping ground), and
+      - a MEANING column carries Japanese text (>= 2 Japanese characters).
     Rows that fail are treated as ordinary body text (their tokens count)."""
     keys, idx = set(), set()
     i, n = 0, len(lines)
@@ -265,18 +267,23 @@ def find_glossary(lines, skip):
         head = _split_row(lines[i]) if i not in skip else None
         sep = _split_row(lines[i + 1]) if (head and i + 1 < n) else None
         if head and _is_sep(sep):
-            vcols = [k for k, h in enumerate(head) if k > 0 and GLOSSARY_HEAD_VAL.search(h)]
-            is_glo = bool(GLOSSARY_HEAD_KEY.search(head[0]) and vcols)
+            kcols = [k for k, h in enumerate(head) if GLOSSARY_HEAD_KEY.search(h)
+                     and not GLOSSARY_HEAD_VAL.search(h)]
+            kcol = kcols[0] if kcols else None
+            vcols = [k for k, h in enumerate(head) if k != kcol and GLOSSARY_HEAD_VAL.search(h)]
+            is_glo = kcol is not None and bool(vcols)
             if is_glo:
                 idx.update((i, i + 1))
             j = i + 2
             while j < n and j not in skip and _split_row(lines[j]) is not None:
                 if is_glo:
                     cells = _split_row(lines[j])
-                    toks = _cell_tokens(cells[0]) if cells else []
+                    cell = cells[kcol] if kcol < len(cells) else ""
+                    toks = _cell_tokens(cell)
+                    ids = {t for t in toks if t.startswith(("E[",)) or _is_identifier(t, cell, 0, 0)}
                     meaning = " ".join(cells[k] for k in vcols if k < len(cells))
-                    if (cells and toks and len(cells[0]) <= MAX_KEY_CELL
-                            and len(set(toks)) <= MAX_KEYS_PER_ROW and _ja_len(meaning) >= 2):
+                    if (toks and len(cell) <= MAX_KEY_CELL and len(ids) <= MAX_KEYS_PER_ROW
+                            and _ja_len(meaning) >= 2):
                         keys.update(toks)
                         idx.add(j)
                 j += 1
