@@ -1,6 +1,17 @@
-"""PreToolUse hook (Agent/Task): 委譲の2点を検査する。
+"""PreToolUse hook (Agent/Task): 委譲の4点を検査する。
   1. 判断系の委譲を Sonnet で起動したら警告する（モデル階層 §7）。
   2. prompt にターン上限（「最大40ターン」等）が無い委譲を止める（2026-10-06 追加）。
+  3. 親の文脈が大きいときの背景起動を、その指示の中で1回止める（2026-10-18 追加）。
+  4. 同じ記事への Fable 起動3回目を、その指示の中で1回止める（2026-10-18 追加）。
+
+3・4 の根拠（docs/TOKEN_USAGE_REVIEW_20261016.md・2026-10-06〜16 実測）:
+  3. 背景で起動した子エージェントは終わるたびに親を起こし、親は自分の文脈を全部
+     読み直す。完了通知で親が起きた呼び出しは 2,355 回・平均25万トークンで全体の10.2%。
+     互いに独立な委譲を1メッセージで前景起動すれば、完了はまとめて1回で受け取れる。
+  4. Fable は 86 記事に 203 回入り、3回目以降が 44 回。3回目以降は指摘の反映確認で
+     足り、Fable の独立視点は要らない。
+  どちらも「1回止める」だけで、同じ指示の中で同じ起動を送り直せば通す（本当に背景が
+  要る長時間作業・全面改稿後の再レビューを塞がない）。
 
 背景（2026-08-14 ユーザー指示）: 使用量に約50%の余裕があるため、単純タスク以外は
 Opus/Fable を積極的に使う方針へ転換した。本フックは「文面だけのルールは守られない」
@@ -95,6 +106,157 @@ def verdict(model, text):
     )
 
 
+BG_CTX = 150_000          # 親の文脈がこれを超えたら背景起動を1回止める
+FABLE_MAX = 2             # 同じ記事に Fable を入れてよい回数（FABLE_DAYS 日以内）
+FABLE_DAYS = 14
+ARTICLE = re.compile(r"\bnt-?(\d{3})\b", re.I)
+
+
+def bg_reason(ti, ctx):
+    """背景起動（run_in_background が false 以外）× 親の文脈 BG_CTX 超なら理由を返す。"""
+    if ti.get("run_in_background") is False or ctx <= BG_CTX:
+        return None
+    return (
+        "親の文脈が約%d万トークンあります。背景で起動した子エージェントは終わるたびに親を起こし、"
+        "親はこの文脈を全部読み直します（2026-10-06〜16 の実測で全体の10.2%%）。"
+        "互いに独立な委譲は1つのメッセージにまとめ、run_in_background: false で起動して"
+        "完了をまとめて受け取ってください。どうしても背景が要るなら同じ呼び出しを送り直せば通します"
+        "（この指示の中では再度止めません）。" % (ctx // 10000))
+
+
+def article_ids(ti):
+    """レビュー対象の記事番号。description にあればそれだけを使う（prompt には「見本 nt-038」の
+    ような参照も入るため。実測: Fable 起動636件中45件）。description に無いときだけ prompt から取る。"""
+    for k in ("description", "prompt"):
+        ids = sorted(set(ARTICLE.findall(str(ti.get(k) or ""))))
+        if ids:
+            return ids
+    return []
+
+
+def fable_reason(ti, counts):
+    """Fable 起動で、対象記事のどれかが既に FABLE_MAX 回入っていれば理由を返す。"""
+    if "fable" not in str(ti.get("model") or "").lower():
+        return None
+    over = [i for i in article_ids(ti) if counts.get(i, 0) >= FABLE_MAX]
+    if not over:
+        return None
+    return (
+        "記事 %s には直近%d日で Fable が既に%d回入っています。3回目以降は指摘が反映されたかの確認で足ります。"
+        "model を opus にして「前回の指摘箇所と変更差分だけを見る・最大8ターン」で依頼するか、"
+        "スクリプトで確かめてください。全面改稿後で独立レビューが本当に要るなら、同じ呼び出しを送り直せば通します。"
+        % (", ".join("nt-" + i for i in over), FABLE_DAYS, FABLE_MAX))
+
+
+def _state_dir():
+    return os.path.join(os.path.expanduser("~"), ".claude", "state", "model_tier_guard")
+
+
+def _tail_records(path, nbytes=600_000):
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, 2)
+            n = f.tell()
+            f.seek(max(0, n - nbytes))
+            lines = f.read().decode("utf-8", "replace").splitlines()
+    except Exception:
+        return []
+    if n > nbytes:
+        lines = lines[1:]          # 途中から読んだ先頭行は壊れている
+    out = []
+    for l in lines:
+        try:
+            out.append(json.loads(l))
+        except Exception:
+            pass
+    return out
+
+
+def context_and_turn(path):
+    """(直近の親の文脈トークン数, いまの指示を識別する鍵) を transcript 末尾から得る。"""
+    ctx, turn = 0, ""
+    for d in reversed(_tail_records(path)):
+        if not ctx and d.get("type") == "assistant":
+            u = (d.get("message") or {}).get("usage") or {}
+            ctx = sum(int(u.get(k) or 0) for k in
+                      ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
+        # promptId は tool_result を含む全 user 記録に付き、ユーザーの1指示ごとに変わる。
+        # 文字列 content の user 記録だけを探すと、指示がリスト形式で来たときや末尾の
+        # tool_result が長いときに前の指示の鍵を拾う（実測: 起動の32%・20%）。
+        if not turn and d.get("type") == "user":
+            turn = str(d.get("promptId") or "")
+            if not turn and isinstance((d.get("message") or {}).get("content"), str):
+                turn = str(d.get("uuid") or d.get("timestamp") or "")
+        if ctx and turn:
+            break
+    if not turn:
+        turn = _last_prompt_id(path)
+    return ctx, turn
+
+
+PROMPT_ID = re.compile(r'"promptId"\s*:\s*"([^"]+)"')
+
+
+def _last_prompt_id(path):
+    """末尾の tool_result が長くて解析できる行に user 記録が無いとき、生の文字列から
+    最後の promptId を拾う（壊れた先頭行の中でも拾える）。8MB まで広げて探す。"""
+    for nbytes in (600_000, 8_000_000):
+        try:
+            with open(path, "rb") as f:
+                f.seek(0, 2)
+                f.seek(max(0, f.tell() - nbytes))
+                ids = PROMPT_ID.findall(f.read().decode("utf-8", "replace"))
+        except Exception:
+            return ""
+        if ids:
+            return ids[-1]
+    return ""
+
+
+def _once(key):
+    """この鍵で初めてなら True（印を付ける）。2回目以降・失敗時は False（止めない側へ倒す）。"""
+    try:
+        d = _state_dir()
+        os.makedirs(d, exist_ok=True)
+        p = os.path.join(d, "fired.txt")
+        seen = open(p, encoding="utf-8").read().splitlines() if os.path.exists(p) else []
+        if key in seen:
+            return False
+        with open(p, "a", encoding="utf-8") as f:
+            f.write(key + "\n")
+        return True
+    except Exception:
+        return False
+
+
+def fable_counts(now):
+    c = {}
+    try:
+        for l in open(os.path.join(_state_dir(), "fable_reviews.jsonl"), encoding="utf-8"):
+            r = json.loads(l)
+            if now - r.get("ts", 0) <= FABLE_DAYS * 86400:
+                c[r["id"]] = c.get(r["id"], 0) + 1
+    except Exception:
+        pass
+    return c
+
+
+def record_fable(ti, now):
+    try:
+        os.makedirs(_state_dir(), exist_ok=True)
+        with open(os.path.join(_state_dir(), "fable_reviews.jsonl"), "a", encoding="utf-8") as f:
+            for i in article_ids(ti):
+                f.write(json.dumps({"ts": now, "id": i}) + "\n")
+    except Exception:
+        pass
+
+
+def _deny(reason):
+    print(json.dumps({"hookSpecificOutput": {
+        "hookEventName": "PreToolUse", "permissionDecision": "deny",
+        "permissionDecisionReason": reason}}, ensure_ascii=False))
+
+
 def main():
     # リポ側に同名フックがあればそちらに委ね、二重発火を避ける（既存フックと同じ規約）。
     try:
@@ -140,7 +302,25 @@ def main():
                     "permissionDecisionReason": reason,
                 }
             }, ensure_ascii=False))
-        elif why:
+            return
+        import time as _t
+        now = _t.time()
+        ctx, turn = context_and_turn(str(data.get("transcript_path") or ""))
+        turn = str(data.get("prompt_id") or "") or turn
+        sid = str(data.get("session_id") or "")
+        fr = fable_reason(ti, fable_counts(now))
+        if fr and turn and _once("fable|%s|%s|%s" % (sid, turn, ",".join(article_ids(ti)))):
+            _record_firing("model_tier_guard", data)
+            _deny(fr)
+            return
+        br = bg_reason(ti, ctx)
+        if br and turn and _once("bg|%s|%s" % (sid, turn)):
+            _record_firing("model_tier_guard", data)
+            _deny(br)
+            return
+        if "fable" in str(ti.get("model") or "").lower():
+            record_fable(ti, now)
+        if why:
             _record_firing("model_tier_guard", data)
             print(json.dumps({
                 "hookSpecificOutput": {
@@ -168,6 +348,23 @@ def selftest():
         ("sonnet", "設計方針を判断する", True),
     ]
     bad = 0
+    for ti, ctx, want in [
+            ({"run_in_background": True}, 250_000, True),
+            ({}, 250_000, True),                       # 既定は背景
+            ({"run_in_background": False}, 250_000, False),
+            ({"run_in_background": True}, 90_000, False)]:
+        got = bg_reason(ti, ctx) is not None
+        bad += got != want
+        print("%-4s bg ti=%r ctx=%d want=%s" % ("ok" if got == want else "FAIL", ti, ctx, want))
+    for ti, counts, want in [
+            ({"model": "fable", "description": "Fable review nt-024, nt-028"}, {"024": 2}, True),
+            ({"model": "fable", "prompt": "content/nt-024_x.md を見て"}, {"024": 1}, False),
+            ({"model": "fable", "description": "Fable review nt-061", "prompt": "見本 nt-038 に倣う"}, {"038": 2}, False),
+            ({"model": "opus", "description": "review nt-024"}, {"024": 5}, False),
+            ({"model": "fable", "description": "Fable attack of hook"}, {"024": 5}, False)]:
+        got = fable_reason(ti, counts) is not None
+        bad += got != want
+        print("%-4s fable ti=%r want=%s" % ("ok" if got == want else "FAIL", ti, want))
     for model, text, want in cases:
         got = verdict(model, text) is not None
         ok = got == want
@@ -175,7 +372,7 @@ def selftest():
             bad += 1
         print("%-4s model=%-16r want=%-5s got=%-5s %s"
               % ("ok" if ok else "FAIL", model, want, got, text))
-    print("\nSELFTEST %s (%d/%d)" % ("PASS" if not bad else "FAIL", len(cases) - bad, len(cases)))
+    print("\nSELFTEST %s (%d failures)" % ("PASS" if not bad else "FAIL", bad))
     return 1 if bad else 0
 
 

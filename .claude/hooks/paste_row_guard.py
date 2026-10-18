@@ -72,6 +72,16 @@ Hence NOT_A_ROW and the paste-word requirement for code rows.
 v1 (a4c742d, same-line trigger) on the same tests: 11/34 -- all 15
 adversarial failures and the mid-turn case missed, all 7 legit answers blocked.
 
+v3 (2026-10-16): WRITE IT YOURSELF. The user: 「コピペのような簡単な作業が
+スプレッドシートに対して Claude Code でできないというのが、ちょっと信じられない」.
+The agent can write the row into the sheet through playwright-ext (the user's
+logged-in Chrome) and verify it via gviz. So a Positions row in the CORRECT
+one-row format is now also blocked once when the turn made no playwright call:
+the row is to be written, not handed over. A row handed over after a failed
+browser attempt passes (a playwright-ext call that types or runs code counts as an attempt),
+and so does the second stop (once per instruction). The trigger on the prompt
+side is position_record_trigger.py.
+
 Deployed from claude-governance/templates/hooks/ -- edit there, not here.
 """
 import hashlib
@@ -266,6 +276,52 @@ def explain(text, prompt=""):
     return None, None
 
 
+POSITIONS = re.compile(r"Positions|ポジション")
+# A write ATTEMPT = a playwright-ext (the user's logged-in Chrome) call that can
+# type or run code. A bare snapshot, or the isolated logged-out mcp__playwright__
+# browser, is not one (adversarial review 2026-10-16, cases B/C).
+WRITE_TOOLS = re.compile(r"browser_(?:evaluate|run_code_unsafe|type|press_key|fill_form)$")
+try:
+    from position_record_trigger import triggered as _report_prompt
+except Exception:           # repo-local copies without the global-only trigger
+    def _report_prompt(_p):
+        return False
+
+
+def write_attempted(tools):
+    return any("playwright-ext" in (t or "") and WRITE_TOOLS.search(t or "") for t in tools)
+
+
+def unwritten_row(text, prompt="", tools=()):
+    """A Positions data row handed to the user while the turn made no write
+    attempt -> the row (str), else None.
+    Applies when the prompt reports a trade/position (position_record_trigger)
+    -- then no offer word is needed -- or when the turn names Positions and
+    offers the row (貼/入力/記入 ...)."""
+    if write_attempted(tools):
+        return None
+    report = _report_prompt(prompt or "")
+    if not report and not ((POSITIONS.search(prompt or "") or POSITIONS.search(text or "")) and triggered(text, prompt)):
+        return None
+    tables, code, _b = scan(text)
+    if not report:
+        # no trade report: only the explicit one-row paste format counts. Body
+        # rows and code lines here were sheet LOG rows quoted as evidence in
+        # calibration (2026-09-08, 09-11) -- not rows handed over for pasting.
+        for header, body in tables:
+            if header is not None and not body and _date_first(header) and len(header) >= 3:
+                return " | ".join(header)
+        return None
+    for header, body in tables:
+        for r in ([header] if header else []) + list(body):
+            if r and _date_first(r) and len(r) >= 3:
+                return " | ".join(r)
+    for ln in code:
+        if _data_line(ln):
+            return ln.strip()
+    return None
+
+
 def decide(text, prompt=""):
     """Return a short description of the broken paste format, or None."""
     return explain(text, prompt)[0]
@@ -294,12 +350,13 @@ def _is_prompt(d):
 
 
 def read_turn(tp):
-    """(last human prompt, its timestamp, ALL assistant text of this turn joined)."""
+    """(last human prompt, its timestamp, ALL assistant text of this turn joined,
+    names of the tools called in this turn)."""
     size = os.path.getsize(tp)
     with open(tp, "rb") as f:
         f.seek(max(0, size - TAIL_BYTES))
         data = f.read().decode("utf-8", "replace").splitlines()
-    prompt, pts, parts = None, "", []
+    prompt, pts, parts, tools = None, "", [], []
     for line in data:
         try:
             d = json.loads(line)
@@ -308,12 +365,15 @@ def read_turn(tp):
         if d.get("isSidechain"):
             continue
         if _is_prompt(d):
-            prompt, pts, parts = _text(d.get("message")).strip(), d.get("timestamp", ""), []
+            prompt, pts, parts, tools = _text(d.get("message")).strip(), d.get("timestamp", ""), [], []
         elif d.get("type") == "assistant":
             t = _text(d.get("message")).strip()
             if t:
                 parts.append(t)
-    return prompt, pts, "\n\n".join(parts)
+            c = (d.get("message") or {}).get("content")
+            if isinstance(c, list):
+                tools.extend(b.get("name", "") for b in c if isinstance(b, dict) and b.get("type") == "tool_use")
+    return prompt, pts, "\n\n".join(parts), tools
 
 
 REASON = ("【貼り付け形式の検査（1回のみ）】シートに貼る内容が%sになっている。"
@@ -324,6 +384,14 @@ REASON = ("【貼り付け形式の検査（1回のみ）】シートに貼る�
           "| 2026-10-05 | 563 | 14032666 | 18210541 |  | 9560 | メモ |\n"
           "|---|---|---|---|---|---|---|\n"
           "空欄の列は「|  |」で残す。列の説明が必要なら表の外に文章で書く。この形式で回答し直せ。")
+
+
+REASON_WRITE = ("【シートへの直接記入（1回のみ）】Positions シートに貼る行（%s）をユーザーに渡しているが、"
+                "このターンでブラウザ操作をしていない。2026-10-16 から、行はユーザーに貼らせずに自分で記入する"
+                "（ユーザー指示「コピペのような簡単な作業が…Claude Code でできないというのが信じられない」）。"
+                "playwright-ext で本番シートを開き、#t-name-box に Positions!A<行> → Enter、各セル F2 → "
+                "keyboard.insertText(値) → Tab で記入し、gviz（tqx=out:json&sheet=Positions&range=A<n>:G<n>）で"
+                "型付きの値を読み直してから報告し直せ。ブラウザ操作が失敗した場合だけ、失敗した段階と理由を添えて貼り付け行を渡す。")
 
 
 def main():
@@ -343,11 +411,17 @@ def main():
     tp = ev.get("transcript_path") or ""
     if not os.path.isfile(tp):
         return
-    prompt, pts, text = read_turn(tp)
-    hit = decide(text, prompt) if prompt else None
-    if not hit:
+    prompt, pts, text, tools = read_turn(tp)
+    # v3 first: a row that should have been WRITTEN is not fixed by re-formatting it
+    row = unwritten_row(text, prompt, tools) if prompt else None
+    if row:
+        reason, suffix = REASON_WRITE % row[:80], "_w"
+    else:
+        hit = decide(text, prompt) if prompt else None
+        reason, suffix = (REASON % hit, "") if hit else (None, "")
+    if not reason:
         return
-    key = hashlib.sha1((pts + (prompt or "")).encode("utf-8", "replace")).hexdigest()[:16]
+    key = hashlib.sha1((pts + (prompt or "")).encode("utf-8", "replace")).hexdigest()[:16] + suffix
     mark = os.path.join(STATE_DIR, "".join(ch for ch in (ev.get("session_id") or "x") if ch.isalnum() or ch in "-_") + "_" + key)
     if os.path.exists(mark):
         return          # already blocked once for this instruction
@@ -357,7 +431,7 @@ def main():
     except Exception:
         pass
     _record_firing(NAME, ev)
-    sys.stdout.buffer.write(json.dumps({"decision": "block", "reason": REASON % hit}, ensure_ascii=True).encode("ascii"))
+    sys.stdout.buffer.write(json.dumps({"decision": "block", "reason": reason}, ensure_ascii=True).encode("ascii"))
 
 
 if __name__ == "__main__":

@@ -380,6 +380,50 @@ def _targets(ti):
 FIXTURE_RE = re.compile(r"(^|/)(fixtures?|tests?|__tests__)/", re.I)
 
 
+# Bash/PowerShell carry no file path, so _targets falls back to EVERY dirty
+# file in `git status` -- and re-scanned them after every command. Measured
+# 2026-10-06..16 (docs/TOKEN_USAGE_REVIEW_20261016.md): 816 fires, 71% of the
+# hit lines from ONE uncommitted internal file nobody was editing, re-injected
+# into the context after each unrelated command. For that fallback only, a
+# file is scanned again only when its (mtime, size) changed since this session
+# last scanned it. Write/Edit targets are always scanned: they just changed.
+def _seen_path(payload):
+    sid = re.sub(r"[^A-Za-z0-9_-]", "", str(payload.get("session_id") or "nosession"))[:80]
+    return os.path.join(os.path.expanduser("~"), ".claude", "state",
+                        "process_leak_seen", sid + ".json")
+
+
+def _sig(path):
+    st = os.stat(path)
+    return [st.st_mtime_ns, st.st_size]
+
+
+def _filter_unchanged(payload, targets):
+    """Return (targets to scan, save callback). Fail-open: any error -> scan all."""
+    try:
+        sp = _seen_path(payload)
+        try:
+            seen = json.load(open(sp, encoding="utf-8"))
+        except Exception:
+            seen = {}
+        cur = {os.path.abspath(t): _sig(t) for t in targets}
+        todo = [t for t in targets if seen.get(os.path.abspath(t)) != cur[os.path.abspath(t)]]
+
+        def save():
+            try:
+                seen.update(cur)
+                os.makedirs(os.path.dirname(sp), exist_ok=True)
+                tmp = sp + ".%d.tmp" % os.getpid()
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(seen, f)
+                os.replace(tmp, sp)
+            except Exception:
+                pass
+        return todo, save
+    except Exception:
+        return targets, (lambda: None)
+
+
 def _in_scope(p):
     q = p.replace("\\", "/")
     if not EXT_RE.search(q):
@@ -402,6 +446,16 @@ def main():
     targets = [t for t in targets if os.path.isfile(t)]
     if not targets:
         return 0
+    explicit = any(isinstance(ti.get(k), str) and ti.get(k) for k in
+                   ("file_path", "filePath", "path", "notebook_path")) or bool(ti.get("edits"))
+    # Recorded only after the scan finishes: a scan that times out or crashes
+    # must not mark the file as seen. Write/Edit scans are recorded too, so the
+    # next Bash does not report the same hit a second time.
+    todo, save_seen = _filter_unchanged(payload, targets)
+    if not explicit:
+        targets = todo
+        if not targets:
+            return 0
 
     hits = []
     advisory = []
@@ -444,6 +498,7 @@ def main():
                 (advisory if label in ADVISORY_LABELS else hits).append(rec)
                 break
 
+    save_seen()
     if hits:
         _record_fired("process_leak_guard", payload)
         sys.stderr.write(
