@@ -58,6 +58,23 @@ format rule alone never reduced the COUNT, which is what fills the screen.
 PostToolUse counts every intermediate of the turn (not just the latest) and
 warns when the cap is reached, before the next one is written.
 
+WAKE SUPPRESSION (2026-10-19, measured)
+---------------------------------------
+After the cap, 2026-10-14 .. 10-19 still averaged 2.67 per turn (43% of
+baseline, target <= 20%). Split by what follows each intermediate: 372 of 441
+(84%) were written right after a background task / subagent woke the model
+("1本目が終わりました。残りを待ちます"), only 69 before a tool call. Warnings
+after the fact never reach those: the wake reply is written and the sub-turn
+ends before any PostToolUse. But UserPromptSubmit fires on the wake BEFORE the
+model writes, so on_prompt now injects, in place of RULES: how many launched
+background tasks are still pending, and that a wake with work still pending
+gets NO text at all (it overrides the VS Code Focus-view "end each turn with
+text"). Text cannot be withdrawn once shown, so this is the only point where
+it can be stopped. The 2026-10-13 prefix test missed real wakes (RULES was
+re-sent on 6 of 8 peer wakes after 10-17), so a wake is now recognised from
+the prompt OR from the transcript's last row; wake_probe.jsonl records which
+signal fired (booleans only) for live verification.
+
 It never blocks and never exits non-zero. Calibration:
 tests/calibrate_response_length_guard.py (replays real transcripts).
 Deployed from claude-governance/templates/hooks/ -- edit there, not here.
@@ -160,6 +177,12 @@ def _count(text):
 
 WAKE_KINDS = {"peer", "task-notification"}
 WAKE_PREFIX = ("<task-notification>", "Another Claude session")
+# Hook payloads for a wake need not start with the transcript's prefix (2026-10-19).
+# The harness may wrap a task notification in a ~500-char "[SYSTEM NOTIFICATION" preamble.
+WAKE_MARKERS = WAKE_PREFIX + ("<agent-message", "[Subagent hand-back]",
+                              "[SYSTEM NOTIFICATION - NOT USER INPUT]")
+WAKE_HEAD = 2000
+BG_TOOLS = {"Agent", "Task"}      # background unless run_in_background is false
 
 
 def _user_text(row):
@@ -494,8 +517,103 @@ def _emit(event_name, text):
     sys.stdout.buffer.flush()
 
 
+def _is_wake_prompt(prompt):
+    head = (prompt or "").lstrip()
+    return head.startswith(WAKE_PREFIX) or any(m in head[:WAKE_HEAD] for m in WAKE_MARKERS)
+
+
+WAKE_FRESH_S = 20   # a silent wake from long ago must not turn the next human prompt into a wake
+
+
+def _age_s(ts):
+    try:
+        import calendar
+        return time.time() - calendar.timegm(time.strptime(ts[:19], "%Y-%m-%dT%H:%M:%S"))
+    except Exception:
+        return None
+
+
+def _last_row_is_wake(rows):
+    """The newest user row is a wake written seconds ago, nothing after it."""
+    for r in reversed(rows):
+        if r.get("type") == "assistant" and not r.get("isSidechain"):
+            return False
+        if r.get("type") == "user":
+            if _row_kind(r) != "wake":
+                return False
+            age = _age_s(r.get("timestamp") or "")
+            return age is not None and age <= WAKE_FRESH_S
+    return False
+
+
+def background_pending(ev):
+    """-> (launched, completed) background tasks in this human turn.
+
+    launched: Agent/Task (background by default), Workflow, Bash/PowerShell
+    with run_in_background. completed: wakes. Tasks launched in an earlier
+    turn make completed > launched; the caller then reports no count."""
+    launched = woke = 0
+    for e in ev or []:
+        if e == ("mark", "wake"):
+            woke += 1
+        elif e[0] == "tool":
+            name, inp = e[1], e[2] if len(e) > 2 else {}
+            if name in BG_TOOLS and inp.get("run_in_background") is not False:
+                launched += 1
+            elif name == "Workflow":
+                launched += 1
+            elif name in ("Bash", "PowerShell") and inp.get("run_in_background"):
+                launched += 1
+    return launched, woke
+
+
+def _probe(rec):
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        p = os.path.join(STATE_DIR, "wake_probe.jsonl")
+        with io.open(p, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec) + "\n")
+        if os.path.getsize(p) > 64 * 1024:
+            with io.open(p, encoding="utf-8") as f:
+                keep = f.readlines()[-200:]
+            with io.open(p, "w", encoding="utf-8") as f:
+                f.writelines(keep)
+    except Exception:
+        pass
+
+
+def on_wake(ev, rows, in_tx):
+    """Before the model writes anything on a wake: pending tasks get no text."""
+    tev = turn_events(rows) or []
+    launched, woke = background_pending(tev)
+    if not in_tx:
+        woke += 1           # this wake is not in the transcript yet
+    pending = launched - woke if launched >= woke else None
+    inters, _ = split_inters(tev)
+    _probe({"t": int(time.time()), "prompt_hit": _is_wake_prompt(ev.get("prompt")),
+            "tx_hit": in_tx, "launched": launched, "woke": woke})
+    head = u"【通知で再開・途中メッセージ 既に%d本／上限%d本】" % (len(inters), INTER_N_MAX)
+    if pending:
+        msg = head + (u"待ちが残り%d件ある。この応答ではテキストを1字も書かずに終える"
+                      u"（「終わりました」「残りを待ちます」も書かない。VS Code の"
+                      u"「毎ターン文で終える」より優先）。全件そろってから最終回答を1本だけ書く。" % pending)
+    else:
+        msg = head + (u"まだ待っているタスクがあるなら、テキストを書かずに終える。"
+                      u"全件そろった・続きの作業をするなら、途中経過は書かずにツールへ進むか"
+                      u"最終回答を1本だけ書く。")
+    _record_firing(NAME, ev)
+    _emit("UserPromptSubmit", msg)
+
+
 def on_prompt(ev):
-    if (ev.get("prompt") or "").lstrip().startswith(WAKE_PREFIX):
+    rows = []
+    if ev.get("transcript_path"):
+        rows = read_rows(ev["transcript_path"], POST_TAIL_BYTES)
+    in_tx = _last_row_is_wake(rows)
+    if in_tx or _is_wake_prompt(ev.get("prompt")):
+        if not rows or turn_events(rows) is None:
+            rows = read_rows(ev.get("transcript_path") or "", need_boundary=True)
+        on_wake(ev, rows, in_tx)
         return
     st = _load(_state_path(ev))
     msg = RULES
