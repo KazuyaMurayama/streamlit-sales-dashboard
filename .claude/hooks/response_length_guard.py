@@ -182,6 +182,7 @@ WAKE_PREFIX = ("<task-notification>", "Another Claude session")
 WAKE_MARKERS = WAKE_PREFIX + ("<agent-message", "[Subagent hand-back]",
                               "[SYSTEM NOTIFICATION - NOT USER INPUT]")
 WAKE_HEAD = 2000
+QUEUED_WAKE = ("<task-notification>", "<agent-message", "<cross-session", "Another Claude session")
 BG_TOOLS = {"Agent", "Task"}      # background unless run_in_background is false
 
 
@@ -198,7 +199,17 @@ def _row_kind(row):
     Stop hook forced a re-answer) or None.
 
     Both arrive as user rows inside ONE human turn (2026-10-13, Fable #3: 2,575
-    such rows in 13 days; treating them as turn starts reset the count)."""
+    such rows in 13 days; treating them as turn starts reset the count).
+    A wake can also be recorded ONLY as a queued_command attachment (2026-10-19:
+    every task notification of this session; 1,700+ such rows 10-01..10-19 were
+    invisible, so text written on those wakes was counted as final)."""
+    if row.get("type") == "attachment":
+        a = row.get("attachment") or {}
+        p = a.get("prompt")
+        if (a.get("type") == "queued_command" and isinstance(p, str)
+                and p.lstrip().startswith(QUEUED_WAKE)):
+            return "wake"
+        return None
     if row.get("type") != "user":
         return None
     if (row.get("origin") or {}).get("kind") in WAKE_KINDS:
@@ -538,8 +549,9 @@ def _last_row_is_wake(rows):
     for r in reversed(rows):
         if r.get("type") == "assistant" and not r.get("isSidechain"):
             return False
-        if r.get("type") == "user":
-            if _row_kind(r) != "wake":
+        k = _row_kind(r)
+        if r.get("type") == "user" or k:
+            if k != "wake":
                 return False
             age = _age_s(r.get("timestamp") or "")
             return age is not None and age <= WAKE_FRESH_S
