@@ -81,6 +81,15 @@ WHY（2026-10-14 依頼者指摘）
       ・archive/ や .claude/ 配下・.html/.txt 等の拡張子・add -N→commit -am・同コマンド内の mv→add・
       変数展開した commit。
 
+Write 時の検査 第2版（2026-10-19 Fable QC I4・M2、tests/calibrate_topic_split_write.py・test_hook_qc_20261019.py）
+    第1版は commit と同じ規則で Write を止め、60日の実追加 809 件のうち 139 件（17.2%）を止めた（計画書→結果
+    レポート、同日の下位レポート、同じ接頭辞の別調査も）。Write 時は「種別語を持つ文書の話題語が、もう片方に
+    すべて含まれる」だけで止める（kind_contained）。→ 53 件（6.6%）。内訳: deep-research の session/ に置いた
+    調査メモ・観点表・レビュー記録 51（欠陥クラスそのもの）、本体の後に作った別名レポート 2（誤検知寄り）。
+    種別語を持たない組（計画→実行記録→QC 等）は commit 時の検査（Topic-Split-Ok で通せる）に任せる。
+    明示手段: 本文先頭付近の `<!-- topic-split-ok: 理由10字以上 -->`。再 Write で通す記録は24時間で失効。
+    on_write の例外は exit 0（Write を止めない）。git add 済み・未コミットの本体も直近の文書に数える（第2回 QC I-5）。
+
 終了コード: 0=通過 / 2=拒否
 """
 import fnmatch
@@ -254,9 +263,17 @@ def near_subset(a, b, da="", db=""):
     return shared >= 2 or (shared >= 1 and da and da == db)
 
 
-def find_groups(paths, threshold=CONTAIN_THRESHOLD, recent=(), subset_plus_one=None):
+def kind_contained(a, b, ka, kb):
+    """Write 時の規則: 種別語を持つ側の話題語が、もう片方の話題語にすべて含まれる（NAVAL_COVERAGE ⊆ NAVAL_HOW_TO_GET_RICH）。
+    片方にしか無い話題語を持つ別調査（NASDAQ_MARKET_RESEARCH と NASDAQ_PRICING_RESEARCH）や、種別語を持たない
+    計画書・実行記録・QC・下位レポート（BTC_BACKTEST_PLAN と BTC_HOURLY_BACKTEST）は止めない（Fable QC 2026-10-19 I4）。"""
+    return bool((ka and a and a <= b) or (kb and b and b <= a))
+
+
+def find_groups(paths, threshold=CONTAIN_THRESHOLD, recent=(), subset_plus_one=None, mode="commit"):
     """同じ話題の文書の群（2本以上、かつ paths の新規文書を1本以上含む）を返す。
-    paths はこのコミットの新規文書、recent は直近 RECENT に同じリポへ追加された文書（リポ相対パス）。"""
+    paths はこのコミットの新規文書、recent は直近 RECENT に同じリポへ追加された文書（リポ相対パス）。
+    mode="write" は Write 時の検査で、kind_contained() だけで判定する（精度優先。取りこぼしは commit 時に拾う）。"""
     new = set(p.replace("\\", "/") for p in paths if is_doc(p))
     old = set(p.replace("\\", "/") for p in recent if is_doc(p)) - new
     allp = sorted(new | old)
@@ -289,7 +306,9 @@ def find_groups(paths, threshold=CONTAIN_THRESHOLD, recent=(), subset_plus_one=N
                 da, db = numbers(os.path.dirname(a)), numbers(os.path.dirname(b))
                 if da and db and da != db:
                     continue  # 同名ファイルが番号違いのディレクトリにある＝記事ごとの並列構造（_posts/nt-037/ と nt-038/）
-            if kind[a] or kind[b]:
+            if mode == "write":
+                hit = kind_contained(toks[a], toks[b], kind[a], kind[b])
+            elif kind[a] or kind[b]:
                 # 中間メモの種別語を持つ側があれば、話題語を1つ共有するだけで同じ話題（#2）
                 hit = bool(toks[a] & toks[b])
             else:
@@ -486,6 +505,9 @@ def trailer_reason(cmd, commit_pos, cwd):
 
 
 WRITE_STATE = os.path.join(os.path.expanduser("~"), ".claude", "state", "topic_split_write")
+WRITE_MARK_TTL = 24 * 3600  # 再 Write で通す記録の有効期限（無期限だと一度止めたパスが永久に素通り: Fable QC TSG-FN1）
+# commit 側の Topic-Split-Ok に相当する、Write 時の明示手段（本文の先頭付近に理由付きで書く）
+WRITE_OK = re.compile(r"topic-split-ok\s*[:：]\s*(?P<r>[^\n>]{%d,})" % MIN_REASON, re.I)
 
 
 def untracked_recent_docs(root, hours=24):
@@ -505,9 +527,10 @@ def on_write(payload):
     すでに書かれ、報告され、読み手と AI の目に入っている（2026-10-14 は commit 前に依頼者が
     気づいた）。新しい文書を Write で作る時点で、同じ話題の文書が直近24時間に追加・作成されて
     いれば止める。同じパスへの2回目の Write は通す（1回のみ。統合先へ書き直す経路を塞がない）。"""
-    fp = (payload.get("tool_input") or {}).get("file_path") or ""
-    if not fp or os.path.exists(fp):
-        return 0                      # 既存ファイルの上書きは新規作成ではない
+    ti = payload.get("tool_input")
+    fp = ti.get("file_path") if isinstance(ti, dict) else None
+    if not isinstance(fp, str) or not fp or os.path.exists(fp):
+        return 0                      # 既存ファイルの上書きは新規作成ではない（異常入力も通す: M2）
     d = os.path.dirname(os.path.abspath(fp))
     while d and not os.path.isdir(d):
         d = os.path.dirname(d)
@@ -520,15 +543,24 @@ def on_write(payload):
     globs, bad = load_allow(root)
     if allowed(rel, globs):
         return 0
-    recent = [p for p in set(recent_docs(root)) | set(untracked_recent_docs(root))
+    # a body staged but not yet committed (its commit was stopped by another hook) counts too (Fable QC2 I-5)
+    staged = _lines(_git(root, ["diff", "--cached", "--name-only", "--diff-filter=A"]))
+    recent = [p for p in set(recent_docs(root)) | set(untracked_recent_docs(root)) | {s.replace("\\", "/") for s in staged if is_doc(s)}
               if not allowed(p, globs) and p != rel]
-    groups = find_groups([rel], recent=recent)
+    groups = find_groups([rel], recent=recent, mode="write")
     if not groups:
+        return 0
+    ok = WRITE_OK.search(str(ti.get("content") or "")[:2000])
+    if ok and len(set(ok.group("r").replace(" ", ""))) >= 5:
+        _record_fired(NAME, {"allowed_by_marker": ok.group("r").strip(), "groups": groups, "root": root})
         return 0
     key = hashlib.sha1(os.path.normcase(os.path.abspath(fp)).encode("utf-8")).hexdigest()[:16]
     mark = os.path.join(WRITE_STATE, key)
-    if os.path.exists(mark):
-        return 0
+    try:
+        if time.time() - os.path.getmtime(mark) <= WRITE_MARK_TTL:
+            return 0
+    except OSError:
+        pass
     try:
         os.makedirs(WRITE_STATE, exist_ok=True)
         open(mark, "w").close()
@@ -539,7 +571,8 @@ def on_write(payload):
     for g in groups:
         lines += ["  - %s%s" % (p, "（今回作ろうとしたファイル）" if p == rel else "") for p in g]
     lines += ["", "対処: 中身を既存の本体の節・巻末へ移す。作業メモは OS の一時フォルダへ（リポに置かない）。",
-              "別文書が本当に必要なら（依頼者が明示した等）同じパスへもう一度 Write すれば通る（記録される）。"
+              "別文書が本当に必要なら（依頼者が明示した等）、本文の先頭に `<!-- topic-split-ok: 理由10字以上 -->` を書いて"
+              "同じパスへもう一度 Write する（記録される）。"
               "正典が要求する台帳は %s で宣言する。" % ALLOW_FILE.replace("\\", "/")]
     sys.stderr.write("\n".join(lines) + "\n")
     return 2
@@ -550,8 +583,13 @@ def main():
         payload = json.load(sys.stdin)
     except Exception:
         return 0
+    if not isinstance(payload, dict):
+        return 0                      # 「null」「[]」等の異常入力（M2 の残り）
     if payload.get("tool_name") == "Write":
-        return on_write(payload)
+        try:
+            return on_write(payload)
+        except Exception:
+            return 0                  # Write 検査の故障で書き込みを止めない（M2）
     if payload.get("tool_name") not in (None, "Bash", "PowerShell"):
         return 0
     cmd = (payload.get("tool_input") or {}).get("command") or ""

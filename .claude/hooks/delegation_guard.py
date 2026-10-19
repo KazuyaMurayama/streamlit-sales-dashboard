@@ -73,6 +73,28 @@ adds a second, wording-independent test on the turn's tool history:
 Blocked once per instruction (same mark as v2). Calibration:
 tests/calibrate_delegation_guard_v3.py.
 
+V3.1 (2026-10-19, Fable QC I1 -- audits/hook_qc_20261019/HOOK_QC_20261019.md)
+-----------------------------------------------------------------------------
+Wordings outside v3's ASK passed: 「どちらで進めますか？」「〜いただけると助かります」
+「〜いただけますでしょうか」「〜をお願いしたいです」, English (please / could you), and a
+request in a table row. Added. Three wording-independent rules:
+  * compute  = a request to calculate (計算・算出・集計) is never excused by tool calls
+               (2026-10-17: 「円の金額は…実残高から計算してください」 passed on Bash calls)
+  * weak evidence = a Grep/Read/WebSearch that names the asked-for thing counts only if the
+               answer says how it ended (見つかりません・エラー); an MCP call counts only if it is
+               the service the request names (a Calendar update is not a Gmail search)
+  * batch    = decide_batch also runs on the whole final text, not only the last block
+Calibration (tests/calibrate_delegation_guard_v3.py, same 7 days / 198 turns): firing
+20.7% -> 22.7% (all 3 new fires are answers the user corrected as C03); C03 recall 3/7 -> 5/7.
+Left: an answer that stops without any request (2026-10-15) and a request whose words the
+turn's Bash calls happen to contain (2026-10-14 07:52). Regression: tests/test_hook_qc_20261019.py.
+V3.2 (2026-10-19, second Fable QC): a table row is read by its last cell only, and not at all when it
+is a numbered step or a status row (rule 8's request-mapping table quotes the request before the
+answer); inline code is dropped; an English ask counts only in an answer without Japanese prose (a
+draft for someone else); 「安心/理解/参考していただけると」「お願いしたいと考えています」「いずれの案でも
+…ありますか」 are no asks; 〜てくれますか・〜てもらえますでしょうか・頂戴・どの〜で…ますか・kindly are.
+Same 7 days / 200 turns: firing 22.0% (22.6% before), C03 recall 5/7.
+
 Deployed from claude-governance/templates/hooks/ -- edit there, not here.
 """
 import hashlib
@@ -118,7 +140,7 @@ _N = r"(?:[2-9２-９]|[1-9１-９][0-9０-９]|[二三四五六七八九十]|�
 BATCH_COUNT = re.compile(
     # the count must name the things to decide: 「6つを」「3点（…）」「2点——①」「4点のご判断」「3つあります」.
     # Not 「3つの不具合」 (one decision about three bugs), 「80点へ」 (a score), 「変える3点、の分割」.
-    _N + r"(?:つ|点|件|項目|個|問)(?=\s*(?:を|について|——|―|（|\(|:|：|とも|すべて|全て|、(?!の)|,|あり|ある"
+    _N + r"(?:つ|点|件|項目|個|問|行|箇所|か所|ヶ所)(?=\s*(?:を|について|——|―|（|\(|:|：|とも|すべて|全て|、(?!の)|,|あり|ある|への"
     r"|の(?:ご)?(?:判断|決定|決断|回答|指定|選択)|に(?:答え|ついて)))"
     # a labelled range of items: A1〜A6, 問1〜問3, A1 から A6 まで. A bare number range (nt-002〜032) is a list of files.
     r"|(?<![A-Za-zＡ-Ｚａ-ｚ\-])(?:[A-ZＡ-Ｚ]|問|Q)[0-9０-９]+\s*(?:[〜~～\-－]|から)\s*(?:[A-ZＡ-Ｚ]|問|Q)?[0-9０-９]+"
@@ -230,13 +252,21 @@ def read_turn(tp):
 # ---- v3: attempt evidence (see V3 in the docstring) -------------------------
 ASK = re.compile(
     r"(?:して|て|で)(?:ください|下さい|くださいませ|ほしい|欲しい)"
-    r"|お願い(?:します|いたします|できますか|できれば)"
+    r"|お願い(?:します|いたします|できますか|できれば|したい(?!と(?:考|思))|いたしたい|できると)"
     r"|お待ち(?:して|し)(?:い|お)ります|お待ちしています"
-    r"|(?:て|で)(?:いただ|頂)(?:く必要|けますか|きたい|ければ|けたら)"
-    r"|(?:て|で)もら(?:う必要|えますか|いたい|えれば|えたら)"
+    r"|(?:て|で)(?:いただ|頂)(?:く必要|けますか|けますでしょうか|けませんか|けると(?!思)|きたい|ければ(?=[、,]?\s*(?:助か|幸い|ありがた|嬉し|うれし))|けたら)"
+    r"|(?:て|で)もら(?:う必要|えますか|えませんか|えると(?!思)|えますでしょうか|いたい|えれば(?=[、,]?\s*(?:助か|幸い|ありがた|嬉し|うれし))|えたら)"
+    r"|(?:て|で)くれ(?:ますか|ませんか)|(?:を|て)頂戴"
     r"|ご(?:判断|指示|確認|共有|返信|連絡|回答|提供|手配)(?:を|ください|いただ|頂|お願い)"
     r"|お(?:知らせ|決め|送り|伝え)(?:ください|いただ|頂)"
-    r"|(?:おっしゃって|言って|仰って)(?:いただ|頂|もら|くだされ)")
+    r"|(?:おっしゃって|言って|仰って)(?:いただ|頂|もら|くだされ)"
+    # English hand-offs (DLG-FN5)
+    r"|(?i:\b(?:please|kindly)\s+(?!see\b|note\b|find\b|refer\b)[a-z]+|\b(?:could|can|would)\s+you\b|\blet\s+me\s+know\b"
+    r"|\bi\s+need\s+you\s+to\b)"
+    # a question that asks the user to choose (DLG-FN1 「どちらで進めますか？」). Only with a choice word:
+    # 「他に気になる点はありますか？」 is not a hand-off.
+    # 「いずれの案でも問題はありますか？」 asks no choice (QC2 I-3)
+    r"|(?:どちら|どれ|どの[^。？?\s]{1,6}(?:で|を|に|が)|いずれ(?:に|を|で進|の案に))[^。？?]{0,30}(?:(?<!あり)ますか|でしょうか|ですか|します|する)\s*[？?]")
 # Asking the user to read or review the deliverable is the deliverable's purpose.
 # Fable QC 2026-10-19 (32.0% fired on 14 days): 「push しました。ご確認ください。」 and
 # 「詳細は REPORT.md を確認してください」 point at a delivered result, not a hand-off.
@@ -245,7 +275,7 @@ READ_ONLY = re.compile(r"読んで|読み、|お読み|ご覧|目を通|見て�
                        r"|(?:\.md|\.html|\.csv|レポート|ファイル|リンク|成果物|URL|表|§\s*\d)[^。]{0,24}(?:ご確認|確認して|確認くだ)")
 # a numbered step of a procedure the user asked for is not a request to them
 STEP = re.compile(r"^(?:\d+[.)．、]|[①-⑳]|[-*・]\s*\d+[.)．])\s*")
-DECISION = re.compile(r"決め|決定|判断|選ん|選択|選び|お選|採否|採用|可否|承認|方針|どちら|どれ|返して|返信|ご回答|回答して|指示")
+DECISION = re.compile(r"決め|決定|判断|選ん|選択|選び|お選|採否|採用|可否|承認|方針|どちら|どれ|返して|返信|ご回答|回答して|答えて|お答え|指示")
 RECOMMEND = re.compile(r"推奨|おすすめ|お勧め|お薦め|勧めます|推します")
 NON_ATTEMPT_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit", "SendMessage", "TodoWrite",
                      "TaskStop", "SubagentHandback", "ExitPlanMode"}
@@ -269,10 +299,29 @@ def keywords(s):
 
 def _clean(text):
     t = re.sub(r"```.*?```", " ", text or "", flags=re.S)
+    t = re.sub(r"`[^`\n]*`", " ", t)                  # inline code: 「`please run npm install`」 (QC2)
     t = re.sub(r"「[^」]{0,200}」", "「」", t)
-    t = re.sub(r"(?m)^\s*\|.*\|\s*$", " ", t)          # tables (deliverables rows)
+    t = re.sub(r"(?m)^\s*\|.*\|\s*$", lambda m: _table_row(m.group(0)), t)
     t = re.sub(r"(?m)^\s*>.*$", " ", t)                # quotes
     return t
+
+
+# tables (DLG-FN6): 「| 残高 | 実残高を送ってください |」 is read, but only its last cell. A request-mapping
+# row (CLAUDE.md ルール8: | 残高を計算してください | §2 で算出 |) quotes the request before its answer, and a
+# numbered step row (| 1 | エディタを開いてください |) is a procedure (Fable QC2 I-1). A deliverables row
+# (link), a separator and a status row (✅/済/完了 as a whole cell) are not requests.
+_STATUS_CELL = re.compile(r"^(?:✅|☑|☐|済み?|完了|未対応|対応済み?|PASS|FAIL|OK|NG)(?:\s|[（(]|$)")
+
+
+def _table_row(row):
+    if re.search(r"\]\(|^\s*\|[\s:|-]+\|\s*$", row):
+        return " "
+    cells = [c.strip() for c in row.strip().strip("|").split("|") if c.strip()]
+    if not cells or any(_STATUS_CELL.match(c) for c in cells):
+        return " "
+    if re.match(r"^(?:\d+|[①-⑳]|(?:手順|Step|STEP)\s*\d+)[.)．]?$", cells[0]):
+        return " "
+    return cells[-1] + "。"
 
 
 def _sentences(text):
@@ -290,35 +339,80 @@ def _sentences(text):
 FEEDBACK_INVITE = re.compile(r"(?:ば|たら|なら|場合は?|時は?|ときは?|あれば)、?[^。]{0,40}(?:教えて|言って|お知らせ|ご連絡|連絡して)"
                              # 「終わったら「」とだけ返信して」: the user finished an own-only step and hands back
                              r"|(?:たら|のであれば|であれば)、?[^。]{0,30}「」と(?:だけ)?(?:送って|返信|言って|伝え)")
-NOT_AN_ACT = re.compile(r"(?:考え|思っ|みなし|捉え|ご理解|ご了承|ご安心|お待ち(?:くだ|下)"
+NOT_AN_ACT = re.compile(r"(?:考え|思っ|みなし|捉え|ご理解|ご了承|ご安心|安心|理解|納得|参考|お待ち(?:くだ|下)"
                         r"|(?:完了|終了|終わる|処理|実行|通知|結果)(?:を|の)?お待ち)")
-USER_ONLY_ACT = re.compile(r"入金|出金|送金|振込|振り込|購入|買っ|売っ|発注|注文|建玉を|ログイン|パスワード|署名|押印|郵送|送信|電話|"
-                           r"窓口|受け取|支払|承認|接続を|拡張機能|再起動|操作して|サインイン|2段階|二段階|新しい会話|新しいセッション")
+# 入金額・送金額 is an amount (data Claude can look up), not the act (DLG-FN7)
+USER_ONLY_ACT = re.compile(r"入金(?!額|の?金額)|出金(?!額|の?金額)|送金(?!額|の?金額)|振込(?!額|の?金額)|振り込|購入(?!額|の?金額|価格|単価|代金)|買っ|売っ|発注|注文|建玉を|ログイン|パスワード|署名|押印|郵送|送信|電話|"
+                           r"窓口|受け取|支払|承認|接続を|拡張機能|再起動|操作して|サインイン|2段階|二段階|新しい会話|新しいセッション"
+                           r"|(?:会話|セッション|チャット)に(?:貼|送|入力|投げ)")
+
+
+# Computing is never the user's job (CLAUDE.md §11.2: 再計算は自分で行う). 2026-10-17 miss: 「円の金額は、
+# 入金の直前に口座の実残高から計算してください」 passed because the turn's Bash calls mentioned 口座.
+COMPUTE = re.compile(r"(?:計算|算出|試算|集計|換算|合計|足し算|引き算)(?:して|を|し、|いただ|頂|願)|を求めて")
+# A search or read that names the asked-for thing is an attempt only if the answer says how it ended
+# (「見つかりません」「エラー」): otherwise reading a file whose path mentions the words passes (DLG-FN7).
+# 「問題はなかった」「権限がある」 say nothing about the search (QC2 minor)
+STUCK = re.compile(r"見つか(?:らな|りませ)|見当たら|(?:記録|結果|該当|情報|データ|ファイル|ヒット)[^。]{0,6}(?:ありませんでした|無かった|なかった)"
+                   r"|存在しな|記録がな|記載がな|載っていな"
+                   r"|エラー|失敗|拒否|弾かれ|権限が(?:な|不足|あり?ませ)|アクセスでき|取得でき|読めな|開けな|not found|error|denied", re.I)
+WEAK_TOOLS = {"Grep", "Glob", "Read", "WebSearch", "WebFetch", "ToolSearch"}
+# a service named in the request -> the word its tool names carry (mcp__claude_ai_Gmail__search_threads)
+SERVICE = [(re.compile(r"メール|gmail|受信", re.I), "gmail"), (re.compile(r"カレンダー|予定|calendar", re.I), "calendar"),
+           (re.compile(r"ドライブ|drive", re.I), "drive"), (re.compile(r"シート|スプレッドシート|sheet", re.I), "sheet"),
+           (re.compile(r"ブラウザ|chrome", re.I), "playwright|chrome|browser")]
+
+
+CLAUDE_CAN = re.compile(r"(?:検索|探|調べ|確認|計算|集計|照合|取得|ダウンロード|抽出|転記)し、")
 
 
 def requests(text):
     """Sentences that ask the user to do, send, compute, decide or wait for something."""
     out = []
+    t = re.sub(r"\s", "", text or "")
+    jn = sum(1 for ch in t if ord(ch) > 0x3000)
     for s in _sentences(text):
         m = ASK.search(s)
         if not m or READ_ONLY.search(s) or FEEDBACK_INVITE.search(s) or STEP.match(s):
             continue
-        act = s[max(0, m.start() - 14):m.end()]
-        if NOT_AN_ACT.search(act) or USER_ONLY_ACT.search(act):
+        # an English 「could you send…」 inside a Japanese answer is a draft for someone else (QC2 I-3)
+        if jn >= 10 and all(ord(ch) < 0x3000 for ch in m.group(0)):
+            continue
+        # a condition clause is not the act: 「ログイン後、残高画面の共有をお願いしたい」 asks for the screen,
+        # not the login (DLG-FN4). 「新しい会話を開き、「」と送って」 keeps both acts.
+        lo = max(0, m.start() - 14)
+        c = s.rfind("、", lo, m.start())
+        if c > 0 and re.search(r"(?:後|あと|たら|てから|うえで|上で)$", s[:c]):
+            lo = c + 1
+        act = s[lo:m.end()]
+        if NOT_AN_ACT.search(act):
+            continue
+        # 「メールで源泉徴収票を検索し、見つからなければ下書きを送信してください」: the send is the holder's,
+        # the search before it is not (2026-10-14 C03 miss)
+        if USER_ONLY_ACT.search(act) and not CLAUDE_CAN.search(s[:lo]):
             continue
         out.append(s)
     return out
 
 
-def attempted(sentence, tools):
+def attempted(sentence, tools, final=""):
     """True if a tool call of this turn plausibly tried what the sentence asks for."""
     kws = [k.lower() for k in keywords(sentence)]
+    services = [w for rx, w in SERVICE if rx.search(sentence)]
+    stuck = bool(STUCK.search(_clean(final or sentence)))
     for name, inp in tools:
+        name = name or ""
         if name in NON_ATTEMPT_TOOLS:
             continue
-        if name == "ToolSearch" or name.startswith("mcp__"):
-            return True               # explored means (the digest's 探索ログ)
         low = (inp or "").lower()
+        if name == "ToolSearch" or name.startswith("mcp__"):
+            # explored means (the digest's 探索ログ) -- but the means must fit the request: a Calendar
+            # update is not an attempt at 「メールで源泉徴収票を検索して」 (2026-10-14 C03 miss)
+            if not services or any(re.search(w, name.lower() + " " + low) for w in services):
+                return True
+            continue
+        if name in WEAK_TOOLS and not stuck:
+            continue
         # one shared word is too weak: a subagent prompt that merely mentions 「口座」 is not an
         # attempt to compute the balance (2026-10-17 miss). Half the content words, at least 2.
         # a search/read tool that names the asked-for thing is an attempt (Fable QC: Grep 1 word)
@@ -331,13 +425,20 @@ def attempted(sentence, tools):
 
 def unattempted(final, tools):
     """Return (kind, sentence) for the first request with no attempt evidence, else None."""
+    # v2 reads only the last text block; the batch can sit in the block above it (2026-10-14 C03 miss:
+    # 「計画書 §1 の7行に答えてください」 followed by a separate 「…お待ちしています」 block)
+    b = decide_batch(final)
+    if b:
+        return ("batch", b)
     recommend = bool(RECOMMEND.search(_clean(final)))
     for s in requests(final):
         if DECISION.search(s):
             if not recommend:
                 return ("decision", s)
             continue
-        if not attempted(s, tools):
+        if COMPUTE.search(s):
+            return ("compute", s)
+        if not attempted(s, tools, final):
             return ("action", s)
     return None
 
@@ -409,6 +510,8 @@ def main():
     if prompt and not hit and not batch:
         _p, _t, final, tools = read_turn_full(tp)
         v3 = unattempted(final, tools)
+    if v3 and v3[0] == "batch":
+        batch, v3 = v3[1], None
     if not hit and not batch and not v3:
         return
     # keyed on the prompt's timestamp too: the same words sent again later
@@ -433,12 +536,15 @@ def main():
                   "「変えたければ言ってください」で済ませる。"
                   "残るのは、取り消せない・本人しか知らない・既決定を変える、のどれかに当たる項目だけで、"
                   "推奨と理由を添えて1つずつ聞く（CLAUDE.md §11.2）。仕分けの結果を書き直して回答し直せ。" % batch)
-        _record_firing(NAME, ev)
         sys.stdout.buffer.write(json.dumps({"decision": "block", "reason": reason}, ensure_ascii=True).encode("ascii"))
         return
     if v3:
         kind, sent = v3
-        if kind == "decision":
+        if kind == "compute":
+            reason = ("【丸投げ検査v3・計算の依頼（1回のみ）】回答がユーザーに計算を求めている（「%s」）。計算は自分で行う"
+                      "（CLAUDE.md §11.2）。入力の数値をシート・リポ・メールから取得し、Python で計算して結果を書け。"
+                      "入力が本当に取得できない場合だけ、その入力の値だけを、どこを探して見つからなかったかを添えて聞け。" % sent[:120])
+        elif kind == "decision":
             reason = ("【丸投げ検査v3・決定依頼（1回のみ）】回答がユーザーに決定を求めているが、推奨が書かれていない（「%s」）。"
                       "ラベル（本人の判断）だけでは通らない。①リポの正典で既に決まっていないか検索し、②取り消せる選択なら"
                       "根拠付きの既定値を置いて自分で進め、③本当に本人の決定が要るものだけ「推奨: 〜（理由）」を添えて1つずつ聞け"
@@ -449,7 +555,6 @@ def main():
                       "ToolSearch・MCP 呼び出しのいずれも無い）。先に自分で試せ: 計算は Python で実行、データはシート・メール・"
                       "ドライブ・リポを MCP/検索で取得、書き込みは MCP/ブラウザ操作で実施。試して詰まった場合だけ、"
                       "どこで詰まったか（エラー文）を添えて依頼を残せ（ラベルだけでは通らない）。" % sent[:120])
-        _record_firing(NAME, ev)
         sys.stdout.buffer.write(json.dumps({"decision": "block", "reason": reason}, ensure_ascii=True).encode("ascii"))
         return
     reason = ("【丸投げ検査（1回のみ）】回答の締めがユーザーへの作業・承認の依頼になっている（「%s」）。"
