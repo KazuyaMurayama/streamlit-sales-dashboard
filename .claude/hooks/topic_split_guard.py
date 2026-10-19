@@ -84,6 +84,8 @@ WHY（2026-10-14 依頼者指摘）
 終了コード: 0=通過 / 2=拒否
 """
 import fnmatch
+import hashlib
+import time
 import json
 import os
 import re
@@ -483,11 +485,73 @@ def trailer_reason(cmd, commit_pos, cwd):
     return None
 
 
+WRITE_STATE = os.path.join(os.path.expanduser("~"), ".claude", "state", "topic_split_write")
+
+
+def untracked_recent_docs(root, hours=24):
+    """未追跡の文書で、直近 hours 時間に作られたもの（Write 直後でまだコミットしていない付属メモ）。"""
+    out = []
+    for p in _lines(_git(root, ["ls-files", "-o", "--exclude-standard"])):
+        try:
+            if time.time() - os.path.getmtime(os.path.join(root, p)) <= hours * 3600:
+                out.append(p.replace("\\", "/"))
+        except Exception:
+            pass
+    return out
+
+
+def on_write(payload):
+    """WRITE（2026-10-19, CORRECTION_DIGEST_20261019 の C10 対策）: コミット時に止めても、3本は
+    すでに書かれ、報告され、読み手と AI の目に入っている（2026-10-14 は commit 前に依頼者が
+    気づいた）。新しい文書を Write で作る時点で、同じ話題の文書が直近24時間に追加・作成されて
+    いれば止める。同じパスへの2回目の Write は通す（1回のみ。統合先へ書き直す経路を塞がない）。"""
+    fp = (payload.get("tool_input") or {}).get("file_path") or ""
+    if not fp or os.path.exists(fp):
+        return 0                      # 既存ファイルの上書きは新規作成ではない
+    d = os.path.dirname(os.path.abspath(fp))
+    while d and not os.path.isdir(d):
+        d = os.path.dirname(d)
+    root = _git(d, ["rev-parse", "--show-toplevel"]).strip() if d else ""
+    if not root:
+        return 0
+    rel = os.path.relpath(os.path.abspath(fp), os.path.abspath(root)).replace("\\", "/")
+    if rel.startswith("..") or not is_doc(rel):
+        return 0
+    globs, bad = load_allow(root)
+    if allowed(rel, globs):
+        return 0
+    recent = [p for p in set(recent_docs(root)) | set(untracked_recent_docs(root))
+              if not allowed(p, globs) and p != rel]
+    groups = find_groups([rel], recent=recent)
+    if not groups:
+        return 0
+    key = hashlib.sha1(os.path.normcase(os.path.abspath(fp)).encode("utf-8")).hexdigest()[:16]
+    mark = os.path.join(WRITE_STATE, key)
+    if os.path.exists(mark):
+        return 0
+    try:
+        os.makedirs(WRITE_STATE, exist_ok=True)
+        open(mark, "w").close()
+    except Exception:
+        pass
+    _record_fired(NAME, payload)
+    lines = ["topic_split_guard: 同じ話題の文書が直近24時間にすでにあります。新しい文書を作らず、既存の本体へ統合してください（Write を1回止めました）。", ""]
+    for g in groups:
+        lines += ["  - %s%s" % (p, "（今回作ろうとしたファイル）" if p == rel else "") for p in g]
+    lines += ["", "対処: 中身を既存の本体の節・巻末へ移す。作業メモは OS の一時フォルダへ（リポに置かない）。",
+              "別文書が本当に必要なら（依頼者が明示した等）同じパスへもう一度 Write すれば通る（記録される）。"
+              "正典が要求する台帳は %s で宣言する。" % ALLOW_FILE.replace("\\", "/")]
+    sys.stderr.write("\n".join(lines) + "\n")
+    return 2
+
+
 def main():
     try:
         payload = json.load(sys.stdin)
     except Exception:
         return 0
+    if payload.get("tool_name") == "Write":
+        return on_write(payload)
     if payload.get("tool_name") not in (None, "Bash", "PowerShell"):
         return 0
     cmd = (payload.get("tool_input") or {}).get("command") or ""

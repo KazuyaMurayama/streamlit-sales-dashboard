@@ -111,7 +111,7 @@
         ]
       },
       {
-        "matcher": "Bash|PowerShell",
+        "matcher": "Bash|PowerShell|Write",
         "hooks": [
           {
             "type": "command",
@@ -265,6 +265,10 @@
           {
             "type": "command",
             "command": "P=$(command -v python3 || command -v python) || exit 0; exec \"$P\" .claude/hooks/claim_consistency_guard.py"
+          },
+          {
+            "type": "command",
+            "command": "P=$(command -v python3 || command -v python) || exit 0; exec \"$P\" .claude/hooks/request_ledger_guard.py"
           }
         ]
       }
@@ -283,6 +287,10 @@
           {
             "type": "command",
             "command": "P=$(command -v python3 || command -v python) || exit 0; exec \"$P\" .claude/hooks/inbox_guard.py"
+          },
+          {
+            "type": "command",
+            "command": "P=$(command -v python3 || command -v python) || exit 0; exec \"$P\" .claude/hooks/request_ledger_guard.py"
           }
         ]
       }

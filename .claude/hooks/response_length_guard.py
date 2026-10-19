@@ -125,6 +125,26 @@ CONCLUSION_EN = re.compile(
     r"the (?:bug|issue|problem|culprit) (?:is|was)|in conclusion|that fixed it|"
     r"now passes|all tests pass)\b", re.I)
 PASSFAIL_RE = re.compile(r"\b(PASS|FAIL)(?:ED|ES|S)?\b")
+# OBVIOUS SUPPLEMENTS (2026-10-19, loop action C10 -- CORRECTION_DIGEST_20261019).
+# User: 「書くまでもないことを書くな。ユーザーには重要なことのみ報告しなさい」 about
+# 「補足が1点あります。…誤検出と判断して、そのままにしています」; same shape in the
+# 10-14 and 10-17 answers (「補足が2点あります」) and 「…終わりましたが、今回の計画への
+# 影響はありません」. The guard measured only length, so a short answer made of such
+# notes passed. Class: a sentence whose content is "nothing to do / no impact /
+# I left it as is / here is a supplement". Measured on the final answer.
+OBVIOUS_RE = re.compile(
+    u"(補足が?[0-9０-９一二三四五]+点(?:あります|です)"
+    u"|念のため(?:の)?(?:補足|付け加え|お伝え|共有)"
+    u"|(?:影響|支障|関係|問題)は(?:特に|一切)?(?:ありません|ない(?:です)?)[。]"
+    u"|(?:誤検出|対象外|問題ない)と判断し(?:て|、)?そのまま(?:に)?して(?:います|おきます|あります)"
+    r"|(?:終わり|完了し)ました(?:が)?、?[^。\n]{0,30}(?:影響|関係)は(?:ありません|ない)"
+    r"|(?m:^\s*以上(?:です)?。?\s*$))")
+
+
+def obvious_supplements(text):
+    """Phrases in an answer that report nothing the user needs (OBVIOUS_RE)."""
+    v = re.sub(r"```.*?```", " ", text or "", flags=re.S)
+    return [m.group(1).strip() for m in OBVIOUS_RE.finditer(v)]
 
 
 def _visible(text):
@@ -376,6 +396,7 @@ def analyze(ev):
         "tail_items": sum(1 for ln in tail_lines if TAIL_RE.match(ln)),
         "tail_lines": len(tail_lines),
         "long_descs": [d for d in descs if len(d) > DESC_MAX],
+        "obvious": obvious_supplements(final),
         "inter_n": len(inters),
         "inter_chars": sum(_count(t) for t in inters),
         "inter_bad": [(inter_problem(t), _visible(t).strip()[:40]) for t in inters
@@ -392,6 +413,8 @@ def violations(r):
         out.append(u"本文 %d字／上限 %d字（%s・+%d%%）" % (
             r["body"], r["budget"], LABEL[r["kind"]],
             round(100.0 * (r["body"] - r["budget"]) / r["budget"])))
+    if r.get("obvious"):
+        out.append(u"自明な補足 %d件（例:「%s」）" % (len(r["obvious"]), r["obvious"][0][:30]))
     if r["inter_n"] > INTER_N_MAX:
         out.append(u"途中メッセージ %d本／上限 %d本" % (r["inter_n"], INTER_N_MAX))
     if r["inter_chars"] > INTER_TOTAL_MAX:
@@ -416,7 +439,9 @@ RULES = (u"【回答の長さ上限】本文は 質問への回答600字／作�
          u"成果物表の説明は15字以内。途中メッセージは1ターン1本まで・1行100字以内で"
          u"「何をしているか」だけ（原因・結論・表は最終回答まで書かない。長い待ちに入る時・"
          u"大きな節目だけ書き、ツールを呼ぶたびには書かない。通知で起きてまだ待つだけなら書かない）。"
-         u"削る順: 自分の作業経緯→確認済みの細部→重複。残す: 結論・判断に効く数値・ユーザーがすること。")
+         u"削る順: 自分の作業経緯→確認済みの細部→重複。残す: 結論・判断に効く数値・ユーザーがすること。"
+         u"「補足が N 点あります」「影響はありません」「誤検出と判断してそのままにしています」のような、"
+         u"ユーザーが何もしなくてよい補足は書かない。")
 
 
 def _state_path(ev, suffix=""):
@@ -485,6 +510,10 @@ def on_prompt(ev):
         if tr:
             msg += u"。直近%d回の本文は上限の中央値%d%%" % (tr[1], tr[0])
         msg += u"。今回はこの分を削ること。"
+        obv = [v for v in prev[1:] if v.startswith(u"自明な補足")]
+        if obv:   # a different class from length: show it even when it is not the worst item
+            msg += u"\n【前回・自明な補足】" + obv[0] + u"。「補足が N 点」「影響はありません」「そのままにしています」"\
+                   u"のような、ユーザーが何もしなくてよい事項は書かない（重要なことだけ報告）。"
         _record_firing(NAME, ev)
     _save(_state_path(ev, "_inter"), {"warned": 0})
     _emit("UserPromptSubmit", msg)

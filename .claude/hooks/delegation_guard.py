@@ -48,6 +48,31 @@ test (already decided? reversible? needed now?). The count is read from the
 sentence itself: 「6つ」「3点」「A1〜A6」, or a 「・」-separated list of options.
 Calibration: tests/calibrate_delegation_guard.py (BATCH line).
 
+V3: ATTEMPT EVIDENCE (2026-10-19, loop action C03 -- reports/CORRECTION_DIGEST_20261019.md)
+--------------------------------------------------------------------------------------
+v2 was followed by 7 more C03 corrections. Replaying the 9 answers the user
+corrected as C03 (2026-10-12..17) through v2's decide()/decide_batch() gave
+0/9 fires. Each miss used a new wording outside the verb list (「画面を送って
+ください」「実残高から計算してください」「回答と共有をお待ちしています」
+「そうおっしゃっていただければ…整理します」), one closed with a bare 「以上」 so
+the real hand-off sat in an earlier text block, and one carried the label
+「（本人の判断）」 -- the label was meant as a justification but worked as a
+free pass. v2 judged the WORDS; the defect is that Claude never TRIED. So v3
+adds a second, wording-independent test on the turn's tool history:
+
+  * request  = any sentence of the final answer (all text after the last tool
+               call, plus the block before it when that is a stub like 「以上」)
+               that asks the user to do, send, compute, decide or wait for
+               something (broad ASK pattern; reading the deliverable is excluded)
+  * decision = such a sentence about choosing/approving. It passes only if the
+               answer gives a recommendation (推奨). A label does not excuse it.
+  * other    = passes only if a tool call of this turn (not a Write/Edit of the
+               report itself) shares a content word with the request, or the
+               turn explored means (ToolSearch / an MCP tool). Labels such as
+               （権限） no longer excuse a request nobody attempted.
+Blocked once per instruction (same mark as v2). Calibration:
+tests/calibrate_delegation_guard_v3.py.
+
 Deployed from claude-governance/templates/hooks/ -- edit there, not here.
 """
 import hashlib
@@ -202,6 +227,155 @@ def read_turn(tp):
     return prompt, pts, answer
 
 
+# ---- v3: attempt evidence (see V3 in the docstring) -------------------------
+ASK = re.compile(
+    r"(?:して|て|で)(?:ください|下さい|くださいませ|ほしい|欲しい)"
+    r"|お願い(?:します|いたします|できますか|できれば)"
+    r"|お待ち(?:して|し)(?:い|お)ります|お待ちしています"
+    r"|(?:て|で)(?:いただ|頂)(?:く必要|けますか|きたい|ければ|けたら)"
+    r"|(?:て|で)もら(?:う必要|えますか|いたい|えれば|えたら)"
+    r"|ご(?:判断|指示|確認|共有|返信|連絡|回答|提供|手配)(?:を|ください|いただ|頂|お願い)"
+    r"|お(?:知らせ|決め|送り|伝え)(?:ください|いただ|頂)"
+    r"|(?:おっしゃって|言って|仰って)(?:いただ|頂|もら|くだされ)")
+# Asking the user to read or review the deliverable is the deliverable's purpose.
+READ_ONLY = re.compile(r"読んで|読み、|お読み|ご覧|目を通|見てください|見ていただ|見てほし|眺め|レビューして|比べ")
+DECISION = re.compile(r"決め|決定|判断|選ん|選択|選び|お選|採否|採用|可否|承認|方針|どちら|どれ|返して|返信|ご回答|回答して|指示")
+RECOMMEND = re.compile(r"推奨|おすすめ|お勧め|お薦め|勧めます|推します")
+NON_ATTEMPT_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit", "SendMessage", "TodoWrite",
+                     "TaskStop", "SubagentHandback", "ExitPlanMode"}
+_KW = re.compile(r"[一-鿿]{2,}|[゠-ヿー]{3,}|[A-Za-z][A-Za-z0-9_.\-]{2,}")
+KW_STOP = set(
+    "ください 下さい 確認 必要 結果 実行 判断 内容 対応 場合 今回 次回 本人 権限 指示 共有 以下 上記 回答 作業 "
+    "お願い 意思決定 進め 方法 手順 状態 状況 予定 可能 理由 以上 全体 一言 相当 部分 情報 決定 選択 承認 方針 "
+    "直前 前回 最新 正確 簡単 一覧 何か 次の 後で 提示 返信 連絡 報告 説明 検討 実施 着手 修正 反映 the and for "
+    "next action".split())
+
+
+def keywords(s):
+    out = []
+    for w in _KW.findall(s or ""):
+        if w in KW_STOP or w.lower() in KW_STOP:
+            continue
+        if w not in out:
+            out.append(w)
+    return out
+
+
+def _clean(text):
+    t = re.sub(r"```.*?```", " ", text or "", flags=re.S)
+    t = re.sub(r"「[^」]{0,200}」", "「」", t)
+    t = re.sub(r"(?m)^\s*\|.*\|\s*$", " ", t)          # tables (deliverables rows)
+    t = re.sub(r"(?m)^\s*>.*$", " ", t)                # quotes
+    return t
+
+
+def _sentences(text):
+    for part in re.split(r"(?<=[。！？!?])|\n", _clean(text)):
+        p = part.strip()
+        if p:
+            yield p
+
+
+# Calibration 2026-10-19 (191 real turns, 28.8% fired before these exclusions):
+# an invitation to correct an assumption (「違えば言ってください」, required by
+# CLAUDE.md's 前提宣言), a way of reading a number (「〜と考えてください」), and acts
+# only the account holder can perform (入金・発注・送信・パスワード変更・承認クリック)
+# are not hand-offs. The act is read from the words just before the request.
+FEEDBACK_INVITE = re.compile(r"(?:ば|たら|なら|場合は?|時は?|ときは?|あれば)、?[^。]{0,40}(?:教えて|言って|お知らせ|ご連絡|連絡して)"
+                             # 「終わったら「」とだけ返信して」: the user finished an own-only step and hands back
+                             r"|(?:たら|のであれば|であれば)、?[^。]{0,30}「」と(?:だけ)?(?:送って|返信|言って|伝え)")
+NOT_AN_ACT = re.compile(r"(?:考え|思っ|みなし|捉え|ご理解|ご了承|ご安心|お待ち(?:くだ|下))")
+USER_ONLY_ACT = re.compile(r"入金|出金|送金|振込|振り込|購入|買っ|売っ|発注|注文|建玉を|ログイン|パスワード|署名|押印|郵送|送信|電話|"
+                           r"窓口|受け取|支払|承認|接続を|拡張機能|再起動|操作して|サインイン|2段階|二段階|新しい会話|新しいセッション")
+
+
+def requests(text):
+    """Sentences that ask the user to do, send, compute, decide or wait for something."""
+    out = []
+    for s in _sentences(text):
+        m = ASK.search(s)
+        if not m or READ_ONLY.search(s) or FEEDBACK_INVITE.search(s):
+            continue
+        act = s[max(0, m.start() - 14):m.end()]
+        if NOT_AN_ACT.search(act) or USER_ONLY_ACT.search(act):
+            continue
+        out.append(s)
+    return out
+
+
+def attempted(sentence, tools):
+    """True if a tool call of this turn plausibly tried what the sentence asks for."""
+    kws = [k.lower() for k in keywords(sentence)]
+    for name, inp in tools:
+        if name in NON_ATTEMPT_TOOLS:
+            continue
+        if name == "ToolSearch" or name.startswith("mcp__"):
+            return True               # explored means (the digest's 探索ログ)
+        low = (inp or "").lower()
+        # one shared word is too weak: a subagent prompt that merely mentions 「口座」 is not an
+        # attempt to compute the balance (2026-10-17 miss). Half the content words, at least 2.
+        need = min(len(kws), max(2, (len(kws) + 1) // 2)) if kws else 1
+        if kws and sum(1 for k in kws if k in low) >= need:
+            return True
+    return False
+
+
+def unattempted(final, tools):
+    """Return (kind, sentence) for the first request with no attempt evidence, else None."""
+    recommend = bool(RECOMMEND.search(_clean(final)))
+    for s in requests(final):
+        if DECISION.search(s):
+            if not recommend:
+                return ("decision", s)
+            continue
+        if not attempted(s, tools):
+            return ("action", s)
+    return None
+
+
+def read_turn_full(tp):
+    """(prompt, ts, final text, [(tool name, input json)]) of the last turn.
+    final = every text block after the last tool call; if that is a stub
+    (「以上」), the block before it is included -- 2026-10-15 the hand-off sat
+    in the block above a bare 「以上」."""
+    size = os.path.getsize(tp)
+    with open(tp, "rb") as f:
+        f.seek(max(0, size - TAIL_BYTES))
+        data = f.read().decode("utf-8", "replace").splitlines()
+    prompt, pts, events = None, "", []
+    for line in data:
+        try:
+            d = json.loads(line)
+        except Exception:
+            continue
+        if d.get("isSidechain"):
+            continue
+        if _is_prompt(d):
+            prompt, pts, events = _text(d.get("message")).strip(), d.get("timestamp", ""), []
+        elif d.get("type") == "assistant":
+            c = (d.get("message") or {}).get("content")
+            if isinstance(c, list):
+                for b in c:
+                    if not isinstance(b, dict):
+                        continue
+                    if b.get("type") == "tool_use":
+                        events.append(("tool", b.get("name") or "", json.dumps(b.get("input"), ensure_ascii=False)))
+                    elif b.get("type") == "text" and (b.get("text") or "").strip():
+                        events.append(("text", "", b["text"].strip()))
+    return (prompt, pts) + final_and_tools(events)
+
+
+def final_and_tools(events):
+    """events: [("tool", name, input) | ("text", "", text)] in order."""
+    tools = [(n, i) for k, n, i in events if k == "tool"]
+    last_tool = max([i for i, e in enumerate(events) if e[0] == "tool"], default=-1)
+    finals = [e[2] for e in events[last_tool + 1:] if e[0] == "text"]
+    if len("".join(finals)) < 40:
+        before = [e[2] for e in events[:last_tool + 1] if e[0] == "text"]
+        finals = before[-1:] + finals
+    return "\n\n".join(finals), tools
+
+
 def main():
     try:
         me = os.path.abspath(__file__)
@@ -222,7 +396,11 @@ def main():
     prompt, pts, answer = read_turn(tp)
     hit = decide(answer) if prompt else None
     batch = None if hit or not prompt else decide_batch(answer)
-    if not hit and not batch:
+    v3 = None
+    if prompt and not hit and not batch:
+        _p, _t, final, tools = read_turn_full(tp)
+        v3 = unattempted(final, tools)
+    if not hit and not batch and not v3:
         return
     # keyed on the prompt's timestamp too: the same words sent again later
     # (「再開して」) are a new instruction and must be checked again
@@ -246,6 +424,22 @@ def main():
                   "「変えたければ言ってください」で済ませる。"
                   "残るのは、取り消せない・本人しか知らない・既決定を変える、のどれかに当たる項目だけで、"
                   "推奨と理由を添えて1つずつ聞く（CLAUDE.md §11.2）。仕分けの結果を書き直して回答し直せ。" % batch)
+        _record_firing(NAME, ev)
+        sys.stdout.buffer.write(json.dumps({"decision": "block", "reason": reason}, ensure_ascii=True).encode("ascii"))
+        return
+    if v3:
+        kind, sent = v3
+        if kind == "decision":
+            reason = ("【丸投げ検査v3・決定依頼（1回のみ）】回答がユーザーに決定を求めているが、推奨が書かれていない（「%s」）。"
+                      "ラベル（本人の判断）だけでは通らない。①リポの正典で既に決まっていないか検索し、②取り消せる選択なら"
+                      "根拠付きの既定値を置いて自分で進め、③本当に本人の決定が要るものだけ「推奨: 〜（理由）」を添えて1つずつ聞け"
+                      "（CLAUDE.md §11.2）。" % sent[:120])
+        else:
+            reason = ("【丸投げ検査v3・試行の証跡なし（1回のみ）】回答がユーザーに作業・提供・計算を求めている（「%s」）が、"
+                      "このターンのツール実行履歴に、自分で取得・計算・書き込みを試みた跡が無い（依頼の語を含むツール呼び出し・"
+                      "ToolSearch・MCP 呼び出しのいずれも無い）。先に自分で試せ: 計算は Python で実行、データはシート・メール・"
+                      "ドライブ・リポを MCP/検索で取得、書き込みは MCP/ブラウザ操作で実施。試して詰まった場合だけ、"
+                      "どこで詰まったか（エラー文）を添えて依頼を残せ（ラベルだけでは通らない）。" % sent[:120])
         _record_firing(NAME, ev)
         sys.stdout.buffer.write(json.dumps({"decision": "block", "reason": reason}, ensure_ascii=True).encode("ascii"))
         return
