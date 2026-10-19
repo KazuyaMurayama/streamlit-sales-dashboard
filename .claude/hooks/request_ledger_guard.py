@@ -82,9 +82,21 @@ def keywords(s):
     return out
 
 
+# 2026-10-19 (first real run): a subagent hand-back arrives inside
+# <system-reminder id=...>...</system-reminder id=...> in the user turn; its indented
+# "  - ..." lines were recorded as the user's requests. Injected blocks are not the user's words.
+_INJECTED = re.compile(
+    r"<(system-reminder|task-notification|agent-message|local-command-[\w-]+|command-[\w-]+)\b[^>]*>"
+    r".*?</\1\b[^>]*>", re.S)
+
+
+def user_text(prompt):
+    return _INJECTED.sub(" ", prompt or "").strip()
+
+
 def split_items(prompt):
     """Request items of a prompt: [{"text", "kw"}]. Quoted/pasted parts are skipped."""
-    t = re.sub(r"```.*?```", " ", prompt or "", flags=re.S)
+    t = re.sub(r"```.*?```", " ", user_text(prompt), flags=re.S)
     t = re.sub(r"(?m)^\s*>.*$", " ", t)
     items = []
     for part in re.split(r"(?<=[。！？!?])|\n", t):
@@ -134,7 +146,7 @@ def _is_prompt(d):
     c = (d.get("message") or {}).get("content")
     if isinstance(c, list) and any(isinstance(b, dict) and b.get("type") == "tool_result" for b in c):
         return False
-    t = _text(d.get("message")).strip()
+    t = user_text(_text(d.get("message")))
     return bool(t) and not t.startswith(("<task-notification", "<local-command", "<command-name>", "Caveat:"))
 
 
@@ -191,7 +203,7 @@ def _sid(ev):
 
 
 def _phash(prompt):
-    return hashlib.sha1((prompt or "").strip().encode("utf-8", "replace")).hexdigest()[:16]
+    return hashlib.sha1(user_text(prompt).encode("utf-8", "replace")).hexdigest()[:16]
 
 
 def _ledger_path(ev):
