@@ -238,7 +238,13 @@ ASK = re.compile(
     r"|お(?:知らせ|決め|送り|伝え)(?:ください|いただ|頂)"
     r"|(?:おっしゃって|言って|仰って)(?:いただ|頂|もら|くだされ)")
 # Asking the user to read or review the deliverable is the deliverable's purpose.
-READ_ONLY = re.compile(r"読んで|読み、|お読み|ご覧|目を通|見てください|見ていただ|見てほし|眺め|レビューして|比べ")
+# Fable QC 2026-10-19 (32.0% fired on 14 days): 「push しました。ご確認ください。」 and
+# 「詳細は REPORT.md を確認してください」 point at a delivered result, not a hand-off.
+READ_ONLY = re.compile(r"読んで|読み、|お読み|ご覧|目を通|見てください|見ていただ|見てほし|眺め|レビューして|比べ"
+                       r"|^(?:ご確認|確認)(?:ください|下さい|をお願いします)[。！]?$"
+                       r"|(?:\.md|\.html|\.csv|レポート|ファイル|リンク|成果物|URL|表|§\s*\d)[^。]{0,24}(?:ご確認|確認して|確認くだ)")
+# a numbered step of a procedure the user asked for is not a request to them
+STEP = re.compile(r"^(?:\d+[.)．、]|[①-⑳]|[-*・]\s*\d+[.)．])\s*")
 DECISION = re.compile(r"決め|決定|判断|選ん|選択|選び|お選|採否|採用|可否|承認|方針|どちら|どれ|返して|返信|ご回答|回答して|指示")
 RECOMMEND = re.compile(r"推奨|おすすめ|お勧め|お薦め|勧めます|推します")
 NON_ATTEMPT_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit", "SendMessage", "TodoWrite",
@@ -284,7 +290,8 @@ def _sentences(text):
 FEEDBACK_INVITE = re.compile(r"(?:ば|たら|なら|場合は?|時は?|ときは?|あれば)、?[^。]{0,40}(?:教えて|言って|お知らせ|ご連絡|連絡して)"
                              # 「終わったら「」とだけ返信して」: the user finished an own-only step and hands back
                              r"|(?:たら|のであれば|であれば)、?[^。]{0,30}「」と(?:だけ)?(?:送って|返信|言って|伝え)")
-NOT_AN_ACT = re.compile(r"(?:考え|思っ|みなし|捉え|ご理解|ご了承|ご安心|お待ち(?:くだ|下))")
+NOT_AN_ACT = re.compile(r"(?:考え|思っ|みなし|捉え|ご理解|ご了承|ご安心|お待ち(?:くだ|下)"
+                        r"|(?:完了|終了|終わる|処理|実行|通知|結果)(?:を|の)?お待ち)")
 USER_ONLY_ACT = re.compile(r"入金|出金|送金|振込|振り込|購入|買っ|売っ|発注|注文|建玉を|ログイン|パスワード|署名|押印|郵送|送信|電話|"
                            r"窓口|受け取|支払|承認|接続を|拡張機能|再起動|操作して|サインイン|2段階|二段階|新しい会話|新しいセッション")
 
@@ -294,7 +301,7 @@ def requests(text):
     out = []
     for s in _sentences(text):
         m = ASK.search(s)
-        if not m or READ_ONLY.search(s) or FEEDBACK_INVITE.search(s):
+        if not m or READ_ONLY.search(s) or FEEDBACK_INVITE.search(s) or STEP.match(s):
             continue
         act = s[max(0, m.start() - 14):m.end()]
         if NOT_AN_ACT.search(act) or USER_ONLY_ACT.search(act):
@@ -314,7 +321,9 @@ def attempted(sentence, tools):
         low = (inp or "").lower()
         # one shared word is too weak: a subagent prompt that merely mentions 「口座」 is not an
         # attempt to compute the balance (2026-10-17 miss). Half the content words, at least 2.
-        need = min(len(kws), max(2, (len(kws) + 1) // 2)) if kws else 1
+        # a search/read tool that names the asked-for thing is an attempt (Fable QC: Grep 1 word)
+        lo = 1 if name in ("Grep", "Glob", "Read", "WebSearch", "WebFetch") else 2
+        need = min(len(kws), max(lo, (len(kws) + 1) // 2)) if kws else 1
         if kws and sum(1 for k in kws if k in low) >= need:
             return True
     return False

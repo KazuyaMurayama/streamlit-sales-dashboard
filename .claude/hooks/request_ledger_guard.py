@@ -87,7 +87,7 @@ def keywords(s):
 # "  - ..." lines were recorded as the user's requests. Injected blocks are not the user's words.
 _INJECTED = re.compile(
     r"<(system-reminder|task-notification|agent-message|local-command-[\w-]+|command-[\w-]+)\b[^>]*>"
-    r".*?</\1\b[^>]*>", re.S)
+    r".*?(?:</\1\b[^>]*>|\Z)", re.S)      # an unclosed block runs to the end (Fable QC RLG-FP7)
 
 
 def user_text(prompt):
