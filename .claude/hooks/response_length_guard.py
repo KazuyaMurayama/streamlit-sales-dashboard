@@ -72,8 +72,11 @@ gets NO text at all (it overrides the VS Code Focus-view "end each turn with
 text"). Text cannot be withdrawn once shown, so this is the only point where
 it can be stopped. The 2026-10-13 prefix test missed real wakes (RULES was
 re-sent on 6 of 8 peer wakes after 10-17), so a wake is now recognised from
-the prompt OR from the transcript's last row; wake_probe.jsonl records which
-signal fired (booleans only) for live verification.
+the prompt prefix (the transcript's last row only when the payload has no
+prompt); wake_probe.jsonl records which signal fired (counts only) for live
+verification. Fable QC (10-19) on 3,714 real wakes: counting tool calls
+mis-stated the pending count (a failed launch never notifies; one completion
+is recorded twice), so pending is now tracked by task id.
 
 It never blocks and never exits non-zero. Calibration:
 tests/calibrate_response_length_guard.py (replays real transcripts).
@@ -179,9 +182,12 @@ WAKE_KINDS = {"peer", "task-notification"}
 WAKE_PREFIX = ("<task-notification>", "Another Claude session")
 # Hook payloads for a wake need not start with the transcript's prefix (2026-10-19).
 # The harness may wrap a task notification in a ~500-char "[SYSTEM NOTIFICATION" preamble.
-WAKE_MARKERS = WAKE_PREFIX + ("<agent-message", "[Subagent hand-back]",
+# Prefix match only: a human prompt that QUOTES a notification mid-text is a prompt (Fable 10-19 #1).
+WAKE_MARKERS = WAKE_PREFIX + ("<agent-message", "<cross-session", "[Subagent hand-back]",
                               "[SYSTEM NOTIFICATION - NOT USER INPUT]")
-WAKE_HEAD = 2000
+LAUNCH_RE = re.compile(r"(Async agent launched|running in background|moved to the background)")
+LAUNCH_ID_RE = re.compile(r"(?:agentId:|with ID:|\(ID:)\s*([A-Za-z0-9_-]+)")
+DONE_ID_RE = re.compile(r"(?:<task-id>\s*([A-Za-z0-9_-]+)|<agent-message from=\"([A-Za-z0-9_-]+)\")")
 QUEUED_WAKE = ("<task-notification>", "<agent-message", "<cross-session", "Another Claude session")
 BG_TOOLS = {"Agent", "Task"}      # background unless run_in_background is false
 
@@ -529,8 +535,7 @@ def _emit(event_name, text):
 
 
 def _is_wake_prompt(prompt):
-    head = (prompt or "").lstrip()
-    return head.startswith(WAKE_PREFIX) or any(m in head[:WAKE_HEAD] for m in WAKE_MARKERS)
+    return (prompt or "").lstrip().startswith(WAKE_MARKERS)
 
 
 WAKE_FRESH_S = 20   # a silent wake from long ago must not turn the next human prompt into a wake
@@ -558,25 +563,48 @@ def _last_row_is_wake(rows):
     return False
 
 
-def background_pending(ev):
-    """-> (launched, completed) background tasks in this human turn.
+def _result_text(b):
+    c = b.get("content")
+    if isinstance(c, list):
+        return " ".join(x.get("text", "") for x in c if isinstance(x, dict))
+    return c if isinstance(c, str) else ""
 
-    launched: Agent/Task (background by default), Workflow, Bash/PowerShell
-    with run_in_background. completed: wakes. Tasks launched in an earlier
-    turn make completed > launched; the caller then reports no count."""
-    launched = woke = 0
-    for e in ev or []:
-        if e == ("mark", "wake"):
-            woke += 1
-        elif e[0] == "tool":
-            name, inp = e[1], e[2] if len(e) > 2 else {}
-            if name in BG_TOOLS and inp.get("run_in_background") is not False:
-                launched += 1
-            elif name == "Workflow":
-                launched += 1
-            elif name in ("Bash", "PowerShell") and inp.get("run_in_background"):
-                launched += 1
-    return launched, woke
+
+def pending_tasks(rows):
+    """-> (launched ids, completed ids) of background tasks in this human turn.
+
+    By task id, not by counting (Fable 10-19 #3/#4): one completion is often
+    recorded twice (peer row + queued_command), and a launch that FAILED (hook
+    block, unknown agent type) never notifies -- counting tool calls told the
+    model 「残り1件・書くな」 for the rest of the turn. Launched = a tool result
+    that says it went to the background and names its id; completed = the
+    <task-id> / agent-message sender of a wake."""
+    start = 0
+    for i in range(len(rows) - 1, -1, -1):
+        if _is_boundary(rows[i]):
+            start = i + 1
+            break
+    launched, done = set(), set()
+    for r in rows[start:]:
+        if _row_kind(r) == "wake":
+            a = r.get("attachment") or {}
+            t = a.get("prompt") if isinstance(a.get("prompt"), str) else _user_text(r)
+            t += " " + str((r.get("origin") or {}).get("from") or "")
+            for m in DONE_ID_RE.finditer(t):
+                done.add(m.group(1) or m.group(2))
+            frm = (r.get("origin") or {}).get("from")
+            if frm:
+                done.add(frm)
+            continue
+        if r.get("type") != "user":
+            continue
+        c = (r.get("message") or {}).get("content")
+        for b in (c if isinstance(c, list) else []):
+            if isinstance(b, dict) and b.get("type") == "tool_result":
+                t = _result_text(b)[:600]
+                if LAUNCH_RE.search(t):
+                    launched.update(LAUNCH_ID_RE.findall(t))
+    return launched, done
 
 
 def _probe(rec):
@@ -597,13 +625,14 @@ def _probe(rec):
 def on_wake(ev, rows, in_tx):
     """Before the model writes anything on a wake: pending tasks get no text."""
     tev = turn_events(rows) or []
-    launched, woke = background_pending(tev)
-    if not in_tx:
-        woke += 1           # this wake is not in the transcript yet
-    pending = launched - woke if launched >= woke else None
+    launched, done = pending_tasks(rows)
+    for m in DONE_ID_RE.finditer((ev.get("prompt") or "")[:3000]):
+        done.add(m.group(1) or m.group(2))   # this wake is usually not in the transcript yet
+    pending = len(launched - done)
     inters, _ = split_inters(tev)
     _probe({"t": int(time.time()), "prompt_hit": _is_wake_prompt(ev.get("prompt")),
-            "tx_hit": in_tx, "launched": launched, "woke": woke})
+            "tx_hit": in_tx, "launched": len(launched), "done": len(done & launched),
+            "pending": pending})
     head = u"【通知で再開・途中メッセージ 既に%d本／上限%d本】" % (len(inters), INTER_N_MAX)
     if pending:
         msg = head + (u"待ちが残り%d件ある。この応答ではテキストを1字も書かずに終える"
@@ -621,7 +650,9 @@ def on_prompt(ev):
     rows = []
     if ev.get("transcript_path"):
         rows = read_rows(ev["transcript_path"], POST_TAIL_BYTES)
-    in_tx = _last_row_is_wake(rows)
+    # The transcript is consulted only when the payload has no prompt text: a
+    # human prompt sent seconds after a silent wake is still a prompt (Fable 10-19 #1).
+    in_tx = not (ev.get("prompt") or "").strip() and _last_row_is_wake(rows)
     if in_tx or _is_wake_prompt(ev.get("prompt")):
         if not rows or turn_events(rows) is None:
             rows = read_rows(ev.get("transcript_path") or "", need_boundary=True)
