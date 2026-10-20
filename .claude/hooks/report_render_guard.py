@@ -677,7 +677,7 @@ def on_stop(ev):
     #   その代わり、スクリプトで生成してまだコミットしていない .md は知らせるだけ（コミットしたターンで止まる）。
     ran_commit = any(n in ("Bash", "PowerShell") and isinstance(i, dict) and isinstance(i.get("command"), str)
                      and _runs_git_commit(i["command"]) for n, i in calls or [])
-    block, warn, split, order, unchecked = [], [], [], [], []
+    block, warn, split, order, unchecked, foreign = [], [], [], [], [], []
     for root in roots:
         if time.time() > deadline:
             unchecked.append((root, "全部"))
@@ -709,9 +709,12 @@ def on_stop(ev):
             (bd, bn, bs, bw), (wd, wn, ws, ww) = classify(texts[rel], bases.get(rel), os.path.dirname(full), name=rel)
             if not _authored(full, authored):
                 # このターンで Claude 自身が書いていないファイル（git pull・別セッションのコミット・checkout で入った）は
-                # 止めない。知らせるだけ（2026-10-12 Fable 再検証: README しか触っていないのに pull で入った欠陥で止めた）。
-                wd, wn, ws, ww = wd + bd, wn + bn, ws + bs, ww + bw
-                bd, bn, bs, bw = [], [], [], []
+                # 止めない（2026-10-12 Fable 再検証: README しか触っていないのに pull で入った欠陥で止めた）。
+                # 知らせるのも件数と例3本の1行だけ（2026-10-20 依頼者指摘: pull で入った book_briefs 等の既存違反が
+                # 1本ずつ数十行並んで画面を埋めた。このセッションでは直さない文書の詳細は、読み手の時間を使うだけ）。
+                if wd or wn or ws or ww or bd or bn or bs or bw:
+                    foreign.append(full)
+                continue
             if bd or bn or bs or bw:
                 block.append(_fmt(full, bd, bn, bs, bw))
             if wd or wn or ws or ww:
@@ -719,6 +722,11 @@ def on_stop(ev):
         if left:
             unchecked.append((root, "%d本" % len(left)))
     notes = []
+    if foreign:
+        notes.append("自分で書いていない文書（pull・別セッションのコミット・checkout で入った）%d本に、前からある印刷の違反がある。"
+                     "このセッションの成果物ではないので止めない（例: %s%s）。" % (
+                         len(foreign), "、".join(os.path.basename(f) for f in foreign[:3]),
+                         " ほか%d本" % (len(foreign) - 3) if len(foreign) > 3 else ""))
     if unchecked:
         msg = ("report_render_guard: %g秒を超えたので一部の文書を検査していない（%s）。図・番号・連番の違反が無いことは"
                "確認できていない。" % (TIME_BUDGET, "、".join("%s 未検査 %s" % u for u in unchecked)))
@@ -750,9 +758,9 @@ def on_stop(ev):
             _record_firing("report_render_guard_warn", ev)
         msg = []
         if warn:
-            msg.append("このターンで変わった文書に、印刷で消える図・番号の食い違い・連番崩れ・印刷幅を超える表がある。前からある違反か、"
-                       "自分で書いていない（pull・別セッションのコミット・checkout で入った）文書なので止めない。\n"
-                       + "\n".join(warn))
+            msg.append("このターンで書いた文書に、前からある（このターンで増えていない）印刷で消える図・番号の食い違い・"
+                       "連番崩れ・印刷幅を超える表がある。止めない。\n" + "\n".join(warn[:5])
+                       + ("\n  ほか %d 本" % (len(warn) - 5) if len(warn) > 5 else ""))
         msg += notes
         _emit({"systemMessage": "⚠ report_render_guard: " + "\n".join(msg)})
 
