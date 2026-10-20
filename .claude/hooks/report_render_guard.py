@@ -21,6 +21,8 @@ WHY（2026-10-05 依頼者指摘・知的生産レポートで2件同時に実�
      本文から参照される行 ID のことがある）。
   E. 1ターンで同じフォルダに同じ日付・同じ接頭辞の新しい .md を2本以上作らない（警告）。
   F. 1ターンで1フォルダに日付で始まる名前のファイルを5本以上作るなら、名前の昇順を新しい順にする（警告）。
+  G. 表の最小幅（改行できない並びの幅の列ごとの最大＋余白）を印刷時の本文幅 PRINT_WIDTH（595px）以下にする
+     （2026-10-20 追加。詳細は G 節）。例外: 表の直前の行に <!-- width-ok: 理由（10字以上） -->。
 
 止める範囲（2026-10-12 改訂。旧: 「違反の数が HEAD より増えたターンだけ」）:
   比べる相手はターン開始時点の版（ターン内でコミットしても失われない）。止めるのは ①新しい文書 ②違反の数が
@@ -74,6 +76,7 @@ C05 改訂（2026-10-12, 訂正ダイジェスト C05「表の重複・順序・
 
 Deployed from claude-governance/templates/hooks/ -- edit there, not here.
 """
+import html
 import io
 import json
 import os
@@ -348,6 +351,134 @@ SEQ_HEAD = RANK_HEAD
 RANK_ONLY = re.compile(r"順位|ランク|^rank|^位$", re.I)
 
 
+# ---- G. 印刷で右端の列が切れる表（2026-10-20 追加） ----
+# WHY: 2026-10-20 依頼者「生きている原稿の一覧の表で、印刷しようとすると『重要メッセージ』の列が途中から欠けて
+#   読めません。列幅が広すぎるという間違いを犯しています…今後も起きないように、すべてのリポジトリで」。
+#   Soulful-Content の _meta/REVIEW_REQUIRED_FILES_20260918.md は、見出しに &numsp;（改行できない数字幅の空白）を
+#   18・13・30 個足して列幅を広げていた。GitHub の表は display:block・max-width:100% で、画面では横スクロールに
+#   なるが、印刷では本文幅（GitHub の印刷用表示で 595px）を超えた分が切り取られる。直した版（4・2・14 個）も
+#   実描画で最小幅 604px で、まだ切れた（39ad4e4 で 0・0・8 個＝528px）。
+# 不変条件: 表の最小幅（列ごとに「改行できない並び」の最大幅＋左右の余白 26px、を足したもの）が PRINT_WIDTH 以下。
+#   改行できない並び: 半角空白で区切った英数字の語・URL・&numsp; や &#8288; でつないだ文字列。全角文字の前後は
+#   改行できる（ただし 、。」）・ などの前と 「（ の後は不可）。リンクは表示文字列、<br> は改行として数える。
+# 推定の誤差（2026-10-20 較正。GitHub の印刷用表示で表を width:1px にした実描画の幅と比べた 18表）:
+#   推定/実描画 = 258/259・537/528・188/189・180/171・119/120・216/213・349/354・332/345・284/287（Soulful-Content 9表）、
+#   668/618・657/652・616/592・664/668・1156/1124・886/901・933/906・764/770・815/780（5リポの印刷幅超え候補から抽出 9表）。
+#   誤差は −3.8%〜+8.1%。推定 616・実描画 592 の誤検出が1件あるので、迷う表は width-ok で理由を書いて通す。
+# 自分が書いたファイルの範囲（2026-10-20 Fable 攻撃検証で確かめた残る穴）:
+#   ・サブエージェント（Agent ツール）が生成してコミットしたものは transcript に出ないので知らせるだけ。
+#   ・ターン開始以降に更新された未コミットの変更は自分のものとみなすので、同じ作業ツリーで別セッション・定期ジョブが
+#     同時に書いた表、git stash pop で戻った表でも止める（near_duplicate_guard の表の検査と同じ割り切り）。
+#   ・HTML の <table>・引用（>）の中の表は数えない。表の中身が1字でも変われば「触れた表」として止める。
+# 発火率（2026-10-20, tests/calibrate_report_render_guard.py。48リポ・直近30日・各最大50コミット＝2,266コミット）:
+#   G で止めるコミット 58/2,266（2.56%。fixture を除く）。うち作業台帳（tasks.md・FILE_INDEX.md 等。印刷して
+#   読むものではない）だけで止まるものが 11件 → WIDTH_SKIP_NAMES で外し 47/2,266（2.07%）。残りは調査レポート・
+#   計画書・要レビュー一覧などで、推定は 595px 超え＝実描画でも切れる側（較正の誤差は最大 +8.1%）。
+WIDTH_SKIP_NAMES = ("tasks.md", "file_index.md", "index.md", "changelog.md", "claude.md", "agents.md")
+PRINT_WIDTH = float(os.environ.get("REPORT_PRINT_WIDTH", "595"))
+WIDTH_OK = re.compile(r"<!--\s*width-ok\s*[:：]\s*(.{10,}?)\s*-->")
+_W_LINK = re.compile(r"!?\[([^\]]*)\]\([^)]*\)")
+_W_BR = re.compile(r"<br\s*/?>", re.I)
+_W_TAG = re.compile(r"</?(?:br|b|i|u|s|em|strong|code|kbd|sub|sup|span|a|img|details|summary|small|mark|del|ins|p|div)\b[^<>]*>", re.I)
+_W_AUTOLINK = re.compile(r"<((?:https?|ftp|mailto):[^<>\s]+)>", re.I)
+_W_GLUE = "\u2060\u2007\xa0\u202f\ufeff"  # 語結合子・数字幅の空白・改行しない空白（前後で改行させない）
+_W_NO_START = "、。」』）】，．・！？"  # この文字の前では改行しない（行頭禁則）
+_W_NO_END = "「『（【"  # この文字の後では改行しない（行末禁則）
+
+
+def _char_w(ch, bold=False):
+    """GitHub の表のセル（16px）での1文字の幅の近似（px）。"""
+    if ch in ("\u2060", "\u200b", "\ufeff"):
+        return 0.0
+    if ch == "\u2007":
+        return 8.9
+    if ch in ("\xa0", "\u202f"):
+        return 4.4
+    if ch in ("\u2002", "\u2003"):  # &ensp; / &emsp;（2026-10-20 Fable 実測: 100個並べて折れない）
+        return 8.0 if ch == "\u2002" else 16.0
+    if ch == "\xad":
+        return 0.0
+    if unicodedata.east_asian_width(ch) == "H":  # 半角カナ
+        return 8.0
+    if unicodedata.east_asian_width(ch) in ("W", "F"):
+        return 16.0
+    w = 8.8 if ch.isdigit() else 9.6 if ch.isupper() else 8.2 if ch.isalpha() else 5.0
+    return w * (1.06 if bold else 1.0)
+
+
+def _wide_ch(ch):
+    return unicodedata.east_asian_width(ch) in ("W", "F", "H")  # 前後で改行できる文字（全角・半角カナ）
+
+
+def _unbreakable_runs(cell):
+    """セルの中の改行できない並びのリスト。"""
+    out = []
+    for line in _W_BR.split(cell):
+        s = _W_LINK.sub(lambda m: m.group(1), line)
+        s = _W_AUTOLINK.sub(lambda m: m.group(1), s)
+        s = _W_TAG.sub("", s).replace("**", "").replace("__", "").replace("`", "")
+        s = html.unescape(s)
+        cur, prev = "", ""
+        for i, ch in enumerate(s):
+            if ch in (" ", "\t", "\u3000"):
+                out.append(cur)
+                cur, prev = "", ch
+                continue
+            if (cur and prev not in _W_GLUE and ch not in _W_GLUE and (_wide_ch(ch) or _wide_ch(prev))
+                    and ch not in _W_NO_START and prev not in _W_NO_END):
+                out.append(cur)
+                cur = ""
+            cur += ch
+            if ch in "-\u2013\u2014\xad" and i + 1 < len(s):  # ハイフン・ダッシュ・ソフトハイフンの後は改行できる
+                out.append(cur)
+                cur = ""
+            prev = ch
+        out.append(cur)
+    return [x for x in out if x]
+
+
+def _show(run):
+    """メッセージ用: 不可視の文字を書いたときの形（&numsp;×N 等）に戻す。"""
+    run = run.replace("\u2060", "").replace("\ufeff", "").replace("\xad", "")
+    for ch, name in (("\u2007", "&numsp;"), ("\xa0", "&nbsp;"), ("\u202f", "&#8239;"), ("\u2002", "&ensp;"),
+                     ("\u2003", "&emsp;")):
+        run = re.sub(re.escape(ch) + "+", lambda m: "%s×%d" % (name, len(m.group(0))), run)
+    return run
+
+
+def table_min_width(head, rows):
+    """(表の最小幅の推定 px, [(列名, 列の最小幅, その列で一番長い改行できない並び)])。"""
+    ncol = max([len(head)] + [len(r) for r in rows])
+    cols = [(0.0, "")] * ncol
+    for bold, row in [(True, head)] + [(False, r) for r in rows]:
+        for c, cell in enumerate(row[:ncol]):
+            for run in _unbreakable_runs(cell):
+                w = sum(_char_w(ch, bold) for ch in run)
+                if w > cols[c][0]:
+                    cols[c] = (w, run)
+    total = sum(w for w, _r in cols) + 26 * ncol + (ncol + 1)  # 左右の余白 13px×2 と罫線 1px
+    names = [html.unescape(_W_TAG.sub("", h)).replace("\u2060", "").replace("\u2007", "").strip("* ") for h in head]
+    names += [""] * (ncol - len(names))
+    return total, [(names[c], w + 26, _show(r)) for c, (w, r) in enumerate(cols)]
+
+
+def wide_tables(text):
+    """[(表の行番号, 最小幅の推定, [(列名, 列幅, 並び)…幅の広い順], 表の crc32)]：印刷幅を超える表。"""
+    if nd is None:
+        return []
+    lines = text.split("\n")
+    out = []
+    for start, head, rows, _ok, sig in nd.md_tables(text):
+        if not head:
+            continue
+        if any(WIDTH_OK.search(lines[x]) for x in range(max(0, start - 4), start - 1)):
+            continue
+        total, cols = table_min_width(head, rows)
+        if total > PRINT_WIDTH:
+            out.append((start, total, sorted(cols, key=lambda x: -x[1]), sig))
+    return out
+
+
 def findings(text, base_dir, exists=None):
     return diagram_violations(text, base_dir, exists), numbering_violations(text)
 
@@ -365,23 +496,27 @@ def _diagram_blocks(text):
     return {s + 1: "\n".join(x.strip() for x in raw[s:e + 1]).strip() for s, e, lang in blocks if lang in DIAGRAM_LANGS}
 
 
-def classify(text, base, base_dir, exists=None, base_exists=None):
-    """(止める (dia, num, seq), 知らせるだけ (dia, num, seq))。base は開始時点の版（None＝新しい文書）。"""
+def classify(text, base, base_dir, exists=None, base_exists=None, name=""):
+    """(止める (dia, num, seq, wide), 知らせるだけ (同))。base は開始時点の版（None＝新しい文書）。
+    wide（G. 印刷幅を超える表）は数の増減を見ず、このターンで中身が変わった表だけを止める。"""
     dia, num = findings(text, base_dir, exists)
     seq = sequence_violations(text)
+    wide = [] if os.path.basename(name).lower() in WIDTH_SKIP_NAMES else wide_tables(text)
     if base is None:
-        return (dia, num, seq), ([], [], [])
+        return (dia, num, seq, wide), ([], [], [], [])
+    base_sigs = {t[4] for t in nd.md_tables(base)}
+    wide_blk = [v for v in wide if v[3] not in base_sigs]
+    wide_wrn = [v for v in wide if v[3] in base_sigs]
     bd, bn = findings(base, base_dir, base_exists or exists)
     bs = sequence_violations(base)
     if len(dia) > len(bd) or len(num) > len(bn) or len(seq) > len(bs):
-        return (dia, num, seq), ([], [], [])
-    base_sigs = {t[4] for t in nd.md_tables(base)}
+        return (dia, num, seq, wide_blk), ([], [], [], wide_wrn)
     sig_at = {t[0]: t[4] for t in nd.md_tables(text)}
     base_dias = set(_diagram_blocks(base).values())
     cur_dias = _diagram_blocks(text)
     base_lines = set(x.strip() for x in unicodedata.normalize("NFKC", base).split("\n"))
     lines = unicodedata.normalize("NFKC", text).split("\n")
-    blk, wrn = ([], [], []), ([], [], [])
+    blk, wrn = ([], [], [], wide_blk), ([], [], [], wide_wrn)
     for v in dia:
         (blk if cur_dias.get(v[0]) not in base_dias else wrn)[0].append(v)
     for v in num:
@@ -449,7 +584,7 @@ def oldest_first_batches(new_rels):
     return out
 
 
-def _fmt(path, dia, num, seq=()):
+def _fmt(path, dia, num, seq=(), wide=()):
     lines = []
     for ln, lang in dia[:6]:
         lines.append("  - %s:%d  ```%s の図に静的画像が無い（印刷・PDF・note では空の枠になる）" % (path, ln, lang))
@@ -458,7 +593,11 @@ def _fmt(path, dia, num, seq=()):
     for tl, col, bad, _sig in list(seq)[:6]:
         lines.append("  - %s:%d  表の「%s」列が連番でない（%s）" % (path, tl, col, "、".join(
             "%d の次が %d" % (a, b) for _k, a, b in bad[:4]) + (" ほか%d箇所" % (len(bad) - 4) if len(bad) > 4 else "")))
-    more = len(dia) + len(num) + len(seq) - len(lines)
+    for tl, total, cols, _sig in list(wide)[:6]:
+        lines.append("  - %s:%d  表の最小幅が約 %dpx で、印刷の本文幅 %dpx を超える（右端の列が印刷で切れる）。広い列: %s" % (
+            path, tl, total, PRINT_WIDTH, "、".join("「%s」%dpx（改行できない並び「%s」）" % (
+                n[:12], w, r[:40] + ("…" if len(r) > 40 else "")) for n, w, r in cols[:3])))
+    more = len(dia) + len(num) + len(seq) + len(wide) - len(lines)
     if more > 0:
         lines.append("  ほか %d 件" % more)
     return "\n".join(lines)
@@ -471,7 +610,10 @@ RESOLVE = (
     "できた SVG もコミットする。\n"
     "  番号 → 表の順位・No. を上から 1,2,3… の連番にし、見出しの番号と揃える（同点は表の並び順で決め、"
     "その決め方を表の前に1文で書く）。\n"
-    "  本当に意図した違いなら、図・表の直前の行に <!-- render-ok: 理由 --> / <!-- numbering-ok: 理由 -->（10字以上）。")
+    "  表の幅 → 見出しの &numsp;・&nbsp;・&#8288; の水増しをやめる、長い URL は [短い表示名](URL) にする、"
+    "英語の長い語・型番は <br> や空白で割る、列を減らすか表を2つに分ける。最小幅の推定は印刷の本文幅 595px 以下に。\n"
+    "  本当に意図した違いなら、図・表の直前の行に <!-- render-ok: 理由 --> / <!-- numbering-ok: 理由 --> / "
+    "<!-- width-ok: 理由 -->（10字以上）。")
 
 
 TIME_BUDGET = float(os.environ.get("REPORT_RENDER_TIME_BUDGET", "20"))
@@ -488,6 +630,20 @@ def _authored(full, authored):
     """このターンで Claude 自身が書いた（と transcript から言える）ファイルか。止めるのはこれだけ。
     transcript が読めないときは空集合＝何も止めず知らせるだけ（安全側の警告）。"""
     return _key(full) in authored
+
+
+_GIT_COMMIT = re.compile(r"^(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*(?:&\s*)?[\"']?(?:\S*[/\\])?git(?:\.exe)?[\"']?"
+                         r"(?:\s+(?:-[Cc]\s+\S+|--?[A-Za-z][\w-]*(?:=\S+)?))*\s+commit(?:\s|$)")
+
+
+def _runs_git_commit(cmd):
+    """シェルのコマンドが git commit を実行するか（区切り ; && || | 改行 ごとに、先頭の語が git でサブコマンドが
+    commit のとき）。echo "git commit"・grep "git commit"・git log --grep commit・git commit-tree は数えない
+    （2026-10-20 Fable 攻撃検証: 文字列に含むだけで他人のターン内コミットを自分のものにして止めた）。"""
+    for seg in re.split(r"[;\n|]|&&|\|\|", cmd):
+        if _GIT_COMMIT.match(seg.strip()):
+            return True
+    return False
 
 
 def on_stop(ev):
@@ -509,13 +665,25 @@ def on_stop(ev):
         if r and r not in roots:
             roots.append(r)
     # 書き込み系ツールの file_path（文字列だけ）とシェルの書き込み先（> >> tee sed -i cp/mv の宛先 等）。読んだだけは含めない
-    authored = {_key(p) for p in nd.written_paths(calls, cwd)}
+    written = nd.written_paths(calls, cwd)
+    authored = {_key(p) for p in written}
+    # スクリプトで生成した文書も自分が書いたものに数える（2026-10-20 追加）。WHY: 印刷で列が切れた要レビュー一覧の表は
+    #   Claude が build_review_table.py を直して実行し、生成した .md をターン内でコミットしていた。transcript には
+    #   .md のパスが出ないので、旧版は「自分で書いていない」として知らせるだけになる（依頼者の元事象を止められない）。
+    #   ①ターン開始以降に更新した未コミットの変更 ②このターンで Claude が git commit を実行したなら、ターン内の手元の
+    #   コミットで変わったファイル。②は git commit を実行していないターン（定期ジョブ・別セッションのコミット）では使わない。
+    ran_commit = any(n in ("Bash", "PowerShell") and isinstance(i, dict) and isinstance(i.get("command"), str)
+                     and _runs_git_commit(i["command"]) for n, i in calls or [])
     block, warn, split, order, unchecked = [], [], [], [], []
     for root in roots:
         if time.time() > deadline:
             unchecked.append((root, "全部"))
             continue
         changed = [r for r in nd.changed_files(root, since) or [] if not nd.is_fixture(r)]  # fixture は欠陥版を置く場所
+        if ev.get("transcript_path") and since is not None:
+            authored |= nd.authored_paths(root, since, written)
+            if ran_commit:
+                authored |= nd.local_commit_paths(root, since)
         bl = nd.Baseline(root, since)  # ターン開始時点の版（ls-tree・diff -M・cat-file --batch の各1回）
         if since is not None:
             new = [r for r in changed if bl.is_new(r)]  # git mv したものは旧パスがあるので新規にしない
@@ -537,16 +705,16 @@ def on_stop(ev):
         while left and time.time() <= deadline:
             rel = left.pop(0)
             full = os.path.join(root, rel)
-            (bd, bn, bs), (wd, wn, ws) = classify(texts[rel], bases.get(rel), os.path.dirname(full))
+            (bd, bn, bs, bw), (wd, wn, ws, ww) = classify(texts[rel], bases.get(rel), os.path.dirname(full), name=rel)
             if not _authored(full, authored):
                 # このターンで Claude 自身が書いていないファイル（git pull・別セッションのコミット・checkout で入った）は
                 # 止めない。知らせるだけ（2026-10-12 Fable 再検証: README しか触っていないのに pull で入った欠陥で止めた）。
-                wd, wn, ws = wd + bd, wn + bn, ws + bs
-                bd, bn, bs = [], [], []
-            if bd or bn or bs:
-                block.append(_fmt(full, bd, bn, bs))
-            if wd or wn or ws:
-                warn.append(_fmt(full, wd, wn, ws))
+                wd, wn, ws, ww = wd + bd, wn + bn, ws + bs, ww + bw
+                bd, bn, bs, bw = [], [], [], []
+            if bd or bn or bs or bw:
+                block.append(_fmt(full, bd, bn, bs, bw))
+            if wd or wn or ws or ww:
+                warn.append(_fmt(full, wd, wn, ws, ww))
         if left:
             unchecked.append((root, "%d本" % len(left)))
     notes = []
@@ -570,8 +738,9 @@ def on_stop(ev):
         _record_firing("report_render_guard", ev)
         parts = [
             "【見る場所で壊れるレポート】このターンで作成・変更した図・表に、印刷・PDF で消える図、"
-            "見出しと表で食い違う番号、または連番になっていない番号の列がある（2026-10-05 依頼者指摘: 印刷用で"
-            " §3 の図が空、全51行動の表の No. ずれ）。\n" + "\n".join(block) + "\n" + RESOLVE]
+            "見出しと表で食い違う番号、連番になっていない番号の列、または印刷で右端が切れる幅の表がある"
+            "（2026-10-05 依頼者指摘: 印刷用で §3 の図が空、全51行動の表の No. ずれ／2026-10-20: 印刷で"
+            "「重要メッセージ」の列が途中から欠けて読めない）。\n" + "\n".join(block) + "\n" + RESOLVE]
         if notes:
             parts.append("（あわせて）" + "\n".join(notes))
         _emit({"decision": "block", "reason": "\n".join(parts)})
@@ -580,7 +749,7 @@ def on_stop(ev):
             _record_firing("report_render_guard_warn", ev)
         msg = []
         if warn:
-            msg.append("このターンで変わった文書に、印刷で消える図・番号の食い違い・連番崩れがある。前からある違反か、"
+            msg.append("このターンで変わった文書に、印刷で消える図・番号の食い違い・連番崩れ・印刷幅を超える表がある。前からある違反か、"
                        "自分で書いていない（pull・別セッションのコミット・checkout で入った）文書なので止めない。\n"
                        + "\n".join(warn))
         msg += notes
