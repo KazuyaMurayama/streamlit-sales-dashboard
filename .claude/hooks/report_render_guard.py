@@ -626,6 +626,25 @@ def _key(p):
     return os.path.normcase(os.path.abspath(p))
 
 
+def _dirty(root):
+    """作業ツリーで未コミットの文書（変更・未追跡）の相対パス（/ 区切り）。取れなければ空＝全部コミット済み扱い。"""
+    out = set()
+    try:
+        ents = (nd._git(root, ["-c", "core.quotepath=false", "status", "--porcelain", "-z", "-uall"]) or "").split("\0")
+    except Exception:
+        return out
+    i = 0
+    while i < len(ents):
+        e = ents[i]
+        i += 1
+        if len(e) < 4:
+            continue
+        if e[0] in "RC":
+            i += 1
+        out.add(e[3:].replace("\\", "/"))
+    return out
+
+
 def _authored(full, authored):
     """このターンで Claude 自身が書いた（と transcript から言える）ファイルか。止めるのはこれだけ。
     transcript が読めないときは空集合＝何も止めず知らせるだけ（安全側の警告）。"""
@@ -702,6 +721,7 @@ def on_stop(ev):
             if "```" in text or "~~~" in text or "|" in text:
                 texts[rel] = text
         bases = bl.texts(sorted(texts)) if texts else {}
+        dirty = _dirty(root) if texts else set()
         left = sorted(texts)
         while left and time.time() <= deadline:
             rel = left.pop(0)
@@ -712,9 +732,17 @@ def on_stop(ev):
                 # 止めない（2026-10-12 Fable 再検証: README しか触っていないのに pull で入った欠陥で止めた）。
                 # 知らせるのも件数と例3本の1行だけ（2026-10-20 依頼者指摘: pull で入った book_briefs 等の既存違反が
                 # 1本ずつ数十行並んで画面を埋めた。このセッションでは直さない文書の詳細は、読み手の時間を使うだけ）。
-                if wd or wn or ws or ww or bd or bn or bs or bw:
+                # 1行に畳むのは、コミット済みで入ってきた文書だけ。未コミット（作業ツリーの変更・未追跡）の文書は pull 由来では
+                # ありえず、transcript から書き込み先を取れない自分のスクリプト生成・変数パスの heredoc でありうるので、
+                # 従来どおり詳細を出す（2026-10-20 Fable 攻撃検証: 自分で生成した .md が「自分で書いていない」と誤説明された）。
+                # transcript が無いときも従来どおり詳細（安全側）。
+                if not (wd or wn or ws or ww or bd or bn or bs or bw):
+                    continue
+                if ev.get("transcript_path") and rel.replace("\\", "/") not in dirty:
                     foreign.append(full)
-                continue
+                    continue
+                wd, wn, ws, ww = wd + bd, wn + bn, ws + bs, ww + bw
+                bd, bn, bs, bw = [], [], [], []
             if bd or bn or bs or bw:
                 block.append(_fmt(full, bd, bn, bs, bw))
             if wd or wn or ws or ww:
@@ -723,8 +751,8 @@ def on_stop(ev):
             unchecked.append((root, "%d本" % len(left)))
     notes = []
     if foreign:
-        notes.append("自分で書いていない文書（pull・別セッションのコミット・checkout で入った）%d本に、前からある印刷の違反がある。"
-                     "このセッションの成果物ではないので止めない（例: %s%s）。" % (
+        notes.append("このターンにコミット済みで入ってきた文書（pull・別セッションのコミット・checkout）で、transcript から"
+                     "自分の書き込みと確認できなかった%d本に、印刷の違反がある。止めない（例: %s%s）。" % (
                          len(foreign), "、".join(os.path.basename(f) for f in foreign[:3]),
                          " ほか%d本" % (len(foreign) - 3) if len(foreign) > 3 else ""))
     if unchecked:
@@ -758,8 +786,8 @@ def on_stop(ev):
             _record_firing("report_render_guard_warn", ev)
         msg = []
         if warn:
-            msg.append("このターンで書いた文書に、前からある（このターンで増えていない）印刷で消える図・番号の食い違い・"
-                       "連番崩れ・印刷幅を超える表がある。止めない。\n" + "\n".join(warn[:5])
+            msg.append("このターンで変わった文書に、印刷で消える図・番号の食い違い・連番崩れ・印刷幅を超える表がある。"
+                       "前からある違反か、transcript から自分の書き込みと確認できない未コミットの文書なので止めない。\n" + "\n".join(warn[:5])
                        + ("\n  ほか %d 本" % (len(warn) - 5) if len(warn) > 5 else ""))
         msg += notes
         _emit({"systemMessage": "⚠ report_render_guard: " + "\n".join(msg)})
