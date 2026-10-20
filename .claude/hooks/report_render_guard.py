@@ -367,8 +367,8 @@ RANK_ONLY = re.compile(r"順位|ランク|^rank|^位$", re.I)
 #   誤差は −3.8%〜+8.1%。推定 616・実描画 592 の誤検出が1件あるので、迷う表は width-ok で理由を書いて通す。
 # 自分が書いたファイルの範囲（2026-10-20 Fable 攻撃検証で確かめた残る穴）:
 #   ・サブエージェント（Agent ツール）が生成してコミットしたものは transcript に出ないので知らせるだけ。
-#   ・ターン開始以降に更新された未コミットの変更は自分のものとみなすので、同じ作業ツリーで別セッション・定期ジョブが
-#     同時に書いた表、git stash pop で戻った表でも止める（near_duplicate_guard の表の検査と同じ割り切り）。
+#   ・スクリプトで生成してまだコミットしていない .md は知らせるだけ（未コミットの変更を数えると、並行する別セッションの
+#     書きかけで止めた。2026-10-20 実運用）。Claude がそのターンで git commit すれば止まる。
 #   ・HTML の <table>・引用（>）の中の表は数えない。表の中身が1字でも変われば「触れた表」として止める。
 # 発火率（2026-10-20, tests/calibrate_report_render_guard.py。48リポ・直近30日・各最大50コミット＝2,266コミット）:
 #   G で止めるコミット 58/2,266（2.56%。fixture を除く）。うち作業台帳（tasks.md・FILE_INDEX.md 等。印刷して
@@ -662,16 +662,19 @@ def on_stop(ev):
     roots = []
     for p in [cwd] + sorted(paths):
         r = nd._git_root(p)
-        if r and r not in roots:
-            roots.append(r)
+        if r and os.path.normcase(os.path.abspath(r)) not in [os.path.normcase(os.path.abspath(x)) for x in roots]:
+            roots.append(r)  # c:\ と C:\ の違いで同じリポを2回検査し、同じ違反を2回出していた（2026-10-20 実運用）
     # 書き込み系ツールの file_path（文字列だけ）とシェルの書き込み先（> >> tee sed -i cp/mv の宛先 等）。読んだだけは含めない
     written = nd.written_paths(calls, cwd)
     authored = {_key(p) for p in written}
     # スクリプトで生成した文書も自分が書いたものに数える（2026-10-20 追加）。WHY: 印刷で列が切れた要レビュー一覧の表は
     #   Claude が build_review_table.py を直して実行し、生成した .md をターン内でコミットしていた。transcript には
     #   .md のパスが出ないので、旧版は「自分で書いていない」として知らせるだけになる（依頼者の元事象を止められない）。
-    #   ①ターン開始以降に更新した未コミットの変更 ②このターンで Claude が git commit を実行したなら、ターン内の手元の
-    #   コミットで変わったファイル。②は git commit を実行していないターン（定期ジョブ・別セッションのコミット）では使わない。
+    #   このターンで Claude が git commit を実行したなら、ターン内の手元のコミットで変わったファイルを数える
+    #   （git commit を実行していないターン＝定期ジョブ・別セッションのコミットでは使わない）。
+    #   「ターン開始以降に更新した未コミットの変更」も数えた初版は、配布直後の実運用で、同じ作業ツリーで並行する
+    #   別セッションが書きかけの未追跡ファイル（Soulful-Content の nt-102 の book_brief）で止めた → 外した。
+    #   その代わり、スクリプトで生成してまだコミットしていない .md は知らせるだけ（コミットしたターンで止まる）。
     ran_commit = any(n in ("Bash", "PowerShell") and isinstance(i, dict) and isinstance(i.get("command"), str)
                      and _runs_git_commit(i["command"]) for n, i in calls or [])
     block, warn, split, order, unchecked = [], [], [], [], []
@@ -680,10 +683,8 @@ def on_stop(ev):
             unchecked.append((root, "全部"))
             continue
         changed = [r for r in nd.changed_files(root, since) or [] if not nd.is_fixture(r)]  # fixture は欠陥版を置く場所
-        if ev.get("transcript_path") and since is not None:
-            authored |= nd.authored_paths(root, since, written)
-            if ran_commit:
-                authored |= nd.local_commit_paths(root, since)
+        if ev.get("transcript_path") and since is not None and ran_commit:
+            authored |= nd.local_commit_paths(root, since)
         bl = nd.Baseline(root, since)  # ターン開始時点の版（ls-tree・diff -M・cat-file --batch の各1回）
         if since is not None:
             new = [r for r in changed if bl.is_new(r)]  # git mv したものは旧パスがあるので新規にしない
