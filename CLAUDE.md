@@ -230,11 +230,12 @@ README / CLAUDE.md / FILE_INDEX / tasks.md / CHANGELOG / LICENSE / SPEC.md / `CU
 - **独立性が要るか？** — 最終QC・レビュー・反証は Fable 5。メインが Opus で作った成果物を Opus 自身がQCしても独立性がないため、ここだけモデルを変える。
 - **単純作業か？** — 入力から出力が一意に決まる機械的作業のみ Sonnet。判断が1つでも混ざるなら Opus。
 - **Opus と Fable の使い分け根拠**: 両者とも 1M コンテキスト・adaptive thinking で同等だが、Fable は Opus の 2 倍のコスト（$10/$50 vs $5/$25 per MTok）。よって「最高性能の独立した第二意見」が価値を持つ最終QCに限定し、日常の判断は Opus が担う。
+- **Fable の節約（2026-10-21・Fable の週上限が先に尽きるため）**: Fable への委譲は**最大12ターン**。資料集め（原稿・出典・差分・チェックリストの読み出し、Web での照合）は呼び出し側か Opus/Sonnet が済ませて**1つのレビュー資料ファイル**にまとめ、Fable にはそのパスと判定観点だけを渡す。出典の照合など「調べて確かめる」工程は Opus、Fable は「読んで判定・反証する」工程に限る。（実測 2026-10-15〜21: Fable 委譲145件の13ターン目以降が Fable 消費の50%・ツール呼び出しの73%が Bash での資料集め）。
 - ※難易度ベースの自動メイン切替は不可。工程別の使い分けはサブエージェント委譲（`model:` 指定）で行う。
 
 ### 機械的な担保（文面だけに頼らない）
 - 起動モデル: `settings.json` の `model` = `opus[1m]`（＝Opus 5、1M コンテキスト）。`effortLevel` = `high`。
-- `.claude/hooks/model_tier_guard.py`（PreToolUse / matcher=`Task`）が、**判断系の語を含む Task を sonnet 系で起動しようとした場合に警告**する。ブロックはしない（誤検知で作業を止めないため）。
+- `.claude/hooks/model_tier_guard.py`（PreToolUse / matcher=`Task`）が、**判断系の語を含む Task を sonnet 系で起動しようとした場合に警告**し、**Fable への委譲で prompt のターン上限が12を超えると止める**（deny）。ブロックはしない（誤検知で作業を止めないため）。
 - サブエージェント定義（`.claude/agents/*.md`）の `model:` は、判断系エージェント（critic / reviewer / verifier / analyst 等）は `claude-fable-5` または `opus`、単純作業エージェントのみ `sonnet` とする。
 <!-- MODEL-TIER:END -->
 
