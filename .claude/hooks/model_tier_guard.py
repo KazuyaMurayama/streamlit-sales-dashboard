@@ -124,6 +124,31 @@ def bg_reason(ti, ctx):
         "（この指示の中では再度止めません）。" % (ctx // 10000))
 
 
+# Fable のターン上限（2026-10-21 追加）。
+# 較正（実測・2026-10-15〜21 の Fable 委譲145件）: 中央値15ターン・平均16.9ターン、
+#   1ターンあたり再送文脈は平均約13万トークン（初回だけで約5.4万）。13ターン目以降が
+#   Fable 消費（キャッシュ読取0.1・書込1.25・出力5 の重み付き）の50.0%を占め、
+#   その大半は Bash での資料集め（Fable のツール呼び出し 389/530 が Bash）だった。
+#   資料集めは Opus/Sonnet が1ファイル（レビュー資料）にまとめ、Fable は読んで判定するだけにする。
+FABLE_TURNS = 12
+TURN_NUM = re.compile(r"(\d+)\s*(?:ターン|turn)|(?:最大|上限)\s*(\d+)\s*(?:回|ターン)", re.I)
+
+
+def fable_turn_reason(ti):
+    """Fable 起動で、prompt に書いたターン上限が FABLE_TURNS を超えていれば理由を返す。"""
+    if "fable" not in str(ti.get("model") or "").lower():
+        return None
+    nums = [int(a or b) for a, b in TURN_NUM.findall(str(ti.get("prompt") or ""))]
+    if not nums or max(nums) <= FABLE_TURNS:
+        return None
+    return (
+        "Fable の委譲は最大%dターンまでです（prompt に %dターンとあります）。Fable は週の上限が別枠で先に尽きるため、"
+        "資料集め（記事・出典・差分・チェックリストの読み出し）は呼び出し側か Opus/Sonnet が済ませて"
+        "1つのレビュー資料ファイルにまとめ、Fable にはそのパスと判定観点だけを渡してください。"
+        "prompt を「最大%dターン以内・資料は <パス> を読む・追加の探索は最小限」に直して呼び直します。"
+        "（実測 2026-10-15〜21: 13ターン目以降が Fable 消費の50%%）" % (FABLE_TURNS, max(nums), FABLE_TURNS))
+
+
 def article_ids(ti):
     """レビュー対象の記事番号。description にあればそれだけを使う（prompt には「見本 nt-038」の
     ような参照も入るため。実測: Fable 起動636件中45件）。description に無いときだけ prompt から取る。"""
@@ -308,6 +333,11 @@ def main():
         ctx, turn = context_and_turn(str(data.get("transcript_path") or ""))
         turn = str(data.get("prompt_id") or "") or turn
         sid = str(data.get("session_id") or "")
+        ftr = fable_turn_reason(ti)
+        if ftr:
+            _record_firing("model_tier_guard", data)
+            _deny(ftr)
+            return
         fr = fable_reason(ti, fable_counts(now))
         if fr and turn and _once("fable|%s|%s|%s" % (sid, turn, ",".join(article_ids(ti)))):
             _record_firing("model_tier_guard", data)
