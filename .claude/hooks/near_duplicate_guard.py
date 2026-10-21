@@ -736,6 +736,42 @@ class Index(object):
             pass
 
 
+MARKER = re.compile(r"^<!--\s*[A-Z][A-Z0-9_-]*(?::BEGIN|_START)\b[^>]*-->\s*$")
+
+
+def _marker(root, rel):
+    """ファイル先頭の非空行が配布ブロックの開始印（<!-- NAME:BEGIN --> 等）ならその行を返す。"""
+    try:
+        with open(os.path.join(root, rel), encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                if line.strip():
+                    return line.strip() if MARKER.match(line.strip()) else None
+    except Exception:
+        return None
+
+
+def _contains_line(root, rel, line):
+    try:
+        with open(os.path.join(root, rel), encoding="utf-8", errors="ignore") as f:
+            return any(l.strip() == line for l in f)
+    except Exception:
+        return False
+
+
+def is_upsert_copy(root, a, b):
+    """片方が配布ブロックの正本（templates/*-block.md）で、もう片方がその開始印を含む配布先なら True。
+    配布スクリプトが開始印〜終了印の間を正本で上書きする仕組み（deploy_model_tier.py 等）で、
+    正本は1つ・配布先は生成物なので「2つ持つ」問題に当たらない（2026-10-21 誤検出5件で追加）。"""
+    for x, y in ((a, b), (b, a)):
+        # 正本は templates/ 配下の *-block.md に限る（任意の複製の1行目に開始印を書くだけで外れないように）
+        if not re.search(r"(^|/)templates/[^/]*-block\.md$", x.replace("\\", "/")):
+            continue
+        m = _marker(root, x)
+        if m and _contains_line(root, y, m):
+            return True
+    return False
+
+
 def find_pairs(root, targets, deadline):
     """targets（相対パス）それぞれについて、同じ群の生きた他ファイルでほぼ同じものを探す。
     戻り値: (発見のリスト [(a, b, 指標)], 見られなかったファイル数)"""
@@ -796,6 +832,9 @@ def find_pairs(root, targets, deadline):
             r = covered_by_pieces(vb[1], pieces, vb[0])  # 既存の b が、このターンの複数片で覆われる
             if r and not all((p, b) in pairs_done for p in r[0]):
                 found.append((" + ".join(r[0]), b, {"jaccard": 0.0, "contain": r[1], "pieces": len(r[0])}))
+    found = [f for f in found
+             if not all(is_upsert_copy(root, x, y)
+                        for x in f[0].split(" + ") for y in f[1].split(" + "))]
     idx.save(live)
     return found, skipped
 
