@@ -169,6 +169,18 @@ STRONG_LOG_RE = re.compile(r"探索\s*[（(]([^|]*?)[)）]\s*[:：]([^|]*)[→�
 ANY_LOG_RE = re.compile(r"探索\s*(?:[（(][^|]*?[)）])?\s*[:：][^|]*[→⇒>]\s*[0-9０-９]+\s*件")
 _LOG_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 _LOG_NOWARN_RE = re.compile(r"⚠\s*(?:なし|無し)")
+# 2026-10-23 施行: 探索を2回（研究デザインの語を含む別の4通りで道具をもう1回）と WebSearch 2回
+# （英語の素の問い＋「<主題> meta-analysis」）に上げる。2026-10-21 の検証で、2回目が新しい A・B格を11本拾い最多、
+# WebSearch だけで出た A・B格も6本あった（deep-research/outputs/EVIDENCE_COVERAGE_EXPANSION_20261021.md）。
+# 施行日より前の日付の記録は従来の条件（4通り・⚠なし・WebSearch）のまま通す（古いレポートの無関係な編集を止めない）。
+# 書式: 探索(日付・⚠なし): A / B / C / D ／2回目: E / F / G / H ＋WebSearch「素の問い」「<主題> meta-analysis」 → N件
+TWO_RUN_SINCE = "2026-10-23"
+_SECOND_RUN_RE = re.compile(r"[／/]?\s*2回目\s*[:：]|‖")
+_WS_QUOTED_RE = re.compile(r"websearch\s*((?:「[^」]+」\s*)+)", re.I)
+_DESIGN_TERMS = ("meta-analy", "meta analy", "systematic review", "randomi", "trial", "longitudinal", "cohort",
+                 "experiment", "replication", "fieldwork", "ethnograph", "corpus", "bibliometric", "scientometric",
+                 "case study", "survey", "cross-cultural", "メタ分析", "系統的レビュー", "無作為", "縦断", "コホート",
+                 "実験", "追試", "調査", "事例研究")
 
 
 def _term_ok(t):
@@ -187,14 +199,9 @@ def search_log(rowtext):
     if not m:
         return {"strong": False, "found": None, "terms": [], "why": "旧書式（括弧に日付・⚠なしが無い）"} if ANY_LOG_RE.search(t) else None
     meta, body, n = m.group(1), m.group(2), int(m.group(3).translate(str.maketrans("０１２３４５６７８９", "0123456789")))
-    terms, seen = [], set()
     b = re.sub(r"[（(][^（）()]*websearch[^（）()]*[)）]", " ", body, flags=re.I)   # 括弧書きの WebSearch は語に数えない
-    for x in re.split(r"\s*[/／・＋+]\s*", b):
-        k = re.sub(r"\s+", " ", x).strip().casefold()
-        if not k or "websearch" in k or k in seen or not _term_ok(k):
-            continue
-        seen.add(k)
-        terms.append(x.strip())
+    b = re.sub(r"websearch\s*(?:「[^」]*」\s*)+", " ", b, flags=re.I)   # 「」で括った WebSearch の問いも語に数えない
+    terms = _terms(b)
     why = []
     if not _LOG_DATE_RE.search(meta):
         why.append("日付なし")
@@ -204,7 +211,38 @@ def search_log(rowtext):
         why.append("WebSearch なし")
     if len(terms) < 4:
         why.append("別々の言い換えが %d 通り" % len(terms))
+    d = _LOG_DATE_RE.search(meta)
+    if d and d.group(0) >= TWO_RUN_SINCE:
+        parts = _SECOND_RUN_RE.split(b, maxsplit=1)
+        if len(parts) < 2:
+            why.append("2回目の4通りなし（%s 以後の記録は「／2回目: E / F / G / H」が要る）" % TWO_RUN_SINCE)
+        else:
+            t1, t2 = _terms(parts[0]), _terms(parts[1])
+            if len(t1) < 4:
+                why.append("1回目の言い換えが %d 通り" % len(t1))
+            if len(t2) < 4:
+                why.append("2回目の言い換えが %d 通り" % len(t2))
+            if not any(x in q.casefold() for q in t2 for x in _DESIGN_TERMS):
+                why.append("2回目に研究デザインの語（meta-analysis・randomized 等）がない")
+        wm = _WS_QUOTED_RE.search(t)
+        wq = re.findall(r"「([^」]+)」", wm.group(1)) if wm else []
+        if len(wq) < 2:
+            why.append("WebSearch が %d 回（%s 以後は「素の問い」「<主題> meta-analysis」の2回）" % (len(wq), TWO_RUN_SINCE))
+        elif not any(re.search(r"meta.?analy|systematic review|メタ分析|critique|replication|批判|追試", q, re.I) for q in wq):
+            # 民族誌・歴史の主張は「<主題> critique」でもよい（メタ分析が原理的に無い主張がある）
+            why.append("WebSearch に meta-analysis（または critique）の問いがない")
     return {"strong": not why, "found": n, "terms": terms, "why": "・".join(why)}
+
+
+def _terms(b):
+    terms, seen = [], set()
+    for x in re.split(r"\s*[/／・＋+]\s*", _SECOND_RUN_RE.sub(" / ", b)):
+        k = re.sub(r"\s+", " ", x).strip().casefold()
+        if not k or "websearch" in k or k in seen or not _term_ok(k):
+            continue
+        seen.add(k)
+        terms.append(x.strip())
+    return terms
 
 
 PMID_RE = re.compile(r"pubmed\.ncbi\.nlm\.nih\.gov/(\d+)|\bPMID\s*[:：]?\s*(\d{6,9})", re.I)
@@ -798,7 +836,8 @@ def analyze(text, cache, resolver_pm=resolve_pmids, resolver_doi=resolve_doi, re
             # PMID/DOI を持たない（課すと全行が偽 FAIL になる）。R9 の語彙検査は上で済んでいる。
             if not exempt and is_science_table and log:
                 fails.append("%s R1 探索記録が足りない（%s。判定「%s」）。「未検証」と書けるのは 日付・道具の⚠なし・WebSearch 併用・別々の言い換え4通りのとき。"
-                             "書式: 探索(日付・⚠なし): A / B / C / D ＋WebSearch … → N件。満たせなければ判定を「探索不足」にする。"
+                             "書式: 探索(日付・⚠なし): A / B / C / D ／2回目: E / F / G / H ＋WebSearch「素の問い」「<主題> meta-analysis」 → N件"
+                             "（2026-10-23 より前の日付の記録は2回目と WebSearch 2回が無くてよい）。満たせなければ判定を「探索不足」にする。"
                              "支持・反証なら識別子を書く。docs/EVIDENCE_SEARCH_GUIDE.md §3" % (cid, log["why"] or "判定と合わない", vd0))
             elif not exempt and is_science_table:
                 fails.append("%s R1 識別子なし（PubMed/DOI の URL か PMID/DOI を書く。見つからない場合は scripts/evidence_search.py で言い換え4通り＋WebSearch で探し「探索(日付・⚠なし): A / B / C / D ＋WebSearch … → N件」を書く。免除は「検証対象外」明記時のみ）" % cid)
@@ -1021,6 +1060,9 @@ def _selftest():
     S = ("並び順: 本書の中心命題に近い順\n\n| # | 主張 | 独自性 | 判定 | 信頼度 | 効果量 | 根拠の要点 | 出典 |\n"
          "|---|---|---|---|---|---|---|---|\n| 1 | 集中 | 通説 | %s | 低 | 不適用 | %s | 著者の主張のみ |\n")
     strong = "探索(2026-10-07・⚠なし): focus strategy / niche strategy / diversification meta-analysis / refocusing ＋WebSearch meta-analysis → 0件"
+    NEW = ("探索(" + TWO_RUN_SINCE + "・⚠なし): focus strategy / niche strategy / diversification performance / refocusing firms"
+           " ／2回目: focus strategy meta-analysis / niche strategy randomized trial / diversification longitudinal cohort / refocusing experiment"
+           " ＋WebSearch「Does focusing on a niche improve firm performance?」「focus strategy firm performance meta-analysis」 → 0件")
     cases += [
         ("red R1: 言い換え1通りの旧書式で未検証（当時の欠陥）", S % ("未検証", "探索: market segmentation targeting firm performance → 8件"), 1, "R1 探索記録が足りない"),
         ("green R1: 4通り・⚠なし・WebSearch の記録", S % ("未検証", strong), 0, None),
@@ -1035,6 +1077,13 @@ def _selftest():
         ("red R1: WebSearch を4語目に数える（Fable #2）", S % ("未検証", "探索(2026-10-07・⚠なし): focus strategy / niche strategy / refocusing firms / WebSearch meta analysis → 0件"), 1, "R1"),
         ("red R1: 日付なし（Fable #2）", S % ("未検証", strong.replace("2026-10-07・", "")), 1, "R1"),
         ("green R1: 強調・⚠ なし・⇒・入れ子括弧（Fable #3）", S % ("未検証", "**探索(2026-10-07(再実行)・⚠ なし)**: focus strategy / niche strategy / diversification meta-analysis / corporate refocusing（WebSearch focus meta-analysis も） ⇒ 0件"), 0, None),
+        ("green R1: 施行日以後・2回＋WebSearch 2回の新書式", S % ("未検証", NEW), 0, None),
+        ("red R1: 施行日以後で4通り1回だけ（2回目なし）", S % ("未検証", strong.replace("2026-10-07", TWO_RUN_SINCE)), 1, "2回目"),
+        ("green R1: 施行日より前の日付は4通り1回で通る", S % ("未検証", strong), 0, None),
+        ("red R1: 施行日以後で2回目に研究デザインの語なし", S % ("未検証", NEW.replace("meta-analysis /", "outcomes /").replace("randomized trial", "field data")
+                                                         .replace("longitudinal cohort", "panel data").replace("experiment ", "study ")), 1, "研究デザイン"),
+        ("red R1: 施行日以後で WebSearch 1回", S % ("未検証", NEW.replace("「focus strategy firm performance meta-analysis」", "")), 1, "WebSearch"),
+        ("red R1: 施行日以後で2回目が3通り", S % ("未検証", NEW.replace(" / refocusing experiment", "")), 1, "2回目の言い換え"),
         ("green R9b: 探索不足 → 未検証 の順は同じ帯（Fable #4）",
          (S % ("探索不足", "探索: x y → 1件")).replace("並び順: 本書の中心命題に近い順\n\n", "") + "| 2 | 絞り | 通説 | 未検証 | 低 | 不適用 | " + strong + " | 著者の主張のみ |\n", 0, None),
     ]
