@@ -197,7 +197,8 @@ def search_log(rowtext):
     t = rowtext.replace("*", "")
     m = STRONG_LOG_RE.search(t)
     if not m:
-        return {"strong": False, "found": None, "terms": [], "why": "旧書式（括弧に日付・⚠なしが無い）"} if ANY_LOG_RE.search(t) else None
+        return {"strong": False, "proc_ok": False, "found": None, "terms": [], "why": "旧書式（括弧に日付・⚠なしが無い）",
+                "date": None} if ANY_LOG_RE.search(t) else None
     meta, body, n = m.group(1), m.group(2), int(m.group(3).translate(str.maketrans("０１２３４５６７８９", "0123456789")))
     b = re.sub(r"[（(][^（）()]*websearch[^（）()]*[)）]", " ", body, flags=re.I)   # 括弧書きの WebSearch は語に数えない
     b = re.sub(r"websearch\s*(?:「[^」]*」\s*)+", " ", b, flags=re.I)   # 「」で括った WebSearch の問いも語に数えない
@@ -205,8 +206,7 @@ def search_log(rowtext):
     why = []
     if not _LOG_DATE_RE.search(meta):
         why.append("日付なし")
-    if not _LOG_NOWARN_RE.search(meta):
-        why.append("⚠なしの記載なし")
+    warn_only = not _LOG_NOWARN_RE.search(meta)
     if "websearch" not in m.group(0).casefold():
         why.append("WebSearch なし")
     if len(terms) < 4:
@@ -231,7 +231,12 @@ def search_log(rowtext):
         elif not any(re.search(r"meta.?analy|systematic review|メタ分析|critique|replication|批判|追試", q, re.I) for q in wq):
             # 民族誌・歴史の主張は「<主題> critique」でもよい（メタ分析が原理的に無い主張がある）
             why.append("WebSearch に meta-analysis（または critique）の問いがない")
-    return {"strong": not why, "found": n, "terms": terms, "why": "・".join(why)}
+    # proc_ok = ⚠ の有無を除いて手順を満たす（探索不足は「手順は踏んだが道具が落ちた」ときにだけ書ける）
+    proc_ok = not why
+    if warn_only:
+        why.append("⚠なしの記載なし")
+    return {"strong": not why, "proc_ok": proc_ok, "found": n, "terms": terms, "why": "・".join(why),
+            "date": d.group(0) if d else None}
 
 
 def _terms(b):
@@ -794,6 +799,11 @@ def analyze(text, cache, resolver_pm=resolve_pmids, resolver_doi=resolve_doi, re
         resolver_doi(d, cache)
 
     seen_ids = set()
+    # 2026-10-23: 施行日以後に作ったレポートでも「探索不足」と書けば1回の探索で通っていた
+    # （LISTENING_AND_BEING_HEARD_20261023 #9 など。新しい手順が新規レポートに届かなかった）。
+    # 施行日以後の記録・レポートでは、探索不足にも2回＋WebSearch 2回の手順を求め、⚠あり だけを不足として許す。
+    _cd = re.search(r"作成日\s*[:：]\s*(\d{4}-\d{2}-\d{2})", text)
+    new_report = bool(_cd and _cd.group(1) >= TWO_RUN_SINCE)
     verdict_seq = []          # R9b（バンド順）用: 行の並び順に判定を控える
     for row in body:
         if len(row) <= max(i_conf or 0, i_eff or 0):
@@ -808,6 +818,13 @@ def analyze(text, cache, resolver_pm=resolve_pmids, resolver_doi=resolve_doi, re
             (vd0 == "探索不足") or
             (vd0 in ("未検証", "") and log["strong"]))
         exempt = bool(EXEMPT_RE.search(rowtext) or log_ok)
+        if vd0 == "探索不足" and is_science_table and (new_report or (log and (log.get("date") or "") >= TWO_RUN_SINCE)):
+            if not log or not log["proc_ok"]:
+                fails.append("%s R1c 「探索不足」でも %s 以後は手順が要る（%s）。探索不足と書けるのは、2回＋WebSearch 2回を回して"
+                             "Semantic Scholar が半分以上落ちた（⚠あり）ときだけ。書式: 探索(日付・⚠あり): A / B / C / D ／2回目: E / F / G / H "
+                             "＋WebSearch「素の問い」「<主題> meta-analysis」 → N件。docs/EVIDENCE_SEARCH_GUIDE.md §3"
+                             % (cid, TWO_RUN_SINCE, (log["why"] if log else "探索記録なし") or "手順不足"))
+                exempt = True   # 同じ行で R1 を重ねて出さない
         if log_ok and log["strong"]:
             reviews.append("%s R1 探索記録で免除（%s・%d件）: ⚠なし・実行は自己申告。検索語: %s"
                            % (cid, vd0 or "判定列なし", log["found"], " / ".join(log["terms"])[:160]))
@@ -840,7 +857,7 @@ def analyze(text, cache, resolver_pm=resolve_pmids, resolver_doi=resolve_doi, re
                              "（2026-10-23 より前の日付の記録は2回目と WebSearch 2回が無くてよい）。満たせなければ判定を「探索不足」にする。"
                              "支持・反証なら識別子を書く。docs/EVIDENCE_SEARCH_GUIDE.md §3" % (cid, log["why"] or "判定と合わない", vd0))
             elif not exempt and is_science_table:
-                fails.append("%s R1 識別子なし（PubMed/DOI の URL か PMID/DOI を書く。見つからない場合は scripts/evidence_search.py で言い換え4通り＋WebSearch で探し「探索(日付・⚠なし): A / B / C / D ＋WebSearch … → N件」を書く。免除は「検証対象外」明記時のみ）" % cid)
+                fails.append("%s R1 識別子なし（PubMed/DOI の URL か PMID/DOI を書く。見つからない場合は scripts/evidence_search.py を2回（--variants と --variants2 で計8通り）＋WebSearch 2回で探し「探索(日付・⚠なし): A / B / C / D ／2回目: E / F / G / H ＋WebSearch「素の問い」「<主題> meta-analysis」 → N件」を書く。免除は「検証対象外」明記時のみ）" % cid)
             continue
         # R5 vocabulary（免除行以外）
         if not exempt:
@@ -1084,6 +1101,15 @@ def _selftest():
                                                          .replace("longitudinal cohort", "panel data").replace("experiment ", "study ")), 1, "研究デザイン"),
         ("red R1: 施行日以後で WebSearch 1回", S % ("未検証", NEW.replace("「focus strategy firm performance meta-analysis」", "")), 1, "WebSearch"),
         ("red R1: 施行日以後で2回目が3通り", S % ("未検証", NEW.replace(" / refocusing experiment", "")), 1, "2回目の言い換え"),
+        ("red R1c: 施行日以後の探索不足で1回・WebSearch 1回（LISTENING #9 の型）",
+         S % ("探索不足", strong.replace("2026-10-07・⚠なし", TWO_RUN_SINCE + "・⚠あり")), 1, "R1c"),
+        ("green R1c: 施行日以後の探索不足で2回＋WebSearch 2回・⚠あり", S % ("探索不足", NEW.replace("⚠なし", "⚠あり")), 0, None),
+        ("red R1c: 作成日が施行日以後のレポートで探索記録なしの探索不足",
+         "作成日: " + TWO_RUN_SINCE + " 09:00 JST\n\n" + S % ("探索不足", "根拠なし"), 1, "R1c"),
+        ("red R1c: 作成日が施行日以後のレポートで旧書式の探索不足",
+         "作成日: " + TWO_RUN_SINCE + " 09:00 JST\n\n" + S % ("探索不足", "探索: market segmentation → 8件"), 1, "R1c"),
+        ("green R1c: 作成日が施行日より前なら旧書式の探索不足は通る",
+         "作成日: 2026-10-20 09:00 JST\n\n" + S % ("探索不足", "探索: market segmentation → 8件"), 0, None),
         ("green R9b: 探索不足 → 未検証 の順は同じ帯（Fable #4）",
          (S % ("探索不足", "探索: x y → 1件")).replace("並び順: 本書の中心命題に近い順\n\n", "") + "| 2 | 絞り | 通説 | 未検証 | 低 | 不適用 | " + strong + " | 著者の主張のみ |\n", 0, None),
     ]
