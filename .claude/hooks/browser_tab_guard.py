@@ -23,8 +23,11 @@ WHAT IT DOES
 ------------
 For each Playwright server used by the MAIN agent in this turn (calls since the last
 human prompt): after the last call that leaves a tab open (navigate, click, snapshot,
-tabs new/select, ...), at least as many closing calls must follow as tabs were opened
-in the turn (1 + number of `browser_tabs new`). Otherwise block once per instruction.
+tabs new/select, and for playwright-ext also tabs list, which connects and opens the
+extension's "Welcome" tab), at least as many closing calls must follow as tabs were opened
+in the turn (1 + number of `browser_tabs new`). A playwright-ext turn whose only
+"close" is browser_close is also blocked: the tab is orphaned and the final message
+must name it. Otherwise block once per instruction.
 Passes when the user asked to keep the tab (開いたまま / 閉じないで / keep open) or the
 final message says why it is deliberately left open (タブ…開いたまま / 残して / 閉じずに),
 e.g. the user must log in or look at the page.
@@ -51,8 +54,15 @@ STATE_DIR = os.path.join(os.path.expanduser("~"), ".claude", "state", NAME + "_s
 
 EXT = "mcp__playwright-ext__"
 ISO = "mcp__playwright__"
-KEEP_PROMPT = re.compile(r"開いたまま|開きっぱなし(?:に|で)(?:して|いい|よい|OK)|閉じないで|閉じなくて|残しておいて|keep (?:it |the tab )?open", re.I)
-KEEP_FINAL = re.compile(r"タブ[^。\n]{0,30}(?:開いたまま|残して|残した|閉じず|閉じていません|閉じない)")
+# Only a request to keep it open counts. The 2026-10-24 complaint itself says
+# 「新しいタブを開きっぱなしにして作業を完了させている」, so a bare 開きっぱなしにして must not exempt.
+KEEP_PROMPT = re.compile(r"(?:開いたまま|開きっぱなし)(?:に|で)(?:して(?:おいて|ください|ほしい|ね|[。！!]|$)|しておいて|いい|よい|OK)"
+                         r"|閉じないで(?:ください|ほしい|おいて|いい|よい|OK|ね|[。！!]|$)|閉じなくて(?:いい|よい|OK)|残しておいて"
+                         r"|keep (?:it |the tab )?open\b(?!-)", re.I | re.M)
+# The keep-open request must be about the browser (「元のファイルは残しておいて」 is not; Fable review M1).
+BROWSER_WORD = re.compile(r"タブ|ページ|ブラウザ|画面|サイト|ログイン|tab|browser|page", re.I)
+# Affirmative only: 「タブは残していません」「閉じていません」 must not exempt (Fable review M2).
+KEEP_FINAL = re.compile(r"(?:タブ|ページ|画面)[^。\n]{0,30}(?:開いたまま|残して(?!いません|いない|ない)|残した|閉じず)")
 
 
 def _action(inp):
@@ -73,22 +83,38 @@ def open_tabs_left(calls):
                 return True
             return srv == ISO and t == "browser_close"
 
-        def neutral(t, i):
-            return closer(t, i) or t == "browser_close" or (t == "browser_tabs" and _action(i) == "list")
+        def connected(k):
+            # playwright-ext: browser_tabs list opens the extension's "Welcome" tab when not yet
+            # connected (measured 2026-10-24). Treat it as connected when an earlier ext call in
+            # this turn was not browser_close.
+            return srv == ISO or (k > 0 and mine[k - 1][0] != "browser_close")
 
-        last_open = max((k for k, (t, i) in enumerate(mine) if not neutral(t, i)), default=-1)
+        def neutral(k, t, i):
+            return closer(t, i) or t == "browser_close" or (t == "browser_tabs" and _action(i) == "list" and connected(k))
+
+        last_open = max((k for k, (t, i) in enumerate(mine) if not neutral(k, t, i)), default=-1)
         if last_open < 0:
+            # playwright-ext closed with browser_close only: the Chrome tab stays, orphaned
+            last_bc = max((k for k, (t, _) in enumerate(mine) if t == "browser_close"), default=-1)
+            if srv == EXT and last_bc >= 0 and not any(closer(t, i) for t, i in mine[last_bc + 1:]):
+                out.append((srv, 1, 0, True))
             continue
         opened = 1 + sum(1 for t, i in mine if t == "browser_tabs" and _action(i) == "new")
         after = mine[last_open + 1:]
         closed = sum(1 for t, i in after if closer(t, i))
+        if srv == ISO and any(t == "browser_close" for t, _ in after):
+            closed = opened      # the isolated browser closes with all its tabs (Fable review F1)
         if closed < opened:
             out.append((srv, opened, closed, any(t == "browser_close" for t, _ in after)))
     return out
 
 
+def _keep_requested(prompt):
+    return any(KEEP_PROMPT.search(s) and BROWSER_WORD.search(s) for s in re.split(r"[。\n！!？?]", prompt or ""))
+
+
 def decide(calls, prompt="", final=""):
-    if KEEP_PROMPT.search(prompt or "") or KEEP_FINAL.search(final or ""):
+    if _keep_requested(prompt) or KEEP_FINAL.search(final or ""):
         return None
     return open_tabs_left(calls) or None
 
