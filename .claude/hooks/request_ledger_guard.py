@@ -41,6 +41,28 @@ Second Fable QC (2026-10-19): 「以下の指摘を直して。」 no longer cut
 in a Japanese prompt are pasted material; an English request answered in Japanese is judged on the
 words that can be looked up (EN_JA, identifiers) instead of passing; 「〜に関して。」 is no request.
 7 days / 200 turns: firing 9.5%, C02 recall 1/3.
+
+2026-10-26 (C02 again, CORRECTION_DIGEST_20261026: 4 corrections in 7 days). Invariant: the requirements
+live in what the prompt POINTS AT (a pasted hand-off, 「下記に回答して」, a GitHub URL / a path given as the
+spec), and that material was neither itemised nor read. Two additions:
+ (a) SPEC PASTE -- a <pasted_content> block is now itemised when the user's own text points at it as the
+     spec (「下記に回答して」「以下の指示どおりに進めて」「添付の要望に対応して」), and a paste-only prompt (a
+     hand-off) also counts its bullet directives in dictionary form (「- 結果は X の冒頭から更新する」).
+     A paste introduced as material (「以下のメールに返信して」, RLG-FP6) is still skipped.
+ (b) SPEC REFS -- a GitHub blob/tree URL in the user's text, or a file path on a line that names it as the
+     spec (必読・手本・参照・正典・下記に定めた・に従って・を元に・読んで), must be touched by a tool call this
+     turn (Read / git show / Contents API / WebFetch / Grep ... : its basename in the tool input).
+     Otherwise the stop is blocked once (shared with the item check: one block per prompt).
+     A ref is touched when its basename (or its stem: the user's task.md finds tasks.md) is in a tool input; a
+     spec word must sit within NEAR chars of the path (or the line is a label 「- 必読: …」); more than MAX_URLS
+     GitHub URLs or a prompt over MAX_REF_TEXT chars is a quoted list / batch job, not a pointer.
+ Also: an item whose only word is the go verb (「2本を順に進めて。」「再開して。」) is no deliverable (GO_VERBS).
+Real C02 of the week: 0/4 caught -- in all four the pointed files WERE read and the paste items covered; what was
+dropped lived in a source the prompt did not name (the predecessor report -> report_format_guard, the book behind an
+article, the obvious RCT row of a rating scale, two task sets deferred as one 「未対応」).
+Calibration (tests/calibrate_request_ledger_guard.py --compare <old>): 30 days / 823 turns 14.3% -> 14.5% (+1, TP);
+120 days / 2,222 turns 14.0% -> 13.8% (+2 TP, -6 rows = 2 distinct 「再開して。」 turns); unread-ref firings 1 in 120 days.
+Tests: tests/test_request_ledger_guard_c02_20261026.py (21; the 7 BLOCK/once checks fail on the pre-extension version).
 Deployed from claude-governance/templates/hooks/ -- edit there, not here.
 """
 import hashlib
@@ -141,12 +163,70 @@ def user_text(prompt):
     return "\n".join(ln for ln in lines if not SPEAKER.match(ln)).strip()
 
 
+# (a) the user's own text points at the paste as the spec: 「下記に回答して」「以下の指示どおりに」「添付の要望に対応して」
+SPEC_POINTER = re.compile(r"(?:下記|以下|上記|添付|貼り付け|貼付|引き継ぎ|引継ぎ)(?:に|で|の|を|は|も)?[^。\n]{0,12}?"
+                          r"(?:定め|決め|指示|依頼|要望|要件|仕様|タスク|手順|引き継|引継|回答|答え|対応|従|沿|とおり|通り"
+                          r"|進め|実施|反映|やっ|質問|指摘|修正|直し)")
+# a hand-off bullet in dictionary form: 「- 結果は X の冒頭から更新する（同じ日なら…）」「②M2 の例外を直す」
+_BULLET = re.compile(r"^\s*(?:[-*・■□●◆▶]|[①-⑳]|\d+[.)．、]|[（(]\d+[)）])")
+_DICT_END = re.compile(r"(?:する|しない|し直す|直す|探す|作る|書く|読む|使う|残す|守る|消す|削る|足す|置く|送る|測る"
+                       r"|進める|始める|止める|確かめる|調べる|載せる|入れる|まとめる|揃える|そろえる|分ける|変える|替える"
+                       r"|測り直す|探し直す|作り直す|書き直す|やり直す)$")
+
+
+MAX_POINTER_TEXT = 600   # 「下記に回答して」 is short; a 3,000-char classification prompt quoting pastes is not a pointer
+
+
+def _spec_pastes(prompt):
+    """(text of pasted blocks the user points at as the spec, True when the prompt is a paste-only hand-off)."""
+    t = _INJECTED.sub(" ", prompt or "")
+    outside = _PASTED.sub(" ", t).strip()
+    blocks = [m.group(1) for m in _PASTED.finditer(t)]
+    if not blocks:
+        return "", False
+    if not outside:
+        return "", True             # user_text() already returns the paste itself
+    if len(outside) > MAX_POINTER_TEXT or MATERIAL_INTRO.search(outside) or not SPEC_POINTER.search(outside):
+        return "", False            # material (a mail to answer) or no pointer: the paste stays skipped
+    return "\n".join(blocks), False
+
+
+def _dict_directive(line):
+    s = re.sub(r"[（(][^（）()]*[）)]\s*[。．]?\s*$", "", line.strip())
+    s = re.sub(r"[。．]\s*$", "", s).strip()
+    return bool(_BULLET.match(line)) and bool(_DICT_END.search(s))
+
+
 def split_items(prompt):
-    """Request items of a prompt: [{"text", "kw"}]. Quoted/pasted parts are skipped."""
-    t = re.sub(r"```.*?```", " ", user_text(prompt), flags=re.S)
+    """Request items of a prompt: [{"text", "kw"}]. Quoted/material pastes are skipped; a paste the user points
+    at as the spec (and a paste-only hand-off) is itemised, bullet directives in dictionary form included."""
+    extra, handoff = _spec_pastes(prompt)
+    items = _items_from(user_text(prompt), handoff)
+    if extra and len(items) < MAX_ITEMS:
+        for it in _items_from(extra, True):
+            if it["text"] not in [x["text"] for x in items]:
+                items.append(it)
+            if len(items) >= MAX_ITEMS:
+                break
+    return items
+
+
+def _items_from(t, spec):
+    t = re.sub(r"```.*?```", " ", t, flags=re.S)
     t = re.sub(r"(?m)^\s*>.*$", " ", t)
     items = []
     parts = []
+    if spec:
+        rest = []
+        for ln in t.splitlines():
+            if _dict_directive(ln) and len(ln.strip()) <= MAX_SENT and len(items) < MAX_ITEMS:
+                s = _BULLET.sub("", ln, count=1).strip()
+                kw = keywords(s)
+                if kw and not MANNER.search(s):
+                    items.append({"text": s, "kw": kw})
+                    continue
+            rest.append(ln)
+        t = "\n".join(rest)
     # English lines in a Japanese prompt are pasted material (a README's 「Set the env var FOO.」, QC2 R11)
     pj = sum(1 for ch in t if ord(ch) > 0x3000) >= 3
     for part in re.split(r"(?<=[。！？!?])|(?<=\.)\s+(?=[A-Z])|\n", t):
@@ -166,6 +246,8 @@ def split_items(prompt):
             kw.append(vs)
         if not kw or MANNER.search(s):
             continue
+        if kw == [vs] and vs in GO_VERBS:
+            continue
         if POINTER.search(s) and len(kw) <= 2:
             continue
         items.append({"text": s, "kw": kw})
@@ -177,6 +259,8 @@ def split_items(prompt):
 # the kanji of the verb that carries the request: 「探して」→探, 「計算してください」→計算 (RLG-FN3: 「データについて
 # もう少し探してください」 was covered by 「データ」 alone in an answer that never searched)
 _VERB = re.compile(r"([一-鿿]+)(?:し|[っいべめせけれきえみびちりにぎ])?(?:て|んで|しといて|といて)(?:ください|下さい|ほしい|欲しい|もらいたい|くれ|ね|よ|おいて)?\s*[。！!？?]?\s*$")
+# 「進めて」「着手して」 alone: the go signal of the prompt, answered by doing the other items (2026-10-26)
+GO_VERBS = set("進 着手 始 続 開始 再開 継続".split())
 # a word that alone says nothing about which request was answered
 GENERIC_KW = set("データ ファイル スクリプト コード レポート 資料 記事 テスト シート 結果 一覧 内容 文書 数値 ドキュメント".split())
 # answers use other words for the same act (Fable QC RLG-FP3: 計算→算出, シート→スプレッドシート)
@@ -250,6 +334,82 @@ def covered(item, text):
 
 def uncovered(items, text):
     return [it for it in items if not covered(it, text)]
+
+
+# (b) spec references: a GitHub file URL anywhere in the user's text, or a path on a line naming it as the spec
+_GH_URL = re.compile(r"https?://(?:github\.com/[\w.\-]+/[\w.\-]+/(?:blob|tree|raw)/[^\s/)>\]]+/|raw\.githubusercontent\.com/"
+                     r"[\w.\-]+/[\w.\-]+/[^\s/)>\]]+/)([A-Za-z0-9_.\-/%~+]+)")
+_PATH = re.compile(r"(?<![\w/.\-])((?:[A-Za-z]:[\\/]|~[\\/]|\.{1,2}[\\/])?(?:[\w.\-ぁ-んァ-ヶー一-鿿・]+[\\/])*"
+                   r"[\w\-ぁ-んァ-ヶー一-鿿・][\w.\-ぁ-んァ-ヶー一-鿿・]*\.(?:md|py|json|jsonl|gs|js|ts|txt|csv|ya?ml|toml|html|ipynb|sh|ps1))(?![\w])")
+SPEC_REF = re.compile(r"必読|手本|を参照|参照して|参照し|定め|に従|沿って|とおり|通りに|をもとに|を元に|を基に|読んで|読み込んで|目を通")
+# a label line 「- 必読: a.md と b.md」 points at every path on it
+SPEC_LABEL = re.compile(r"^\s*(?:[-*・■]\s*)?(?:必読|手本|参照|正典|仕様|参考)[^:：\n]{0,8}[:：]")
+NEAR = 15            # a spec word must be this close to the path (「X.md、下記に定めた」 yes; 「X.md が良いか。…参照すべき」 no)
+MAX_URLS = 3         # more GitHub URLs than this = a pasted list (a digest of past prompts), not a pointer
+MAX_REF_TEXT = 2500  # a longer prompt is a batch job quoting other prompts (correction digest, 2026-09-29), not a pointer
+
+
+def _base(p):
+    try:
+        from urllib.parse import unquote
+        p = unquote(p)
+    except Exception:
+        pass
+    b = re.split(r"[\\/]", p.rstrip("/\\"))[-1]
+    return re.sub(r"^.*[ぁ-ん](?=[A-Za-z0-9_])", "", b)
+
+
+def spec_refs(prompt):
+    """[(shown, basename)] that the user points at as the spec. Material pastes, code and quotes are skipped."""
+    extra, _h = _spec_pastes(prompt)
+    t = user_text(prompt) + ("\n" + extra if extra else "")
+    t = re.sub(r"```.*?```", " ", t, flags=re.S)
+    t = re.sub(r"(?m)^\s*>.*$", " ", t)
+    out, seen = [], set()
+    if len(t) > MAX_REF_TEXT:
+        return out
+    urls = list(_GH_URL.finditer(t))
+    for m in (urls if len({u.group(1) for u in urls}) <= MAX_URLS else []):
+        b = _base(m.group(1))
+        if b and b not in seen:
+            seen.add(b)
+            out.append((m.group(0), b))
+    for ln in t.splitlines():
+        label = bool(SPEC_LABEL.match(ln))
+        if not label and not SPEC_REF.search(ln):
+            continue
+        ln2 = _GH_URL.sub(" ", ln)
+        for m in _PATH.finditer(ln2):
+            if not label and not SPEC_REF.search(ln2[max(0, m.start() - NEAR):m.end() + NEAR]):
+                continue
+            b = _base(m.group(1))
+            if b and b not in seen and len(b) >= 5:
+                seen.add(b)
+                out.append((m.group(1), b))
+    return out[:MAX_ITEMS]
+
+
+def unread_refs(refs, events):
+    """refs whose basename appears in no tool input of this turn (Read / Bash git show / Grep / WebFetch / MCP ...)."""
+    blob = []
+    for e in events:
+        if e[0] == "tool":
+            try:
+                blob.append(json.dumps(e[2], ensure_ascii=False))
+            except Exception:
+                blob.append(str(e[2]))
+    s = "\n".join(blob)
+    try:
+        from urllib.parse import unquote
+        s = s + "\n" + unquote(s)
+    except Exception:
+        pass
+    s = s.replace("\\\\", "/").replace("\\", "/").lower()
+    def seen(b):
+        b = b.lower()
+        stem = b.rsplit(".", 1)[0]
+        return b in s or (len(stem) >= 4 and stem in s)
+    return [r for r in refs if not seen(r[1])]
 
 
 def _text(msg):
@@ -366,17 +526,15 @@ def on_stop(ev):
         led = {}
     if led.get("prompt_hash") != _phash(prompt):
         led = {"prompt_hash": _phash(prompt), "items": split_items(prompt), "blocked": False}
+    if led.get("blocked"):
+        return
     items = led.get("items") or []
-    if len(items) < 2 or led.get("blocked"):
+    miss, unread = decide(prompt, items, events)
+    if not miss and not unread:
         return
-    miss = uncovered(items, turn_from_events(events))
-    if not miss:
-        return
-    last = next((e[1] for e in reversed(events) if e[0] == "text"), "")
-    if CLARIFY.search(last.strip()[-200:]):
-        return      # the answer ends by asking which one is meant; delegation_guard checks that question
     led["blocked"] = True
     led["uncovered"] = [m["text"] for m in miss]
+    led["unread"] = [r[0] for r in unread]
     try:
         os.makedirs(STATE_DIR, exist_ok=True)
         with io.open(path, "w", encoding="utf-8") as f:
@@ -384,12 +542,38 @@ def on_stop(ev):
     except Exception:
         pass
     _record_firing(NAME, ev)
-    lines = "".join(u"\n  - %s" % m["text"][:100] for m in miss)
-    reason = (u"【依頼の台帳照合（1回のみ）】この指示には %d 件の要求があり、うち %d 件に対応する記述が"
-              u"最終回答にも今回書いたファイルにも見当たらない:%s\n"
-              u"各要求について、今このターンで対応して結果を書くか、対応しない理由を「未対応: <要求> — 理由」の形で"
-              u"回答に明記せよ（黙って落とさない）。" % (len(items), len(miss), lines))
-    sys.stdout.buffer.write(json.dumps({"decision": "block", "reason": reason}, ensure_ascii=True).encode("ascii"))
+    sys.stdout.buffer.write(json.dumps({"decision": "block", "reason": block_reason(items, miss, unread)},
+                                       ensure_ascii=True).encode("ascii"))
+
+
+def decide(prompt, items, events):
+    """(uncovered items, unread spec refs) of one turn -- the calibration script calls this too."""
+    last = next((e[1] for e in reversed(events) if e[0] == "text"), "")
+    if CLARIFY.search(last.strip()[-200:]):
+        return [], []   # the answer ends by asking which one is meant; delegation_guard checks that question
+    evidence = turn_from_events(events)
+    miss = uncovered(items, evidence) if len(items) >= 2 else []
+    unread = [r for r in unread_refs(spec_refs(prompt), events)
+              if not re.search(u"(?:未読|読めな|開けな|取得できな)[^\n]{0,80}" + re.escape(r[1]), evidence)
+              and not re.search(re.escape(r[1]) + u"[^\n]{0,80}(?:未読|読めな|開けな|取得できな)", evidence)]
+    return miss, unread
+
+
+def block_reason(items, miss, unread):
+    out = [u"【依頼の台帳照合（1回のみ）】"]
+    if miss:
+        out.append(u"この指示（貼り付けた引き継ぎ・「下記」で指した本文を含む）には %d 件の要求があり、うち %d 件に対応する"
+                   u"記述が最終回答にも今回書いたファイルにも見当たらない:%s\n"
+                   u"各要求について、今このターンで対応して結果を書くか、対応しない理由を「未対応: <要求> — 理由」の形で"
+                   u"回答に明記せよ（黙って落とさない）。"
+                   % (len(items), len(miss), "".join(u"\n  - %s" % m["text"][:100] for m in miss)))
+    if unread:
+        out.append(u"指示が仕様として指したファイル・URL を、このターンのツール呼び出しで1度も開いていない:%s\n"
+                   u"Read（ローカルの clone）・git show origin/main:<パス>・GitHub Contents API のどれかで中身を読み、"
+                   u"そこに定められた節・表・列・要求を成果物と1件ずつ突き合わせて結果を回答に書け。"
+                   u"読めない場合は「未読: <ファイル名> — 理由」と書け。"
+                   % "".join(u"\n  - %s" % r[0][:140] for r in unread))
+    return "\n".join(out)
 
 
 def main():

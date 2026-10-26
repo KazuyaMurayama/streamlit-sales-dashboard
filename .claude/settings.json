@@ -167,6 +167,10 @@
           {
             "type": "command",
             "command": "P=$(command -v python3 || command -v python) || exit 0; exec \"$P\" .claude/hooks/evidence_table_guard.py"
+          },
+          {
+            "type": "command",
+            "command": "P=$(command -v python3 || command -v python) || exit 0; exec \"$P\" .claude/hooks/rating_recompute_guard.py"
           }
         ]
       },
@@ -277,6 +281,10 @@
           {
             "type": "command",
             "command": "P=$(command -v python3 || command -v python) || exit 0; exec \"$P\" .claude/hooks/browser_tab_guard.py"
+          },
+          {
+            "type": "command",
+            "command": "P=$(command -v python3 || command -v python) || exit 0; exec \"$P\" .claude/hooks/batch_verify_guard.py"
           }
         ]
       }
