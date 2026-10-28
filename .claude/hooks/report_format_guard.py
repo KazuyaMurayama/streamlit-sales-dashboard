@@ -128,6 +128,7 @@ VERSION_WORD = re.compile(r"(?:前版|旧版|前の版|前回版|前回の|直�
                           r"|(?<![A-Za-z0-9])[vｖ][0-9０-９]+(?![A-Za-z0-9])|第\d+版|(?i:previous|supersed|replaces|based on))")
 MDREF = re.compile(r"\[[^\]]*\]\(([^)\s#]+\.md)(?:#[^)]*)?\)|(?<![\w./(\-])([\w.\-ぁ-んァ-ヶー一-鿿]+\.md)\b")
 DEPRECATED = re.compile(r"廃盤|deprecated", re.I)
+DEPRECATION_MARK = re.compile(r"^\s*(?:⛔\s*)?廃盤[（(]")   # deprecation_guard が書かせる1行目の印
 MARK = re.compile(r"<!--\s*format-drop\s*[:：](?P<body>.*?)-->", re.S | re.I)
 TRAILER = re.compile(r"Format-Drop-Ok\s*[:：](?P<body>[^\n]*?「[^」]+」[^\n]*)", re.I)
 APPROVAL = re.compile(r"承認\s*(?:「(?P<q>.+)」|『(?P<q2>.+)』|\"(?P<q3>[^\"]+)\")", re.S)   # 引用の中の「」を許す（Fable FP11）
@@ -164,6 +165,13 @@ def norm(s):
     s = re.sub(r"[*_`~\[\]]|\]\([^)]*\)", "", s)
     s = re.sub(r"^\s*(?:§|第)?\s*[0-9０-９]+(?:[.．\-][0-9０-９a-z]+)*[.．)）章節]?\s*", "", s, flags=re.I)
     s = re.sub(r"^\s*[A-Za-z][.)]\s+", "", s)
+    return re.sub(r"[\s\W_]+", "", s).lower()
+
+
+def _norm_full(s):
+    """norm と同じだが括弧書きを残す（見出しの同点を分けるためだけに使う）。"""
+    s = re.sub(r"[*_`~\[\]]|\]\([^)]*\)", "", re.sub(r"<!--.*?-->", "", s or "", flags=re.S))
+    s = re.sub(r"^\s*(?:§|第)?\s*[0-9０-９]+(?:[.．\-][0-9０-９a-z]+)*[.．)）章節]?\s*", "", s, flags=re.I)
     return re.sub(r"[\s\W_]+", "", s).lower()
 
 
@@ -240,10 +248,14 @@ def match_headings(oh, nh):
         for j, n in enumerate(nh):
             v = (1.0 if o[2] == n[2] else 0.0) if exact_only else sim(o[2], n[2])
             if v >= SIM:
-                pairs.append((-v, abs(i / max(1, len(oh)) - j / max(1, len(nh))), i, j))
+                # 同点は括弧書きまで含めた見出しの近さで先に分け、並び位置はその後（章を入れ替えた版で、
+                # 「作り方（実測）」と「作り方」が位置の近い方へ取り違えられた。Soulful 2026-10-28）
+                fa, fb = _norm_full(o[1]), _norm_full(n[1])      # 部分一致を 1.0 にする sim は使わない
+                full = 1.0 if fa == fb else 2.0 * len(_bigrams(fa) & _bigrams(fb)) / max(1, len(_bigrams(fa)) + len(_bigrams(fb)))
+                pairs.append((-v, -full, abs(i / max(1, len(oh)) - j / max(1, len(nh))), i, j))
     pairs.sort()
     mo, mn = {}, set()
-    for _v, _d, i, j in pairs:
+    for _v, _f, _d, i, j in pairs:
         if i not in mo and j not in mn:
             mo[i] = j
             mn.add(j)
@@ -516,6 +528,8 @@ def declared(text):
     """本文の冒頭で、版の語と同じ文にある .md の参照（リンク先またはファイル名）。"""
     out = []
     for ln in (text or "").splitlines()[:DECL_LINES]:
+        if DEPRECATION_MARK.match(ln):
+            continue        # 自分の廃盤印の「後継: X.md」は後の版の宣言で、前の版ではない（Soulful 2026-10-28）
         refs = list(MDREF.finditer(ln))
         for k, m in enumerate(refs):
             ref = m.group(1) or m.group(2)
