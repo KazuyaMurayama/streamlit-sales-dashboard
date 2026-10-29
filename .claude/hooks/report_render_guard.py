@@ -23,6 +23,8 @@ WHY（2026-10-05 依頼者指摘・知的生産レポートで2件同時に実�
   F. 1ターンで1フォルダに日付で始まる名前のファイルを5本以上作るなら、名前の昇順を新しい順にする（警告）。
   G. 表の最小幅（改行できない並びの幅の列ごとの最大＋余白）を印刷時の本文幅 PRINT_WIDTH（595px）以下にする
      （2026-10-20 追加。詳細は G 節）。例外: 表の直前の行に <!-- width-ok: 理由（10字以上） -->。
+  H. 折り返されない枠（コードブロック）の中に、本文幅を超える文章の行を置かない（2026-10-29 追加。詳細は H 節）。
+     作業台帳（tasks.md 等）も対象（画面でも右が切れるため）。例外: ブロックの直前の行に <!-- width-ok: 理由 -->。
 
 止める範囲（2026-10-12 改訂。旧: 「違反の数が HEAD より増えたターンだけ」）:
   比べる相手はターン開始時点の版（ターン内でコミットしても失われない）。止めるのは ①新しい文書 ②違反の数が
@@ -479,6 +481,125 @@ def wide_tables(text):
     return out
 
 
+# ---- H. 折り返されないコードブロックの中の文章（2026-10-29 追加） ----
+# WHY: 2026-10-29 依頼者「添付のように途切れてるのって直せないですか？改行はしないで、最大の横幅が1ページ内に
+#   収まるようにしてほしい…再発防止もすべてのリポジトリで。途切れないようにするルールのはず」。Claude が
+#   Soulful-Content tasks.md（6fce8f1）に、note に貼る紹介文（日本語の段落）を ```text で囲んで保存した。GitHub の
+#   コードブロックは white-space:pre で折り返さず、画面では右が切れて横スクロール、印刷では切り取られる。G（表の幅）は
+#   表しか見ず、しかも作業台帳を外していたので、どちらの道でも止まらなかった。
+# 不変条件: コードブロック（図・プログラムの言語を除く）の行のうち、全角を CODE_PROSE_MIN 字以上含む行（＝文章）の表示幅
+#   （等幅 13.6px: 全角 13.6px・半角 8.2px・タブ 4 桁＋左右の余白 32px）が PRINT_WIDTH 以下。
+#   半角だけの行（コマンド・URL・コード）は数えない: 改行すると意味が変わり、横スクロールで読むのが普通のため。
+#   直し方: 文章は ``` で囲まず通常の段落にする（画面幅で折り返す）。行内の改行を保つなら行末に \ を付ける。
+# 較正（2026-10-29, tests/calibrate_report_render_guard.py。48リポ・直近30日・各最大50コミット＝2,280コミット）:
+#   H で止めるコミット 31/2,280（1.36%）。中身は note の紹介文（元事象）・LLM に渡すプロンプト・記入欄の様式・
+#   日本語名の tree・枠線の図で、どれも GitHub で右が切れる側（目視）。HEAD の負債（触れなければ知らせるだけ）は
+#   348/2,520 本（13.8%）。赤緑: tests/test_h_code_width.py は旧版（H なし）で 6 FAIL・新版で 0 FAIL。
+CODE_PAD = 32.0
+# プログラムの言語のブロックは数えない（2026-10-29 較正: BTC_backtest の python の日本語コメント行。直すと
+#   コードの書き方の問題になり、文章を枠に入れた問題ではない）。図のソースを畳んだ ```mermaid-src 等も数えない
+#   （render_diagrams.py が <details> に畳む形。画像が別にある）。数えるのは言語なし・text・markdown・未知の言語。
+CODE_LANGS = frozenset((
+    "python py python3 ipython pycon bash sh shell zsh console shell-session powershell ps1 pwsh bat cmd batch "
+    "javascript js jsx typescript ts tsx json jsonc json5 yaml yml toml ini cfg conf xml html css scss sql "
+    "r go rust rs java kotlin swift c cpp c++ cs csharp ruby rb php perl lua dockerfile makefile diff patch "
+    "regex graphql vba vb gas apps-script dax m excel latex tex math").split())
+# 全角（と半角カナ）が何字あれば文章の行とみなすか。初版の 10 は、英単語・パス混じりの日本語の技術文（全角9字・
+#   推定 1,611px）を見逃した（2026-10-29 Fable 攻撃検証）→ 3。
+CODE_PROSE_MIN = int(os.environ.get("REPORT_CODE_PROSE_MIN", "3"))
+
+
+def _code_char_w(ch):
+    """GitHub のコードブロック（等幅 13.6px）での1文字の幅（px）。"""
+    if ch in ("⁠", "​", "﻿", "\xad"):
+        return 0.0
+    if unicodedata.east_asian_width(ch) in ("W", "F"):
+        return 13.6
+    return 8.2
+
+
+_LIST_ITEM = re.compile(r"^\s{0,3}(?:[-*+]|\d+[.)])\s")
+_PRE_OPEN = re.compile(r"<pre\b", re.I)
+_PRE_CLOSE = re.compile(r"</pre\s*>", re.I)
+
+
+def _lang_key(lang):
+    """```python:main.py・```{r}・```js,linenos のような書き方から言語名だけを取る（2026-10-29 Fable 攻撃検証）。"""
+    return re.split(r"[:{},\s]", lang.strip("{}") + " ")[0]
+
+
+def _code_blocks(text):
+    """[(開始行 0 始まり, 中身の行のリスト, 指紋, 全行)]。図の言語は除く（描画されるので枠にならない）。
+    フェンス（``` ~~~）に加えて、字下げ4つのコードブロックと <pre> も数える（どちらも折り返さない。
+    2026-10-29 Fable 攻撃検証で見逃し）。"""
+    lines = _visible(text).split("\n")
+    blocks, inside = _code_mask(lines)
+    out = []
+    for s, e, lang in blocks:
+        key = _lang_key(lang)
+        if key in DIAGRAM_LANGS or key.split("-")[0] in DIAGRAM_LANGS:
+            continue
+        body = lines[s + 1:e] if e > s and FENCE_OPEN.match(lines[e]) else lines[s + 1:e + 1]
+        out.append((s, body, "code:" + "\n".join(x.rstrip() for x in body), lines, key in CODE_LANGS))
+    n, i = len(lines), 0
+    while i < n:
+        ln = lines[i]
+        if i in inside:
+            i += 1
+            continue
+        if _PRE_OPEN.search(ln):
+            j = i
+            while j < n and not _PRE_CLOSE.search(lines[j]):
+                j += 1
+            body = lines[i:min(j, n - 1) + 1]
+            out.append((max(i - 1, 0), body, "pre:" + "\n".join(x.rstrip() for x in body), lines, False))
+            i = j + 1
+            continue
+        exp = ln.expandtabs(4)
+        if ln.strip() and len(exp) - len(exp.lstrip(" ")) >= 4 and (i == 0 or not lines[i - 1].strip()):
+            prev = next((lines[k] for k in range(i - 1, -1, -1) if lines[k].strip()), "")
+            pexp = prev.expandtabs(4)
+            if not _LIST_ITEM.match(prev) and len(pexp) - len(pexp.lstrip(" ")) < 4:
+                j = i
+                while j + 1 < n and j + 1 not in inside and (
+                        not lines[j + 1].strip() or lines[j + 1].expandtabs(4).startswith("    ")):
+                    j += 1
+                while j > i and not lines[j].strip():
+                    j -= 1
+                body = lines[i:j + 1]
+                out.append((i - 1, body, "indent:" + "\n".join(x.rstrip() for x in body), lines, False))
+                i = j + 1
+                continue
+        i += 1
+    return out
+
+
+def wide_code_blocks(text):
+    """[(行, 最大幅px, [("コードブロック", 幅, 最長行)], 指紋, "code", 幅を超えた行数)]。"""
+    out, raw = [], text.split("\n")  # 例外印はコメントなので、コメントを消す前の行で探す
+    for s, body, sig, _lines, is_code in _code_blocks(text):
+        if any(WIDTH_OK.search(raw[x]) for x in range(max(0, s - 4), s)):  # G と同じく4行前まで
+            continue
+        over, worst = 0, None
+        for k, ln in enumerate(body):
+            wide_n = sum(1 for c in ln if unicodedata.east_asian_width(c) in ("W", "F", "H"))
+            if wide_n < CODE_PROSE_MIN:
+                continue
+            # プログラムの言語のブロックは、行の文字（空白以外）の半分以上が全角の行だけを文章とみなす。日本語コメント付きの
+            # コード行は数えず、```python で囲んだ文章は数える（2026-10-29 Fable 攻撃検証: 言語名だけで外すと素通し）
+            if is_code and wide_n * 2 < len(ln.replace(" ", "").replace("\t", "")):
+                continue
+            w = sum(_code_char_w(c) for c in ln.expandtabs(4)) + CODE_PAD
+            if w > PRINT_WIDTH:
+                over += 1
+                if worst is None or w > worst[1]:
+                    worst = (s + 2 + k, w, ln.strip())
+        if worst:
+            out.append((worst[0], int(round(worst[1])), [("コードブロック", int(round(worst[1])), worst[2])], sig,
+                        "code", over))
+    return out
+
+
 def findings(text, base_dir, exists=None):
     return diagram_violations(text, base_dir, exists), numbering_violations(text)
 
@@ -502,9 +623,10 @@ def classify(text, base, base_dir, exists=None, base_exists=None, name=""):
     dia, num = findings(text, base_dir, exists)
     seq = sequence_violations(text)
     wide = [] if os.path.basename(name).lower() in WIDTH_SKIP_NAMES else wide_tables(text)
+    wide = wide + wide_code_blocks(text)  # H は作業台帳も見る（画面でも右が切れる）
     if base is None:
         return (dia, num, seq, wide), ([], [], [], [])
-    base_sigs = {t[4] for t in nd.md_tables(base)}
+    base_sigs = {t[4] for t in nd.md_tables(base)} | {b[2] for b in _code_blocks(base)}
     wide_blk = [v for v in wide if v[3] not in base_sigs]
     wide_wrn = [v for v in wide if v[3] in base_sigs]
     bd, bn = findings(base, base_dir, base_exists or exists)
@@ -593,7 +715,13 @@ def _fmt(path, dia, num, seq=(), wide=()):
     for tl, col, bad, _sig in list(seq)[:6]:
         lines.append("  - %s:%d  表の「%s」列が連番でない（%s）" % (path, tl, col, "、".join(
             "%d の次が %d" % (a, b) for _k, a, b in bad[:4]) + (" ほか%d箇所" % (len(bad) - 4) if len(bad) > 4 else "")))
-    for tl, total, cols, _sig in list(wide)[:6]:
+    for v in list(wide)[:6]:
+        tl, total, cols = v[:3]
+        if len(v) > 4 and v[4] == "code":
+            lines.append("  - %s:%d  コードブロックの中の文章 %d行が本文幅 %dpx を超える（最長 約%dpx。折り返されず、画面では"
+                         "右が切れ、印刷では切り取られる）。例: 「%s」" % (
+                             path, tl, v[5], PRINT_WIDTH, total, cols[0][2][:40] + "…"))
+            continue
         lines.append("  - %s:%d  表の最小幅が約 %dpx で、印刷の本文幅 %dpx を超える（右端の列が印刷で切れる）。広い列: %s" % (
             path, tl, total, PRINT_WIDTH, "、".join("「%s」%dpx（改行できない並び「%s」）" % (
                 n[:12], w, r[:40] + ("…" if len(r) > 40 else "")) for n, w, r in cols[:3])))
@@ -613,7 +741,9 @@ RESOLVE = (
     "  表の幅 → 見出しの &numsp;・&nbsp;・&#8288; の水増しをやめる、長い URL は [短い表示名](URL) にする、"
     "英語の長い語・型番は <br> や空白で割る、列を減らすか表を2つに分ける。最小幅の推定は印刷の本文幅 595px 以下に。\n"
     "  本当に意図した違いなら、図・表の直前の行に <!-- render-ok: 理由 --> / <!-- numbering-ok: 理由 --> / "
-    "<!-- width-ok: 理由 -->（10字以上）。")
+    "<!-- width-ok: 理由 -->（10字以上）。\n"
+    "  コードブロックの文章 → 文章は ``` で囲まず通常の段落にする（画面幅で折り返す。手で改行を足さない）。"
+    "行内の改行を保つなら行末に \\ を付ける。箇条は - にする。コピー用の原稿もコードブロックにしない。")
 
 
 TIME_BUDGET = float(os.environ.get("REPORT_RENDER_TIME_BUDGET", "20"))
@@ -775,9 +905,10 @@ def on_stop(ev):
         _record_firing("report_render_guard", ev)
         parts = [
             "【見る場所で壊れるレポート】このターンで作成・変更した図・表に、印刷・PDF で消える図、"
-            "見出しと表で食い違う番号、連番になっていない番号の列、または印刷で右端が切れる幅の表がある"
+            "見出しと表で食い違う番号、連番になっていない番号の列、印刷で右端が切れる幅の表、"
+            "または折り返されずに右が切れるコードブロックの中の文章がある"
             "（2026-10-05 依頼者指摘: 印刷用で §3 の図が空、全51行動の表の No. ずれ／2026-10-20: 印刷で"
-            "「重要メッセージ」の列が途中から欠けて読めない）。\n" + "\n".join(block) + "\n" + RESOLVE]
+            "「重要メッセージ」の列が途中から欠けて読めない／2026-10-29: コードブロックに入れた紹介文が右で途切れた）。\n" + "\n".join(block) + "\n" + RESOLVE]
         if notes:
             parts.append("（あわせて）" + "\n".join(notes))
         _emit({"decision": "block", "reason": "\n".join(parts)})
