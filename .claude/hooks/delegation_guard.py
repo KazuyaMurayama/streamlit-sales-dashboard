@@ -95,6 +95,46 @@ draft for someone else); 「安心/理解/参考していただけると」「�
 …ありますか」 are no asks; 〜てくれますか・〜てもらえますでしょうか・頂戴・どの〜で…ますか・kindly are.
 Same 7 days / 200 turns: firing 22.0% (22.6% before), C03 recall 5/7.
 
+V4: STALL (2026-11-02, loop action C03 -- reports/CORRECTION_DIGEST_20261102.md)
+-------------------------------------------------------------------------------
+v2/v3 was followed by 14 more C03 corrections. Replaying the 14 answers before them (2026-10-14..26)
+through v3: 10 fired, 4 passed. Two of the 4 had no request at all -- the answer listed what was left
+and stopped: 2026-10-26 「Next Action: EV-3 の記事5本（…）の改稿を進めます。」 after 「残りの本数をすべて…
+一度の指示で進めて」 drew 「言われなくてもすすめるべきでは？」; 2026-10-15 「Next Action: 残りの課題のうち次に
+進めるのは、nt-059 の要因数の訂正と…の確認です。」 drew 「いちいち報告するまでもなく…直して」. v2/v3 look for a
+hand-off to the user; this defect hands over nothing -- it STOPS on a continuation Claude may decide.
+Invariant (stalled()): the closing (Next Action section, else the last 300 chars; code, 「quotes」 and
+> quotes removed) leaves work open --
+  * ask      = a question whose only answer is "go on" (a proceed verb + 〜ますか／〜てよいですか／
+               どうしますか／このまま…ですか, ending in ？), or English shall I / want me to
+  * offer    = continuing is offered on the user's wish (必要なら／よければ／一言いただければ … 進めます)
+  * announce = an own-future verb (〜ます non-past / 〜る予定, no ご/お honorific = not the user's act) in a
+               Next Action line or next to 残り・未着手・次は; or 「次に進めるのは〜は」
+-- and the closing names no stake only the user can settle (STAKE: irreversible/destructive, money,
+publication/sending, the user's will or taste, no permission, an external event to wait for, a
+/compact stop). Exempt by the instruction: it said not to go on yet (実行はまだ・計画だけ), it only asked
+a question, or it bounded the batch (「まず最初の2つ」「次の2本」). Blocked once per instruction (same mark).
+CALIBRATION (2026-11-02, tests/calibrate_delegation_guard_v4.py, real main-agent turns, answers
+deduplicated, the hook's own functions imported): 21 days 313 turns -> v4 adds 24 fires (7.7%; v2+v3
+already 20.8%, total 28.4%); 45 days 610 turns -> +44 (7.2%; total 35.9%). Eyeball of the 21-day 24:
+~19 stalls after 「はい、進めて」「残りをすべて」「できるだけ10本以上」, 2 false (「改めるなら…直して配布します」
+a hypothetical; 「この方針でよければ…直します」 a plan approval), 3 unclear. Removed before that: plan-only
+prompts, question-only prompts and bounded batches (30 -> 24 fires; 6 of the removed were 「次の2本を
+レポートにして」 followed by 「次は7本目…を進めます」). C03 recall on the 14: v3 10/14 -> v4 12/14. Left:
+2026-10-22 「実行するタイミングはお任せしました」 (a reload Claude could run) and 2026-10-14 07:52
+(ねんきんネット登録 + a Gmail search hidden behind a user-only act); and an answer that, once blocked,
+adds an attempt (a permission denial) and stops again (10-19 23:48, 10-20 07:36). Tests:
+tests/test_delegation_guard.py (FIRE_V4 / PASS_V4; HOOK=<old copy> shows v3 passes the FIRE_V4 cases).
+V4.1 (2026-11-02, Sonnet adversarial review, fixtures/adversarial_delegation_v4_20261102.json: 118 stalls,
+74 legit): v4.0 missed 78/118 (サ変「修正します」「対応予定」「後日」, a stake word anywhere in the closing
+passed it, English, 名詞止め「次は記事7。」, 「残り12本です」) and stopped 25/74 (choices, approvals, waits,
+all done, 「方針を教えて」). Now every excuse is read in the stall's own sentence/bullet (negated stakes
+「通知は不要」 and 「公開済み」 do not count; 留保/代替案 lines are dropped), every sentence of the Next Action
+paragraph is a candidate, an all-done closing without a remaining count passes, and only an instruction
+that orders work (直して・進めて・全部…) can be stalled. Same 21 days / 313 turns: v4 adds 49 (15.7%; total
+36.4%); eyeball of the 49: ~33 stalls, ~11 false (fact lines 「残りは次の理由で止まっています」, 「決まれば」
+「わかり次第」 waits, 「認める場合は」), ~5 unclear.
+
 Deployed from claude-governance/templates/hooks/ -- edit there, not here.
 """
 import hashlib
@@ -443,6 +483,143 @@ def unattempted(final, tools):
     return None
 
 
+# ---- v4: stall -- the answer stops on a continuation Claude could decide itself ----------------
+# (see V4 in the docstring). v4.1 (2026-11-02, Sonnet adversarial ~100 cases): every excuse is judged
+# on the SAME sentence (or bullet item, with a trailing （…） joined) as the stall, never on the closing
+# as a whole -- a stake word in another line, the 留保 or a list no longer passes it. Inside a Next Action
+# section every sentence is a candidate (the section IS "what happens next"); outside it a sentence is
+# a candidate when it names remaining work, asks to go on, or offers to go on.
+REMAIN_POS = re.compile(r"残り|残る|残って|残件|未着手|未対応|未処理|以降|引き続き|続き|続け|続行|継続|次は|次に|次の(?:作業|ステップ|バッチ|手順|段階)"
+                        r"|後日|次回|別セッション|次のターン|次のメッセージ|順次|再開"
+                        r"|(?i:\bremaining\b|\bnext\s+i'?ll\b|\bi\s+will\s+(?:proceed|continue|fix|do|work)|\bcontinue\s+with\b|\bproceed\s+(?:to|with)\b)")
+# a count of work still open (「残り12本」「未着手」「除き」): it defeats an all-done statement in the closing
+REMAIN_COUNT = re.compile(r"残り\s*(?:[1-9１-９][0-9０-９]*|[一二三四五六七八九十])|未着手|未対応|未処理|を除き|(?i:remaining:?\s*[1-9])")
+PROCEED_Q = re.compile(r"(?:ますか|ましょうか|ませんか|ですか|でしょうか|いい|よい|良い|続ける|やる|進める)\s*[？?]|(?:ますか|ましょうか|でしょうか)[。]?$"
+                       r"|(?i:\b(?:shall|should)\s+i\b|\bwant\s+me\s+to\b|\bdo\s+you\s+want\s+me\b|\bwould\s+you\s+like\s+me\b)")
+OFFER = re.compile(r"(?:ご?指示|ご?希望|ご?要望|ご?依頼|必要|よろしけれ|よけれ|一言)(?:が|を|で|さえ)?(?:あれば|でしたら|なら|であれば|いただければ|いただけたら|もらえれば|もらえたら|くだされば)"
+                   r"|お申し付け|(?i:\blet\s+me\s+know\s+(?:if|and|when)\b)")
+# a choice between options or an approval of a plan/text/design is a real decision -- not "go on?"
+CHOICE = re.compile(r"どちら|どれ|いずれ|[A-ZＡ-Ｚ]案|案[A-ZＡ-Ｚ]|か[、,]|好み|文体"
+                    r"|(?:方針|文面|設計|構成|内容|書き方|宛先|順序|案|形|型|仕様|計画|方向性)(?:で|は|を)[^。？?]{0,12}(?:よろしい|よい|いい|良い|進め|問題|大丈夫|OK)"
+    r"|(?:推奨|おすすめ)(?:どおり|通り)で(?:よければ|よろしければ)|意図(?:でしたら|なら)"
+    r"|(?:でよければ|でよろしければ|で問題なければ|でよいなら)"
+    r"|(?:改める|変える|採る|使う|まとめる|やる|採用する)(?:なら|つもりがあれば|のであれば)|つもりがあれば")
+DECIDE = re.compile(r"(?:決め|選ん|選択し|承認し|判断し)(?:て|てください)|承認を(?:ください|お願い)|ご(?:判断|承認|決定)|お決め|お選び")
+# stakes only the user can settle, read in the stall's own sentence. 「公開済み」「投稿用」 describe a thing;
+# 「通知は不要」「公開は別途」「必要はありません」 negate the stake.
+STAKE = re.compile(
+    r"force|--force|強制|削除(?!済|した)|消去|取り消せ|元に戻せ|戻せな|不可逆|上書き|rm\s+-|drop\b|reset\s+--hard"
+    r"|課金|料金|費用|有料|支払|購入|入金|出金|送金|振込|発注|注文|契約|売却|建玉"
+    r"|公開(?!済|版|中|され)|投稿(?!済|用)|出品|送信(?!済)|メールを送|提出|申請|応募|publish|本番"
+    r"|好み|本人|ご自身|お好み|価値観|既決定"
+    r"|権限|denied|拒否され|ブロックされ|ログインが必要|サインイン|上限に達"
+    r"|/compact|/clear|(?:私|こちら)(?:から|で)は?できません|できない操作|推奨|勧め", re.I)
+NEG_AFTER = re.compile(r"^[^。]{0,8}?(?:は不要|は別|不要|は要りません|ではない|でなく|せず|しない|しません|なし|無し|の必要はな|する必要はな|必要はありません|はありません)")
+# an external event to wait for, in the same sentence: time, a run, someone else's reply
+WAIT = re.compile(
+    r"(?:結果|ビルド|ジョブ|job|build|CI|テスト|レビュー|返信|返事|約定|反映|通知|処理|実行|承認|入金|審査|集計)[^。]{0,8}"
+    r"(?:が出たら|が付いたら|がついたら|が終わったら|が終わり次第|が来たら|を受けて|を待|待ち|完了後|が完了したら|したら|されたら|後に|次第)"
+    r"|来週|翌朝|明日|翌日|来月|[0-9０-９]+\s*(?:日|週間|か月|ヶ月|時間)後|[月火水木金土日]曜|定期(?!実行せず)|自動実行|cron|次の朝|朝の"
+    r"|戻ったら|戻ってから|戻り次第|届いたら|届き次第|終わり次第|が出たら|が来たら"
+    r"|作業中|決まるまで|決まったら|決まり次第|ログイン"
+    r"|次回(?:から|の[^。]{0,8}(?:時|際)|セッションで結果)|作成時に|書くときに|以降の新規|今後"
+    # a step that depends on the outcome of the waited-for event (「差分があれば修正する」 after 「自動実行を確認する」)
+    r"|(?:差分|問題|不具合|エラー|失敗|違い|ずれ|異常|FAIL|NG)[^。]{0,4}(?:があれば|が出れば|が出たら|なら|の場合)"
+    r"|(?i:\bwait|\bwhen\s+(?:it|the)\b|\bonce\s+(?:it|the)\b|\bafter\s+(?:it|the)\b|\bbackground\b|\bnotified\b|\brunning\b)", re.I)
+DONE_LOCAL = re.compile(r"^\W*(?:なし|無し|特になし|特にありません|ありません|不要|完了|終了|以上|—|-|n/?a|none|nothing\s+further)\W*$"
+                        r"|済み|済です|完了し|完了です|終わりです|これで(?:完了|終わ)|終わりました|終わったので|ありません|ゼロ|0\s*本|不要です"
+                        r"|(?i:\bdid\s+everything\b|\ball\s+done\b|\bnothing\s+further\b)", re.I)
+ALL_DONE = re.compile(r"(?:全部|すべて|全て|全件|[0-9０-９]+\s*本すべて)[^。]{0,10}?(?:直し(?!て(?:ください|ほしい))|完了|済|終わ|修正し|対応し)"
+                      r"|依頼は(?:全て|すべて)?終わ|(?i:\bi\s+did\s+everything\b|\ball\s+done\b)")
+PAST = re.compile(r"(?:ました|でした|済み|済)[。！]?$")
+# the instruction itself said not to go on yet (「計画を立てて（実行はまだ）」「確認だけ」): stopping is the order
+HOLD = re.compile(r"実行はまだ|まだ実行し(?:ない|なくて)|実行せず|実行しないで|着手しないで|着手はまだ|まだ(?:進め|着手|やら|手を付け)(?:ない|なくて|ずに)"
+                  r"|計画(?:だけ|のみ)|案(?:だけ|のみ)|提案(?:だけ|のみ)|確認だけ|質問だけ|見るだけ|調べるだけ|待って|止めて|ストップ|中断して|一旦止")
+# an instruction that orders work which can leave something open. 「教えて」「考えて」「計画を立てて」「調べて」
+# 「確認して」 order an answer, not a batch of work: offering more after them is not a stall.
+ACTION_ORDER = re.compile(r"(?:進め|すすめ|続け|やっ|直し|作っ|書い|まとめ|入れ|足し|変え|消し|実行し|対応し|修正し|反映し|改稿し"
+                          r"|置い|使っ|実装し|更新し|追加し|処理し|検証し|移し|片づけ|片付け|仕上げ|作成し|整理し|適用し)て"
+                          r"|お願い|やれ|しろ|せよ|しなさい|全部|すべて|残り|^(?:はい|OK|ok|うん|了解|GO|go)\b", re.M)
+# the instruction bounded the batch (「まず最初の2つ」「次の2本」「1ファイルだけ」「5本目まで」): naming the next batch
+# after finishing this one is the plan, not a stall. 「できるだけ10本以上」「残りをすべて」 bound nothing.
+BOUNDED = re.compile(r"(?:まず|最初の|はじめの|初めの|次の|今回は?|この)[^。\n、]{0,12}?(?:[0-9０-９]+|[一二三四五六七八九十])\s*(?:つ|本|件|個|冊|回|科目|記事|行)"
+                     r"|(?:[0-9０-９]+|[一二三四五六七八九十])\s*(?:つ|本|冊|回)目(?:まで)?|(?:[0-9０-９]+|[一二三四五六七八九十])\s*[^\s。、]{0,4}?(?:だけ|のみ)")
+NA_LABEL = re.compile(r"(?m)^\W{0,4}Next Action\W{0,4}[:：]")
+
+
+def _instruction_exempt(prompt):
+    p = re.sub(r"<pasted_content.*?(?:</pasted_content>|$)", " ", prompt or "", flags=re.S)
+    return bool(HOLD.search(p) or BOUNDED.search(p) or not ACTION_ORDER.search(p))
+
+
+def _units(text):
+    """Sentences / bullet items; a （…） right after 「。」 stays with its sentence."""
+    out = []
+    for line in text.split("\n"):
+        line = re.sub(r"^\s*(?:[-*・]|\d+[.)．])\s*", "", line).strip()
+        for s in re.split(r"(?<=[。！？!?])(?![（(])|(?<=[.])\s+(?=[A-Z])", line):
+            s = s.strip().strip("*").strip()
+            if s:
+                out.append(s)
+    return out
+
+
+def _stake_here(s):
+    for m in STAKE.finditer(s):
+        if not NEG_AFTER.search(s[m.end():]):
+            return True
+    return False
+
+
+def stalled(answer, prompt=""):
+    """Return (kind, sentence) when the closing stops on a continuation Claude could decide, else None."""
+    if _instruction_exempt(prompt):
+        return None
+    a = re.sub(r"```.*?```", " ", answer or "", flags=re.S)
+    a = re.sub(r"`[^`\n]*`", " ", a)
+    a = re.sub(r"「[^」]{0,200}」", "「」", a)
+    a = re.sub(r"(?m)^\s*>.*$", " ", a)
+    labels = list(NA_LABEL.finditer(a))
+    # from the FIRST Next Action label (an earlier one can hold the stall, 「…進めます。／Next Action: なし」)
+    tail = a[labels[0].start():] if labels else a[-300:]
+    # the 留保 / 代替案 lines are the answer's caveats, not its next step, and never an excuse
+    tail = re.sub(r"(?m)^\W{0,4}(?:留保|代替案|推奨)\W{0,4}[:：].*$", " ", tail)
+    if ALL_DONE.search(a[-600:]) and not REMAIN_COUNT.search(tail):
+        return None
+    in_na, last = False, ""
+    for raw in tail.split("\n"):
+        if NA_LABEL.match(raw):
+            in_na = True
+            raw = NA_LABEL.sub("", raw, count=1)
+        elif not raw.strip():
+            in_na = False       # the section is the label's paragraph (and the bullets right under it)
+            continue
+        if re.match(r"^\s*\|", raw):
+            continue            # a table row (deliverables, request mapping) is not the next step
+        for s in _units(raw):
+            prev, last = last, s
+            q, o = PROCEED_Q.search(s), OFFER.search(s)
+            if not (in_na or q or o or REMAIN_POS.search(s)):
+                continue
+            if _stake_here(s) or WAIT.search(s) or DECIDE.search(s):
+                continue
+            if CHOICE.search(prev + s if q else s):
+                continue
+            # a statement of fact in the section (「この節の更新は止まっています」「〜などです」) names no work left
+            if not (q or o) and not REMAIN_POS.search(s) and re.search(r"(?:です|ています|ていません|ません|でした)[。！]?$", s):     # 「A案とB案があります。どうしますか？」
+                continue
+            if not o and (ASK.search(s) or re.search(r"ください|下さい", s)) and not REMAIN_COUNT.search(s):
+                continue        # a request to the user: v3's job, not a stall
+            if DONE_LOCAL.search(s) and not REMAIN_COUNT.search(s):
+                continue
+            if PAST.search(s) and not q and not REMAIN_POS.search(s):
+                continue
+            if re.search(r"(?:何か|気になる点|違え|問題が)[^。]{0,10}(?:あれば|ば)", s) and not o:
+                continue
+            return ("ask" if q else "offer" if o else "announce", s)
+    return None
+
+
 def read_turn_full(tp):
     """(prompt, ts, final text, [(tool name, input json)]) of the last turn.
     final = every text block after the last tool call; if that is a stub
@@ -506,13 +683,16 @@ def main():
     prompt, pts, answer = read_turn(tp)
     hit = decide(answer) if prompt else None
     batch = None if hit or not prompt else decide_batch(answer)
-    v3 = None
+    v3, final = None, ""
     if prompt and not hit and not batch:
         _p, _t, final, tools = read_turn_full(tp)
         v3 = unattempted(final, tools)
     if v3 and v3[0] == "batch":
         batch, v3 = v3[1], None
-    if not hit and not batch and not v3:
+    stall = None
+    if prompt and not hit and not batch and not v3:
+        stall = stalled(final, prompt)
+    if not hit and not batch and not v3 and not stall:
         return
     # keyed on the prompt's timestamp too: the same words sent again later
     # (「再開して」) are a new instruction and must be checked again
@@ -536,6 +716,19 @@ def main():
                   "「変えたければ言ってください」で済ませる。"
                   "残るのは、取り消せない・本人しか知らない・既決定を変える、のどれかに当たる項目だけで、"
                   "推奨と理由を添えて1つずつ聞く（CLAUDE.md §11.2）。仕分けの結果を書き直して回答し直せ。" % batch)
+        sys.stdout.buffer.write(json.dumps({"decision": "block", "reason": reason}, ensure_ascii=True).encode("ascii"))
+        return
+    if stall:
+        kind, sent = stall
+        what = {"ask": "続けてよいかをユーザーに尋ねて止まっている",
+                "offer": "ユーザーの希望・指示があれば続けると申し出て止まっている",
+                "announce": "残りの作業を自分の次の手順として書いたまま止まっている"}[kind]
+        reason = ("【丸投げ検査v4・自分で決められる続行で停止（1回のみ）】回答の締めが、%s（「%s」）。"
+                  "ユーザーにしか決められない争点（取り消せない操作・削除・お金・公開や送信・本人の意思や好み・権限が無い・"
+                  "外部の出来事を待つ）が締めに書かれていない。その続行は自分で決めてよいので、このターンで続けて実行し、"
+                  "終わった結果を報告し直せ（CLAUDE.md Top10 の6「事前確認しない」・§11.2）。止める理由が本当にあるなら、"
+                  "どの争点か（例: 「削除は取り消せないため」「課金が発生するため」「/compact が必要なため」）を締めに1文で書け。"
+                  % (what, sent[:120]))
         sys.stdout.buffer.write(json.dumps({"decision": "block", "reason": reason}, ensure_ascii=True).encode("ascii"))
         return
     if v3:

@@ -185,7 +185,24 @@ NO HEADLESS EXEMPTION: CLAUDE_HEADLESS_JOB=1 (unattended auto-implementation
 runs) is deliberately not a skip condition. An unattended run is the one with
 nobody watching for a prose-only countermeasure.
 
-LOOP SAFETY: `stop_hook_active` -> return, so at most one block per answer.
+2026-11-02: PROOF (f) -- REMOTE BYTES, NOT THE ACT OF DEPLOYING (C08)
+-------------------------------------------------------------------
+Digest 2026-11-02 marked this gate 「撤回・再設計」 (2 recurrences after the
+10-12 redesign). Representative: 2026-10-29 「添付のように途切れてるのって…
+再発防止もすべてのリポジトリでやってほしい」. (b) only proved deploy_all.py
+RAN; deploy_all.py never pushes, so whether 48 remotes hold the new guard was
+carried by the answer's sentence alone. New proof (f): when a canonical
+templates/hooks/<name> was written, every target deploy_all.py writes (scope,
+shadow clones dropped), the governance remote and ~/.claude/hooks must hold
+the same bytes (BOM/CRLF normalised), re-read by the gate at Stop from
+refs/remotes/origin/<main|master>, AND scripts/verify_deploy_remote.py (which
+git-fetches every target first) must have run this turn. See the section
+「(f) REMOTE BYTE VERIFICATION」 and tests/test_countermeasure_gate_remote.py
+(old gate: the 4 defect cases pass silently; new: they block, 3 correct
+cases pass).
+
+LOOP SAFETY: `stop_hook_active` -> only (f) is re-evaluated, and the same
+(f) block is repeated at most F_MAX_BLOCKS (2) times per session.
 FAIL-OPEN: any exception -> exit 0.
 Deployed from claude-governance/templates/hooks/ -- edit there, not here.
 """
@@ -194,6 +211,7 @@ import json
 import os
 import re
 import shlex
+import subprocess
 import sys
 from datetime import datetime, timezone
 
@@ -1620,6 +1638,513 @@ LABELS = {
 }
 
 
+# =========================================================================
+# (f) REMOTE BYTE VERIFICATION -- C08 2026-11-02 (correction digest:
+#     countermeasure_gate v3 「撤回・再設計」, 2 recurrences after 10-12)
+# -------------------------------------------------------------------------
+# DEFECT: (b) asked only that `deploy_all.py` RAN. deploy_all.py never pushes,
+# skips shadow clones, and a repo on a feature branch keeps the old copy -- so
+# "(b) met" said nothing about what the remotes hold; 「全リポに配布・push 済み」
+# was the only evidence.
+# CLASS (one sentence): the gate accepted the ACT of distributing (a tool call
+# was made, a sentence says it was pushed) instead of the distributed STATE.
+# INVARIANT v2 (Sonnet attack 2026-11-02: 30 misses / 8 false positives on v1,
+# which read "what was written" from tool calls and trusted that
+# verify_deploy_remote.py had fetched):
+#   * WHAT CHANGED is read from git STATE of the governance repo, not from tool
+#     calls: uncommitted/untracked/deleted/renamed paths, commits not on
+#     origin, and origin commits made since the turn started, under
+#     templates/hooks, templates/files, scripts, index/HOOK_MANIFEST.json.
+#     (Edit-to-delete, rm, git mv, python -c, heredoc, WriteAllText, a
+#     subagent's sed -i -- all are just "the file differs".)
+#   * Anything uncommitted or unpushed there -> block (canonical not pushed).
+#   * Every changed manifest hook / files[] entry must hold the same bytes
+#     (BOM dropped, CRLF/CR->LF, trailing newlines ignored) on every target
+#     deploy_all.py writes (scope, shadow clones dropped) at the remote's
+#     DEFAULT branch (`git ls-remote --symref origin HEAD`), and in
+#     ~/.claude/hooks for unscoped hooks. The gate itself ls-remotes every
+#     target and fetches the ones whose tracking ref is stale (threaded, hard
+#     time budget). No ls-remote answer -> UNVERIFIED -> block, never pass.
+#   * A changed hook with 0 enumerated targets (governance edited in a clone
+#     or worktree outside the repos dir) -> block.
+#   * test_* / calibrate_* / _* files and tests/ are ignored unless the
+#     manifest lists them; other unlisted templates block (never deployed).
+#   * Exemption: COUNTERMEASURE_EXEMPT.json written this turn with a valid
+#     reason AND naming the hook.
+#   * stop_hook_active no longer skips (f); a session is blocked for the same
+#     (f) reason at most F_MAX_BLOCKS times (state file) -- loop safety.
+# =========================================================================
+VERIFY_SCRIPT = "verify_deploy_remote.py"
+GLOBAL_HOOKS_ENV = "COUNTERMEASURE_GATE_GLOBAL_HOOKS"   # tests override ~/.claude/hooks
+F_PATHS = ("templates/hooks", "templates/files", "scripts", "index/HOOK_MANIFEST.json")
+F_BUDGET_S = float(os.environ.get("COUNTERMEASURE_GATE_F_BUDGET", "90"))
+F_MAX_BLOCKS = 2
+_IGNORED_TPL_RE = re.compile(r"^(?:test_|calibrate_|_)|\.(?:pyc|md|txt|json)$", re.I)
+
+
+def _norm_bytes(b):
+    if b is None:
+        return None
+    if b.startswith(b"\xef\xbb\xbf"):
+        b = b[3:]
+    return b.replace(b"\r\n", b"\n").replace(b"\r", b"\n").rstrip(b"\n")
+
+
+def _win_path(p, cwd=None):
+    p = (p or "").strip().strip("'\"")
+    m = re.match(r"^/([a-zA-Z])/(.*)$", p)            # Git Bash /c/Users/...
+    if m:
+        p = m.group(1).upper() + ":/" + m.group(2)
+    if cwd and not os.path.isabs(p):
+        p = os.path.join(_win_path(cwd), p)
+    return os.path.normpath(p)
+
+
+def _git_out(repo, args, stdin=None, timeout=30):
+    try:
+        p = subprocess.run(["git", "-C", repo] + args, input=stdin,
+                           capture_output=True, timeout=timeout)
+        return p.returncode, p.stdout
+    except Exception:
+        return 1, b""
+
+
+def _gov_root_of(path):
+    d = path if os.path.isdir(path) else os.path.dirname(path)
+    for _ in range(12):
+        if os.path.isfile(os.path.join(d, "index", "HOOK_MANIFEST.json")):
+            return d
+        nd = os.path.dirname(d)
+        if nd == d:
+            return None
+        d = nd
+    return None
+
+
+_ABS_TOKEN_RE = re.compile(r"(?:[A-Za-z]:[\\/]|/[a-zA-Z]/)[^\s'\";|&<>()]+")
+
+
+def _gov_roots(uses, cwd=None):
+    """Governance roots this turn touched: cwd inside one, any absolute path
+    in a tool input inside one, or cwd's sibling claude-governance when a tool
+    input names it / templates/hooks / HOOK_MANIFEST."""
+    roots = set()
+    texts = []
+    for _n, inp in uses:
+        for k in ("file_path", "notebook_path", "command", "path"):
+            v = inp.get(k)
+            if isinstance(v, str):
+                texts.append(v)
+                if k != "command" and cwd and v.strip() and not os.path.isabs(v.strip()):
+                    r = _gov_root_of(_win_path(v, cwd))
+                    if r:
+                        roots.add(os.path.normcase(r))
+    if cwd:
+        r = _gov_root_of(_win_path(cwd))
+        if r:
+            roots.add(os.path.normcase(r))
+    for t in texts:
+        for tok in _ABS_TOKEN_RE.findall(t):
+            r = _gov_root_of(_win_path(tok))
+            if r:
+                roots.add(os.path.normcase(r))
+        if cwd and not os.path.isabs(t.strip()) and t.strip():
+            r = _gov_root_of(_win_path(t.strip().split()[0], cwd)) if "\n" not in t else None
+            if r:
+                roots.add(os.path.normcase(r))
+    blob = "\n".join(texts)
+    if cwd and re.search(r"claude-governance|templates[/\\]hooks|HOOK_MANIFEST", blob):
+        top = _win_path(cwd)
+        for _ in range(6):
+            cand = os.path.join(os.path.dirname(top), "claude-governance")
+            if os.path.isfile(os.path.join(cand, "index", "HOOK_MANIFEST.json")):
+                roots.add(os.path.normcase(cand))
+                break
+            if os.path.dirname(top) == top:
+                break
+            top = os.path.dirname(top)
+    return roots
+
+
+def _remote_head(repo, timeout=20):
+    """(branch, sha) of origin's default branch via ls-remote, or (None, err)."""
+    code, out = _git_out(repo, ["ls-remote", "--symref", "origin", "HEAD"],
+                         timeout=timeout)
+    if code != 0 or not out:
+        return None, "ls-remote failed"
+    br = sha = None
+    for ln in out.decode("utf-8", "replace").splitlines():
+        m = re.match(r"^ref:\s+refs/heads/(\S+)\s+HEAD$", ln)
+        if m:
+            br = m.group(1)
+        m = re.match(r"^([0-9a-f]{40})\s+HEAD$", ln)
+        if m:
+            sha = m.group(1)
+    if not br or not sha:
+        return None, "remote HEAD unresolved"
+    return br, sha
+
+
+def _fresh_ref(repo, deadline):
+    """Make refs/remotes/origin/<default> equal the remote; returns ref or
+    (None, reason)."""
+    left = max(1.0, deadline - _now())
+    br, sha = _remote_head(repo, timeout=min(20, left))
+    if br is None:
+        return None, sha
+    ref = "refs/remotes/origin/" + br
+    code, out = _git_out(repo, ["rev-parse", "-q", "--verify", ref])
+    if out.strip().decode("ascii", "replace") != sha:
+        left = max(1.0, deadline - _now())
+        _git_out(repo, ["fetch", "-q", "origin", br], timeout=min(60, left))
+        code, out = _git_out(repo, ["rev-parse", "-q", "--verify", ref])
+        if out.strip().decode("ascii", "replace") != sha:
+            return None, "fetch failed/timed out (tracking ref stale)"
+    return ref, None
+
+
+def _now():
+    import time
+    return time.time()
+
+
+def _cat(repo, ref, rels):
+    lines = ["%s:%s" % (ref, x) for x in rels]
+    code, out = _git_out(repo, ["cat-file", "--batch"],
+                         stdin=("\n".join(lines) + "\n").encode("utf-8"))
+    res, pos = {}, 0
+    for rel in rels:
+        nl = out.find(b"\n", pos)
+        if nl < 0:
+            res[rel] = None
+            continue
+        head = out[pos:nl].split()
+        pos = nl + 1
+        if len(head) == 3 and head[1] == b"blob":
+            size = int(head[2])
+            res[rel] = out[pos:pos + size]
+            pos += size + 1
+        else:
+            res[rel] = None
+    return res
+
+
+def _load_deploy_all(root):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "_cmg_deploy_all", os.path.join(root, "scripts", "deploy_all.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _changed_paths(root, ref, since):
+    """Paths under F_PATHS that differ locally from `ref`, or that origin
+    commits since `since` (epoch) touched. Returns (changed:set, unpushed:set)."""
+    spec = ["--"] + list(F_PATHS)
+    unpushed = set()
+    code, out = _git_out(root, ["status", "--porcelain=v1", "-z",
+                                "--untracked-files=all"] + spec)
+    parts = out.decode("utf-8", "replace").split("\0")
+    i = 0
+    while i < len(parts):
+        e = parts[i]
+        i += 1
+        if len(e) < 4:
+            continue
+        unpushed.add(e[3:])
+        if e[0] in "RC":            # rename/copy: next entry is the source
+            if i < len(parts) and parts[i]:
+                unpushed.add(parts[i])
+            i += 1
+    code, out = _git_out(root, ["diff", "--name-only", "-z", "--no-renames",
+                                ref, "HEAD"] + spec)
+    unpushed |= {p for p in out.decode("utf-8", "replace").split("\0") if p}
+    changed = set(unpushed)
+    if since:
+        code, out = _git_out(root, ["log", "--since=@%d" % int(since - 5),
+                                    "--format=", "--name-only", "--no-renames",
+                                    ref] + spec)
+        changed |= {p.strip() for p in out.decode("utf-8", "replace").splitlines()
+                    if p.strip()}
+    # tests and helpers are not distributed: tests/, test_*, calibrate_*, _*
+    junk = re.compile(r"(?:^|/)__pycache__/|\.pyc$|(?:^|/)tests/|(?:^|/)(?:test_|calibrate_|_)[^/]*$")
+    return ({p for p in changed if not junk.search(p)},
+            {p for p in unpushed if not junk.search(p)})
+
+
+def remote_mismatches(root, names=None, since=None, deadline=None):
+    """[(target, name, status)]; empty == everything changed is on every
+    target's remote. `names` (hook file names) adds to what git state shows."""
+    from concurrent.futures import ThreadPoolExecutor
+    deadline = deadline or (_now() + F_BUDGET_S)
+    bad = []
+    try:
+        da = _load_deploy_all(root)
+        hooks, files = da.load_manifest(root)
+    except Exception as e:
+        return [("scripts/deploy_all.py", "*", "deploy_all_unimportable: %s" % e)]
+    by_name = {h["name"]: h for h in hooks}
+    by_src = {f["src"].replace("\\", "/"): f for f in files}
+    gref, err = _fresh_ref(root, deadline)
+    if gref is None:
+        return [(os.path.basename(root), "*", "UNVERIFIED governance remote: %s" % err)]
+    changed, unpushed = _changed_paths(root, gref, since)
+    for p in sorted(unpushed):
+        bad.append((os.path.basename(root), p, "not_pushed_canonical"))
+    want_hooks, want_files = {}, {}
+    hook_names = set(names or ())
+    for p in changed:
+        m = re.match(r"^templates/hooks/([^/]+)$", p)
+        if m:
+            hook_names.add(m.group(1))
+        m = re.match(r"^templates/files/(.+)$", p)
+        if m:
+            src = m.group(1)
+            if src in by_src:
+                want_files[src] = by_src[src]
+            elif not re.match(r"^(?:test_|calibrate_|_)", src.rsplit("/", 1)[-1]):
+                bad.append(("index/HOOK_MANIFEST.json", "templates/files/" + src,
+                            "not_in_manifest"))
+    for n in sorted(hook_names):
+        path = os.path.join(root, "templates", "hooks", n)
+        if n not in by_name:
+            if not _IGNORED_TPL_RE.search(n) and os.path.exists(path):
+                bad.append(("index/HOOK_MANIFEST.json", n, "not_in_manifest"))
+            continue
+        try:
+            with open(path, "rb") as f:
+                want_hooks[n] = _norm_bytes(f.read())
+        except Exception:
+            bad.append(("templates/hooks", n, "template_missing (manifest still lists it)"))
+    for src, ent in list(want_files.items()):
+        try:
+            with open(os.path.join(root, "templates", "files", src), "rb") as f:
+                want_files[src] = (ent, _norm_bytes(f.read()))
+        except Exception:
+            bad.append(("templates/files", src, "template_missing (manifest still lists it)"))
+            del want_files[src]
+    if not want_hooks and not want_files:
+        return bad
+    gdir = os.environ.get(GLOBAL_HOOKS_ENV) or os.path.join(
+        os.path.expanduser("~"), ".claude", "hooks")
+    for n, b in want_hooks.items():
+        if not da.in_scope(by_name[n], "~/.claude (global)"):
+            continue
+        try:
+            with open(os.path.join(gdir, n), "rb") as f:
+                if _norm_bytes(f.read()) != b:
+                    bad.append(("~/.claude/hooks", n, "global_differs"))
+        except Exception:
+            bad.append(("~/.claude/hooks", n, "global_missing"))
+    parent = os.path.dirname(root)
+    repos = sorted(d for d in os.listdir(parent)
+                   if os.path.isdir(os.path.join(parent, d, ".git")))
+    if os.path.normcase(os.path.basename(root)) not in {os.path.normcase(r) for r in repos}:
+        return bad + [(root, "*", "governance root is not in its repos dir "
+                       "(worktree/clone?) -- 0 distribution targets enumerated")]
+    try:
+        repos, _shadow = da._drop_shadow_clones(parent, repos)
+    except Exception:
+        pass
+
+    def one(repo_name):
+        need = {".claude/hooks/" + n: b for n, b in want_hooks.items()
+                if da.in_scope(by_name[n], repo_name)}
+        for src, (ent, b) in want_files.items():
+            if da.in_scope(ent, repo_name):
+                need[ent["dest"].replace("\\", "/")] = b
+        if not need:
+            return 0, []
+        repo = os.path.join(parent, repo_name)
+        if not da._remote_url(repo):
+            return 0, []
+        ref, err = _fresh_ref(repo, deadline)
+        if ref is None:
+            return 1, [(repo_name, "*", "UNVERIFIED: %s" % err)]
+        got = _cat(repo, ref, list(need))
+        out = []
+        for rel, b in need.items():
+            if got.get(rel) is None:
+                out.append((repo_name, rel, "missing_on_remote"))
+            elif _norm_bytes(got[rel]) != b:
+                out.append((repo_name, rel, "differs_on_remote"))
+        return 1, out
+    n_targets = 0
+    with ThreadPoolExecutor(max_workers=16) as ex:
+        for k, r in ex.map(one, sorted(set(repos))):
+            n_targets += k
+            bad.extend(r)
+    if n_targets == 0:
+        bad.append((parent, "*", "0 distribution targets with an origin enumerated"))
+    return bad
+
+
+def _exempt_names(uses):
+    """Hook/file names a valid COUNTERMEASURE_EXEMPT write of this turn names."""
+    out = []
+    for name, inp in uses:
+        fp = inp.get("file_path") or ""
+        if name in EDIT_TOOLS and isinstance(fp, str) and EXEMPT_PATH_RE.search(fp) \
+                and not TEMP_DIR_RE.search(fp):
+            body = _edit_body(inp)
+            if any(_valid_reason(m.group(1)) for m in REASON_STR_RE.finditer(body)):
+                out.append(body)
+    return out
+
+
+REPOS_ROOT_ENV = "COUNTERMEASURE_GATE_REPOS_ROOT"   # tests: sandbox repos dir only
+F_CACHE_TTL_S = 300
+_DIST_ACT_RE = re.compile(
+    # shell writes need no pattern: they leave the governance tree dirty (1)
+    r"deploy_all\.py|\bgit\b[^\n;|&]*\bpush\b", re.I)
+
+
+def _f_needed(root, uses):
+    """Cheap gate for the heavy check (Sonnet/coordinator 2026-11-02: every
+    fixture that merely NAMED the governance path ran 48 ls-remotes):
+    (1) the governance repo differs locally from its tracking ref (no
+    network), or (2) this turn deployed, pushed, or wrote under templates/."""
+    code, out = _git_out(root, ["status", "--porcelain", "--untracked-files=all",
+                                "--"] + list(F_PATHS))
+    if code != 0 or out.strip():
+        return True
+    code, out = _git_out(root, ["rev-list", "--count", "@{upstream}...HEAD"])
+    if code != 0 or out.strip() not in (b"0", b""):
+        return True
+    for name, inp in uses:
+        if name in AGENT_TOOLS:
+            continue
+        fp = inp.get("file_path") or inp.get("notebook_path") or ""
+        if name in EDIT_TOOLS and isinstance(fp, str) and re.search(
+                r"templates[/\\](?:hooks|files)[/\\]|HOOK_MANIFEST", fp):
+            return True
+        c = inp.get("command")
+        if isinstance(c, str) and _DIST_ACT_RE.search(c):
+            return True
+    return False
+
+
+def _f_cache_key(root, since):
+    """Key over the governance HEAD + its tracking ref; only OK results are
+    cached (a BLOCK must be re-checked after the fix), for F_CACHE_TTL_S."""
+    import hashlib
+    code, out = _git_out(root, ["rev-parse", "HEAD", "@{upstream}"])
+    if code != 0:
+        return None
+    return hashlib.sha1(out + os.path.normcase(root).encode("utf-8")
+                        + str(int(since or 0) // 3600).encode()).hexdigest()[:20]
+
+
+def _f_cache_path():
+    return os.path.join(STATE_DIR, "f_ok_cache.json")
+
+
+def _f_cache_get(key):
+    try:
+        with io.open(_f_cache_path(), encoding="utf-8") as f:
+            return _now() - json.load(f).get(key, 0) < F_CACHE_TTL_S
+    except Exception:
+        return False
+
+
+def _f_cache_put(key):
+    try:
+        try:
+            with io.open(_f_cache_path(), encoding="utf-8") as f:
+                d = json.load(f)
+        except Exception:
+            d = {}
+        now = _now()
+        d = {k: v for k, v in d.items() if now - v < F_CACHE_TTL_S}
+        d[key] = now
+        os.makedirs(STATE_DIR, exist_ok=True)
+        with io.open(_f_cache_path(), "w", encoding="utf-8") as f:
+            json.dump(d, f)
+    except Exception:
+        pass
+
+
+def _remote_problem(uses, cwd=None, since=None):
+    """None when (f) holds, else the block text."""
+    roots = _gov_roots(uses, cwd)
+    rr = os.environ.get(REPOS_ROOT_ENV)
+    if rr:   # tests: never touch the real repos (2026-11-02, 40-min suite)
+        rr = os.path.normcase(os.path.normpath(rr))
+        roots = {r for r in roots if os.path.normcase(os.path.dirname(r)) == rr}
+    if not roots:
+        return None
+    if since is not None and since < _now() - 86400:
+        since = None      # no/odd timestamp: never widen "commits of this turn"
+    deadline = _now() + F_BUDGET_S
+    bad = []
+    for root in sorted(roots):
+        if not _f_needed(root, uses):
+            continue
+        key = _f_cache_key(root, since)
+        if key and _f_cache_get(key):
+            continue
+        got = remote_mismatches(root, since=since, deadline=deadline)
+        if not got and key:
+            _f_cache_put(key)
+        bad.extend(got)
+    ex = _exempt_names(uses)
+    if ex:
+        bad = [b for b in bad if not any(
+            b[1] != "*" and b[1].rsplit("/", 1)[-1] in body for body in ex)]
+    if not bad:
+        return None
+    lines = [u"  %s  %s  %s" % (t, n, s) for t, n, s in bad[:15]]
+    if len(bad) > 15:
+        lines.append(u"  … 他 %d 件" % (len(bad) - 15))
+    names = sorted({b[1].rsplit("/", 1)[-1] for b in bad if b[1] != "*"})
+    return (MISSING_REMOTE
+            .replace(u"{names}", u" ".join(names) or u"<hook>.py")
+            .replace(u"{n}", str(len(bad)))
+            .replace(u"{items}", u"\n".join(lines)))
+
+
+def _f_block_allowed(ev, reason):
+    """Loop safety for (f): at most F_MAX_BLOCKS blocks per session+reason."""
+    import hashlib
+    try:
+        key = hashlib.sha1(re.sub(r"\s+", " ", reason).encode("utf-8")).hexdigest()[:16]
+        p = os.path.join(STATE_DIR, "f_blocks_%s.json" % _fire_sid(ev))
+        try:
+            with io.open(p, encoding="utf-8") as f:
+                d = json.load(f)
+        except Exception:
+            d = {}
+        if d.get(key, 0) >= F_MAX_BLOCKS:
+            return False
+        d[key] = d.get(key, 0) + 1
+        os.makedirs(STATE_DIR, exist_ok=True)
+        with io.open(p, "w", encoding="utf-8") as f:
+            json.dump(d, f)
+        return True
+    except Exception:
+        return True
+
+
+MISSING_REMOTE = u"""⛔ **(f) 全配布先のリモート実バイト照合が済んでいない**（C08 2026-11-02）
+
+claude-governance の templates/hooks・templates/files・scripts・HOOK_MANIFEST に、
+未 commit・未 push の変更、またはこのターンの変更がまだ届いていない配布先がある。
+本ゲートは Stop 時に各配布先を ls-remote/fetch し、既定ブランチの実バイトを自分で比べる
+（改行コード LF/CRLF・BOM・末尾の改行は無視）。ツール呼び出しや「push 済み」の文面は証拠にしない。
+
+  不一致・未確認: {n} 件
+{items}
+
+いま行うこと:
+  1. claude-governance を commit・push（正典をリモートへ）
+  2. python scripts/deploy_all.py --commit と python scripts/deploy_all.py --global
+  3. 各リポを push（main 以外のブランチ・push 失敗のリポは個別に直す）
+  4. 確認: python scripts/verify_deploy_remote.py {names}
+構造的に配れない場合のみ、index/COUNTERMEASURE_EXEMPT.json に理由と対象名を書く。
+"""
+
+
 def is_countermeasure_request(ask):
     """True when the USER commissioned a countermeasure in this message.
 
@@ -1680,8 +2205,10 @@ def main():
     except Exception:
         return
 
-    if ev.get("stop_hook_active"):
-        return
+    # (f) is re-evaluated even on stop_hook_active (Sonnet attack 2026-11-02:
+    # the second stop let an undistributed hook through); _f_block_allowed
+    # caps the same (f) block at F_MAX_BLOCKS per session.
+    stop_active = bool(ev.get("stop_hook_active"))
 
     tp = _codex_transcript(ev.get("transcript_path"))
     if not tp:
@@ -1769,10 +2296,37 @@ def main():
     # unattended run is the one with nobody watching for a prose-only
     # countermeasure, so it must satisfy the same five proofs.
     problems = []
+    f_problem = None
+    oi = None
+    if commissioned and origin:
+        try:
+            oi = ctx["prior_idx"][origin - 1]
+        except Exception:
+            oi = None
+            origin = None
     if commissioned:
         missing = _missing(tools, proof_uses)
-        if missing:
+        if missing and not stop_active:
             problems.append(_reason(missing))
+        # (f) C08 2026-11-02: the distributed STATE (git), not tool calls.
+        try:
+            since = _ts(ctx["rows"][oi].get("timestamp")) if origin else ctx.get("start_ts")
+        except Exception:
+            since = ctx.get("start_ts")
+        rp = _remote_problem(proof_uses, cwd=ctx.get("cwd"), since=since)
+        if rp and _f_block_allowed(ev, rp):
+            f_problem = rp
+    if f_problem:
+        problems.append(f_problem)
+    if stop_active:
+        if not problems:
+            return
+        _record_fired(ev)
+        sys.stdout.buffer.write(json.dumps(
+            {"decision": "block", "reason": u"\n".join(problems)},
+            ensure_ascii=True).encode("ascii"))
+        sys.stdout.buffer.flush()
+        return
     sched = _schedule_changes(uses)
     if sched and not _firing_planned(ctx.get("turn_text") or final):
         problems.append(MISSING_SCHEDULE.replace(
