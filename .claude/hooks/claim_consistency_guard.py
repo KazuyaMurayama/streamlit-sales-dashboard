@@ -87,6 +87,12 @@ CALIBRATION (実測 2026-10-12 v2・tests/calibrate_claim_consistency_guard.py �
       （食い違っていません／矛盾してはいません／矛盾は生じません）。表記・丸め・桁・列の訂正は撤回
       ではない。推奨文の末尾に「のがよい」「を勧めます」を追加。
       較正 v3: 30日 P1 1 / 352・P2 0、60日 P1 1 / 804・P2 1（v2 と同じ 2 件。新しい発火なし）。
+    v5 の変更（2026-11-03・攻撃検証 PF1）: 推奨そのものを主題にした維持の文（「前回の推奨（…）は
+      変わりません」）を無効化文から外す。推奨を括弧で引用するので内容語を共有し、覆しと誤認していた
+      （実データの近似例 2026-09-15）。外すのは、推奨の語が文頭にあり「は変わりません」で文が終わり、
+      引用の中に否定・条件・無効化の語が無いときだけ（_maintains）。Sonnet の攻撃 32 件: 文中どこでも
+      当てた初版は覆し 13 件を素通りさせた → 文頭・文末に固定して 0 件。誤検出は v5 前からの 11 件のまま。
+      較正 60日 878 ターン: P1 2 件・P2 1 件（v4 と同じ）。
     判定: P1 は block（全ターン比 1% 未満・偽陽性 0）。ただし 1 指示 1 回だけで、2 回目以降の
     Stop は警告に落とす。P2 は真陽性を実データで確認できておらず偽陽性 1 のため警告止まり。
 赤緑: 欠陥版（2026-10-08 10:54 UTC 直前で切った実 transcript と抜粋 fixture）で block、
@@ -176,6 +182,12 @@ HYPO_OP = re.compile(r"[をに][^、。\n]{0,10}?(?:し|変え|上げ|下げ|増
 STATE_CHANGE = re.compile(r"(状況が変わ|前提が変わ|条件が変わ|事情が変わ|状況の変化|前提の変化|新しい情報|新たに分かった"
                           r"|方針を変え|方針が変わ)")
 STATE_NEG = re.compile(r"^[^。\n]{0,6}?(?:ません|ない|なし)")
+# 推奨そのものを主題にした維持の文（「前回の推奨（…）は変わりません」）は覆しではない（v5）
+MAINTAIN = re.compile(r"(?:(?:前回|先ほど|さきほど|これまで|最初|前)の\s*)?(?:推奨|Next Action|結論|おすすめ|提案|方針)"
+                      r"\s*(?:[（(「『][^（(）)」』]{0,80}[）)」』])?\s*[はも]\s*[、,]?\s*(?:そのまま|引き続き)?\s*[、,]?\s*"
+                      r"(?:変わりません|変わらない|変化しません|変化しない)")
+MAINTAIN_LEAD = re.compile(r"^(?:\s|[-*>#|・]|\*\*|\d+[.)．、])*")
+MAINTAIN_TAIL = re.compile(r"^(?:\s|[。．.!！|*）)]|です)*$")
 INSTRUCTED = re.compile(r"(ご指示により|ご指示どおり|ご指示通り|ご指示のとおり|ご指示の通り)")
 USER_CANCEL = re.compile(r"(やめ|止め|しない|不要|いらない|要らない|中止|やらない|取りやめ|見送|変更)")
 
@@ -245,6 +257,19 @@ def _state_changed(unit):
     return False
 
 
+def _maintains(unit):
+    """文全体が維持の文: 推奨の語が文頭（箇条・太字の記号の後）にあり、「は変わりません」で文が終わり、
+    引用した推奨の中に否定・条件・無効化の語が無い。文頭の前置き（「選ばなくても、」）や後ろの続き
+    （「〜が、…」）があれば維持とみなさない（Sonnet 攻撃検証 2026-11-03: 文中のどこでも当てると
+    「どの年でも結論は変わりません」の覆しが素通りした）。"""
+    m = MAINTAIN.match(unit, MAINTAIN_LEAD.match(unit).end())
+    if not m or not MAINTAIN_TAIL.match(unit[m.end():]):
+        return False
+    quoted = re.search(r"[（(「『]([^（(）)」』]*)[）)」』]", m.group(0))
+    q = quoted.group(1) if quoted else ""
+    return not (NEG_ANY.search(q) or NULLIFY.search(q) or re.search(r"[てで]も|無関係|同じ|無駄", q))
+
+
 def nullifiers(answer):
     """[(sentence, tokens_to_compare, index)]。
     - 状況変化の明示（無効化文か直前 3 文、否定形は除く）があれば除外。
@@ -256,6 +281,8 @@ def nullifiers(answer):
         m = NULLIFY.search(s)
         if not m:
             continue
+        if _maintains(s):
+            continue                       # 文全体が「前回の推奨（…）は変わりません」の維持（v5）
         if any(_state_changed(u) for u in units[max(0, i - 3):i + 1]):
             continue
         toks = _tokens(s)
