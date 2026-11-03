@@ -134,6 +134,21 @@ paragraph is a candidate, an all-done closing without a remaining count passes, 
 that orders work (直して・進めて・全部…) can be stalled. Same 21 days / 313 turns: v4 adds 49 (15.7%; total
 36.4%); eyeball of the 49: ~33 stalls, ~11 false (fact lines 「残りは次の理由で止まっています」, 「決まれば」
 「わかり次第」 waits, 「認める場合は」), ~5 unclear.
+V4.2 (2026-11-03): v4.1 stopped 「残り5本の再設計は、Opus のエージェント5体に1本ずつ任せて並行で進めています」
+while the five subagents it launched were still running -- a real external wait. A closing sentence about
+delegated / background work (BG_WORK) now passes, but only while bg_pending() finds a subagent or
+background command launched in this turn with no completion notification; once all reported back the
+same sentence stops once. tests/test_delegation_guard_bgwait_20261103.py: v4.1 4/7, v4.2 7/7. 21 days /
+315 turns: no v4.1 stall had background work in its turn (0 suppressed), so the firing rate is unchanged.
+Sonnet attack (fixtures/delegation_guard_bgwait_attack_20261103.json, 33 cases): the first v4.2 read
+notifications only from user rows (most real ones are queue-operation rows / queued_command attachments),
+took any 「agentId:」 as a launch (synchronous agents, pasted text, Read output) and let a bare 「終わったら」
+pass next to any job -- 15/18 evasions, and on real transcripts it called 32% of stops "pending" with
+nothing running. Now: launches only from the launching tool's own result, notifications from every row
+kind, a resume re-opens an id, the sentence must name the delegated work. 29/33 as expected; real data
+(14 transcripts, 231 stops): flagged pending 111, truly pending 105, false 6 (2.6%), missed 0. Left: an
+unrelated pending job plus a sentence that does name agents (「エージェントに任せるか私が続けます」) still
+passes; English closings and launches outside the 4 MB window are blocked once (fail-safe side).
 
 Deployed from claude-governance/templates/hooks/ -- edit there, not here.
 """
@@ -545,6 +560,16 @@ ACTION_ORDER = re.compile(r"(?:進め|すすめ|続け|やっ|直し|作っ|書�
 BOUNDED = re.compile(r"(?:まず|最初の|はじめの|初めの|次の|今回は?|この)[^。\n、]{0,12}?(?:[0-9０-９]+|[一二三四五六七八九十])\s*(?:つ|本|件|個|冊|回|科目|記事|行)"
                      r"|(?:[0-9０-９]+|[一二三四五六七八九十])\s*(?:つ|本|冊|回)目(?:まで)?|(?:[0-9０-９]+|[一二三四五六七八九十])\s*[^\s。、]{0,4}?(?:だけ|のみ)")
 NA_LABEL = re.compile(r"(?m)^\W{0,4}Next Action\W{0,4}[:：]")
+# 2026-11-03: waiting for the subagents / background commands that were launched and have not reported back
+# is an external wait (「エージェント5体が並行で進めています」「完了したら続けます」). Only counted while one is
+# really pending (bg_pending()): with none pending the same sentence is the excuse it looks like. The sentence
+# must name the delegated work (BG_SUBJ) and its progress or completion (BG_ACT); a bare 「終わったら」 counts
+# only right after such a sentence -- 「残り8本は、これが終わったら直します」 next to an unrelated job does not.
+BG_SUBJ = re.compile(r"エージェント|subagent|agents?|バックグラウンド|裏で|並行|並列|別プロセス|完了通知", re.I)
+BG_ACT = re.compile(r"進めて|作業中|実行中|動いて|走って|回して|処理中|待|任せ|完了|終了|終わ|そろ|揃|戻|届"
+                    r"|(?:working|running|report(?:s|ed)? back|finish|complete)", re.I)
+BG_THEN = re.compile(r"^[^。]{0,15}(?:完了|終了|終わ|そろ|揃|戻|届)(?:したら|ったら|い次第|り次第|き次第|ってから|いてから|ったところで|した時点で)")
+
 
 
 def _instruction_exempt(prompt):
@@ -571,7 +596,7 @@ def _stake_here(s):
     return False
 
 
-def stalled(answer, prompt=""):
+def stalled(answer, prompt="", bg_live=False):
     """Return (kind, sentence) when the closing stops on a continuation Claude could decide, else None."""
     if _instruction_exempt(prompt):
         return None
@@ -603,6 +628,9 @@ def stalled(answer, prompt=""):
                 continue
             if _stake_here(s) or WAIT.search(s) or DECIDE.search(s):
                 continue
+            if bg_live and ((BG_SUBJ.search(s) and BG_ACT.search(s))
+                            or (BG_THEN.search(s) and BG_SUBJ.search(prev) and BG_ACT.search(prev))):
+                continue
             if CHOICE.search(prev + s if q else s):
                 continue
             # a statement of fact in the section (「この節の更新は止まっています」「〜などです」) names no work left
@@ -618,6 +646,56 @@ def stalled(answer, prompt=""):
                 continue
             return ("ask" if q else "offer" if o else "announce", s)
     return None
+
+
+def bg_pending(tp, since_ts=""):
+    """Ids of subagents / background commands launched in the read window (this turn or an earlier one) that
+    have no completion notification after their (last) launch. A launch is only the tool's own result: an
+    Agent / Task result saying 「Async agent launched」, a Bash / PowerShell 「running in background with ID」,
+    a SendMessage 「resumedAgentId」 (a resume makes a finished agent pending again). A synchronous agent
+    result also carries 「agentId:」 but never gets a notification, so it is not a launch. Notifications are read
+    from every row kind -- user rows, queue-operation rows and queued_command attachments (Sonnet attack
+    2026-11-03: most real notifications are NOT user rows) -- but never from a tool result (a Read of a log)."""
+    try:
+        size = os.path.getsize(tp)
+        with open(tp, "rb") as f:
+            f.seek(max(0, size - TAIL_BYTES))
+            data = f.read().decode("utf-8", "replace").splitlines()
+    except Exception:
+        return set()
+    names, pending = {}, set()
+    for line in data:
+        try:
+            d = json.loads(line)
+        except Exception:
+            continue
+        if d.get("isSidechain"):
+            continue
+        c = (d.get("message") or {}).get("content") if isinstance(d.get("message"), dict) else None
+        if d.get("type") == "assistant" and isinstance(c, list):
+            for b in c:
+                if isinstance(b, dict) and b.get("type") == "tool_use":
+                    names[b.get("id")] = b.get("name") or ""
+            continue
+        results = [b for b in c if isinstance(b, dict) and b.get("type") == "tool_result"] if isinstance(c, list) else []
+        if results:
+            for b in results:
+                n, t = names.get(b.get("tool_use_id"), ""), json.dumps(b.get("content"), ensure_ascii=False)
+                if n in ("Agent", "Task") and "Async agent launched" in t:
+                    m = re.search(r"agentId: ([0-9a-f]{8,})", t)
+                elif n in ("Bash", "PowerShell"):
+                    m = re.search(r"running in background with ID: (\w+)", t)
+                elif n == "SendMessage":
+                    m = re.search(r"resumedAgentId\W{1,8}([0-9a-f]{8,})", t)
+                else:
+                    m = None
+                if m:
+                    pending.add(m.group(1))
+            continue
+        for m in re.finditer(r"<task-id>(\w+)</task-id>.{0,4000}?<status>(?:completed|failed|killed|stopped|cancell?ed|error|timeout)",
+                             json.dumps(d, ensure_ascii=False), re.S):
+            pending.discard(m.group(1))
+    return pending
 
 
 def read_turn_full(tp):
@@ -691,7 +769,7 @@ def main():
         batch, v3 = v3[1], None
     stall = None
     if prompt and not hit and not batch and not v3:
-        stall = stalled(final, prompt)
+        stall = stalled(final, prompt, bool(bg_pending(tp, pts)))
     if not hit and not batch and not v3 and not stall:
         return
     # keyed on the prompt's timestamp too: the same words sent again later

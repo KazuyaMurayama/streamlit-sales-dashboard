@@ -63,6 +63,24 @@ article, the obvious RCT row of a rating scale, two task sets deferred as one �
 Calibration (tests/calibrate_request_ledger_guard.py --compare <old>): 30 days / 823 turns 14.3% -> 14.5% (+1, TP);
 120 days / 2,222 turns 14.0% -> 13.8% (+2 TP, -6 rows = 2 distinct 「再開して。」 turns); unread-ref firings 1 in 120 days.
 Tests: tests/test_request_ledger_guard_c02_20261026.py (21; the 7 BLOCK/once checks fail on the pre-extension version).
+
+2026-11-03 (C02 recurred twice after the 10-26 extension; CORRECTION_DIGEST_20261102). Invariant: the questions of the
+prompt that STARTED a task (an earlier prompt of the session with >= ORIGIN_MIN items) are the requirements of that
+task's deliverable. A later turn that hands over a REVISION of a deliverable already written or handed over in the
+session since that prompt (same path, or the same name once dates / -vN / _v2 / 改訂版 are stripped; links, bare URLs,
+Write / Edit / Bash redirections all count) and leaves most of those questions unanswered has dropped them -- the
+follow-up prompt alone looked complete.
+(c) CARRY-OVER (carry_miss): blocks when at least 2 and at least half of the origin's items are answered neither in this
+turn nor in an earlier turn that handed over the same deliverable. Nothing is carried into a prompt that is itself a
+new task (>= ORIGIN_MIN items) or a bare 「進めて」「続けて」 (an interim report of a running batch), nor when this turn
+hands over no revision (another file = another task). An item is excused only by 「未対応」/「N. は対象外（…ため）」 with a
+reason, not by 「1. は後で」 or an incidental 「表1の」. Real case: 2026-10-12T23:35 「私が元々の依頼で質問した点に対する
+回答も、すべて冒頭に載せるべき」 (old 0/1 -> new 1/1). Tests: tests/test_request_ledger_guard_c02_20261103.py and the
+attack fixture tests/fixtures/request_ledger_guard_attack_20261103.json.
+The deliverable must be born in the origin turn, or in a later turn whose prompt asked nothing of its own (「はい、
+すすめて」); one that predates the origin or was started by its own request belongs to another task. Confirmation
+questions (「〜ということか？」「認識は合っていますか？」) are answered in that turn's chat and are not carried; nor is
+anything carried into a prompt that opens the next unit of a series (「次の2本を」「同様に」「残り」「元のタスクに戻る」).
 Deployed from claude-governance/templates/hooks/ -- edit there, not here.
 """
 import hashlib
@@ -456,11 +474,16 @@ def turn_from_events(events):
 
 
 def read_turn(tp):
+    return read_turn_h(tp)[:3]
+
+
+def read_turn_h(tp):
+    """(prompt, ts, events, earlier turns of the session in the tail as {"prompt", "events"}, oldest first)."""
     size = os.path.getsize(tp)
     with open(tp, "rb") as f:
         f.seek(max(0, size - TAIL_BYTES))
         data = f.read().decode("utf-8", "replace").splitlines()
-    prompt, pts, events = None, "", []
+    prompt, pts, events, hist = None, "", [], []
     for line in data:
         try:
             d = json.loads(line)
@@ -469,6 +492,8 @@ def read_turn(tp):
         if d.get("isSidechain"):
             continue
         if _is_prompt(d):
+            if prompt:
+                hist.append({"prompt": prompt, "events": events})
             prompt, pts, events = _text(d.get("message")).strip(), d.get("timestamp", ""), []
         elif d.get("type") == "assistant":
             c = (d.get("message") or {}).get("content")
@@ -480,7 +505,7 @@ def read_turn(tp):
                         events.append(("tool", b.get("name") or "", b.get("input") or {}))
                     elif b.get("type") == "text" and (b.get("text") or "").strip():
                         events.append(("text", b["text"]))
-    return prompt, pts, events
+    return prompt, pts, events, hist[-ORIGIN_BACK:]
 
 
 def _sid(ev):
@@ -514,7 +539,7 @@ def on_stop(ev):
     tp = ev.get("transcript_path") or ""
     if not os.path.isfile(tp):
         return
-    prompt, pts, events = read_turn(tp)
+    prompt, pts, events, hist = read_turn_h(tp)
     if not prompt or not any(e[0] == "text" for e in events):
         return
     path = _ledger_path(ev)
@@ -529,7 +554,7 @@ def on_stop(ev):
     if led.get("blocked"):
         return
     items = led.get("items") or []
-    miss, unread = decide(prompt, items, events)
+    miss, unread = decide(prompt, items, events, hist)
     if not miss and not unread:
         return
     led["blocked"] = True
@@ -546,13 +571,142 @@ def on_stop(ev):
                                        ensure_ascii=True).encode("ascii"))
 
 
-def decide(prompt, items, events):
-    """(uncovered items, unread spec refs) of one turn -- the calibration script calls this too."""
+ORIGIN_MIN = 3     # the prompt that starts a task asks this many things; follow-ups ask fewer
+ORIGIN_BACK = 8    # how many earlier prompts a follow-up chain may span (the revision link keeps it on one task)
+_DOC_EXT = r"(?:md|docx?|pdf|pptx?|xlsx?|html?|csv|txt)"
+# a URL is a deliverable only when it points into a repository (blob / tree / raw): a cited manual or web page is a
+# source, not the task's report (30-day calibration 2026-11-03: a camera manual PDF cited twice looked like a revision)
+_URL_DOC = re.compile(r"https?://[^\s)\]>|]*?/(?:-/)?(?:blob|tree|raw|src)/[^\s)\]>|]+?\.%s(?=[#?)\]\s|>]|$)"
+                      r"|https?://raw\.githubusercontent\.com/[^\s)\]>|]+?\.%s(?=[#?)\]\s|>]|$)" % (_DOC_EXT, _DOC_EXT), re.I)
+# bookkeeping files touched in every turn are not the task's deliverable (calibration: CLAUDE.md / FILE_INDEX.md /
+# MEMORY.md / a *-DRAFT.md glob made every turn look like a revision)
+_BOOKKEEPING = set("claude agents readme file_index index memory tasks task changelog license todo draft spec "
+                   "skill notes state log".split())
+MAX_FOLLOWUP = 300   # a longer prompt (a pasted hand-off, a new brief) is a new task, not a follow-up on the report
+_PATH_DOC = re.compile(r"(?:^|[\s\"'=>(])((?:[A-Za-z]:)?[\w.~\-/\\ぁ-んァ-ヶー一-鿿・]*[\w\-ぁ-んァ-ヶー一-鿿・]\.%s)(?![\w])" % _DOC_EXT, re.I)
+_BASH_WRITE = re.compile(r"(?:>>?|\btee(?:\s+-a)?|\bOut-File(?:\s+-FilePath)?|\bSet-Content(?:\s+-Path)?|\bAdd-Content(?:\s+-Path)?"
+                         r"|\bcp\b[^\n|;&]*?|\bmv\b[^\n|;&]*?|\bgit\s+add\b[^\n|;&]*?)\s*[\"']?([^\s\"'|;&<>]+\.%s)" % _DOC_EXT, re.I)
+_NOT_DELIVER = re.compile(r"(?i)(?:^|[\\/])(?:temp|tmp|scratchpad|\.claude)(?:[\\/]|$)|appdata[\\/]local[\\/]temp")
+
+
+def deliverable_paths(events):
+    """Documents this turn writes or hands over: links / bare URLs in the answer texts, Write / Edit paths, files a
+    Bash / PowerShell command writes. Temp / scratchpad / .claude are working files, not deliverables."""
+    out = []
+    for e in events:
+        if e[0] == "text":
+            out += [m.group(0) for m in _URL_DOC.finditer(e[1])]
+        elif e[0] == "tool" and e[1] in WRITE_TOOLS:
+            out.append(str((e[2] or {}).get("file_path") or (e[2] or {}).get("notebook_path") or ""))
+        elif e[0] == "tool" and e[1] in ("Bash", "PowerShell"):
+            out += [m.group(1) for m in _BASH_WRITE.finditer(str((e[2] or {}).get("command") or ""))]
+    return [p for p in out if p and not _NOT_DELIVER.search(p.replace("\\", "/")) and _deliverable_stem(p)]
+
+
+def _deliverable_stem(p):
+    st = doc_stem(p)
+    return st if len(st) >= 6 and st not in _BOOKKEEPING and not st.endswith(("_state", "-state", "_index")) else ""
+
+
+def doc_stem(p):
+    """The deliverable's name without version marks: BILLING_20261103-v2.md, BILLING_20261104.md, BILLING_v3.docx and
+    BILLING_改訂版.md are all 'billing'."""
+    b = _base(re.sub(r"[#?].*$", "", p)).lower()
+    b = re.sub(r"\.[a-z0-9]{1,5}$", "", b)
+    prev = None
+    while prev != b:
+        prev = b
+        b = re.sub(r"(?:[-_ ]?(?:v\d+|改訂版?|最新版?|修正版|更新版|final|latest)|[-_ ]?\d{8}(?:[-_]?\d{4})?|[-_ ]?\d{4}-\d{2}-\d{2})$", "", b)
+    return b.strip("-_ ")
+
+
+def _hist_turns(history):
+    return [h if isinstance(h, dict) else {"prompt": h, "events": []} for h in (history or [])]
+
+
+def origin_turn(history):
+    """Index (in history) of the prompt that started the current task: the latest of the last ORIGIN_BACK prompts with
+    >= ORIGIN_MIN items. None when there is none."""
+    hs = _hist_turns(history)
+    for i in range(len(hs) - 1, max(-1, len(hs) - 1 - ORIGIN_BACK), -1):
+        if len(split_items(hs[i]["prompt"])) >= ORIGIN_MIN:
+            return i
+    return None
+
+
+def origin_items(history):
+    i = origin_turn(history)
+    return split_items(_hist_turns(history)[i]["prompt"]) if i is not None else []
+
+
+# 「進めて」「すすめてる？」「続けて」 alone: a batch / series is running, and its interim report owes the origin nothing
+# (30-day calibration 2026-11-03: interim reports of an article-by-article batch fired on every 「進めて」)
+_GO_PROMPT = re.compile(r"(?:進め|すすめ|続け|つづけ|再開|続行|次も|その次)")
+# 「次の2本をレポートにして」「同様に次の本でも作って」「残りも」: the next unit of a series, not a follow-up on the report
+_NEXT_UNIT = re.compile(r"\s*(?:では|じゃあ|OK|はい)?[、,\s]*(?:次の|同様に|同じように|残り|続き|別の|元のタスク)")
+# 「3. は対象外（データが無いため）」: an item excused by its number needs a status word AND a reason, like 「未対応: … — 理由」.
+# 「1. は後で」「表1の通り」「手順1は完了」 excuse nothing (attack 2026-11-03 N01-N04)
+_ITEM_NO = re.compile(r"^\s*[（(]?([0-9０-９]{1,2})\s*[.．)）、]")
+_STATUS_WORD = r"(?:未対応|未着手|対応しない|対応できない|見送|保留|対象外|不要|できません|できない|しません)"
+_REASON = r"(?:ため|から|ので|理由|—|――|-\s|：|:)"
+
+
+def _status_by_number(item, text):
+    m = _ITEM_NO.match(item["text"])
+    if not m:
+        return False
+    n = m.group(1).translate(str.maketrans("０１２３４５６７８９", "0123456789"))
+    return bool(re.search(r"(?:^|[\s。、（(])(?:依頼|項目)?%s\s*[.．)）]\s*(?:は|も)?\s*[^。\n]{0,10}%s[^。\n]{0,40}%s"
+                          % (n, _STATUS_WORD, _REASON), text or "", re.M))
+
+
+# 「〜ということか？」「認識は合っていますか？」「違いますか？」: a check of the assistant's own words, answered in the chat
+# of that turn -- not something the task's report has to carry (30-day calibration 2026-11-03: 4 of the false firings)
+_CONFIRM_Q = re.compile(r"(?:ということ|って意味|という意味|認識|理解|解釈)[^。？?]{0,12}(?:か|ですか|でしょうか|ますか|合って[^。？?]{0,6})\s*[？?]?\s*$"
+                        r"|(?:合って(?:い)?ますか|違いますか|ですよね|ますよね|なのか)\s*[？?]\s*$")
+
+
+def carry_miss(items, history, events, evidence, prompt=""):
+    """(c) origin items left unanswered by a turn that hands over a revision of the task's deliverable (carry=True)."""
+    if len(items) >= ORIGIN_MIN or not history:
+        return []
+    ut = user_text(prompt)
+    if (len(ut) <= 30 and _GO_PROMPT.search(ut)) or len(ut) > MAX_FOLLOWUP or _NEXT_UNIT.match(ut):
+        return []
+    hs = _hist_turns(history)
+    i = origin_turn(hs)
+    if i is None:
+        return []
+    now = {_deliverable_stem(p) for p in deliverable_paths(events)} - {""}
+    if not now:
+        return []
+    stems = [{_deliverable_stem(p) for p in deliverable_paths(h["events"])} for h in hs]
+    if any(now & st for st in stems[:i]):
+        return []         # the deliverable predates the origin prompt: it belongs to an earlier task (calibration)
+    born = next((j for j in range(i, len(hs)) if now & stems[j]), None)
+    if born is None:
+        return []         # a first version / another file: another task of the session (calibration 2026-11-03)
+    if born > i and split_items(hs[born]["prompt"]):
+        return []         # it was started by its own later request (「〜のレポートを作って」), not by the origin
+    earlier = "".join("\n" + turn_from_events(hs[j]["events"]) for j in range(born, len(hs)) if now & stems[j])
+    own = {x["text"] for x in items}
+    orig = [x for x in split_items(hs[i]["prompt"]) if x["text"] not in own and not _CONFIRM_Q.search(x["text"])]
+    text = (evidence or "") + earlier
+    miss = [m for m in uncovered(orig, text) if not _status_by_number(m, evidence)]
+    if len(miss) < 2 or 2 * len(miss) < len(orig):
+        return []
+    return [dict(m, carry=True) for m in miss]
+
+
+def decide(prompt, items, events, history=None):
+    """(uncovered items, unread spec refs) of one turn -- the calibration script calls this too.
+    history: earlier prompts of the session (oldest first); their origin items count as carry-over (2026-11-03)."""
     last = next((e[1] for e in reversed(events) if e[0] == "text"), "")
     if CLARIFY.search(last.strip()[-200:]):
         return [], []   # the answer ends by asking which one is meant; delegation_guard checks that question
     evidence = turn_from_events(events)
     miss = uncovered(items, evidence) if len(items) >= 2 else []
+    miss += carry_miss(items, history, events, evidence, prompt)
     unread = [r for r in unread_refs(spec_refs(prompt), events)
               if not re.search(u"(?:未読|読めな|開けな|取得できな)[^\n]{0,80}" + re.escape(r[1]), evidence)
               and not re.search(re.escape(r[1]) + u"[^\n]{0,80}(?:未読|読めな|開けな|取得できな)", evidence)]
@@ -561,6 +715,14 @@ def decide(prompt, items, events):
 
 def block_reason(items, miss, unread):
     out = [u"【依頼の台帳照合（1回のみ）】"]
+    carry = [m for m in miss if m.get("carry")]
+    miss = [m for m in miss if not m.get("carry")]
+    if carry:
+        out.append(u"この作業を始めた前の依頼（同じセッション）の要求 %d 件が、今回渡す成果物にも最終回答にも見当たらない"
+                   u"（今回の追加の指示だけに答えて、元の質問を落としている）:%s\n"
+                   u"成果物の冒頭に元の依頼の各要求への答えを載せるか、答え済みの場所を示すか、"
+                   u"「未対応: <要求> — 理由」と回答に明記せよ。"
+                   % (len(carry), "".join(u"\n  - %s" % m["text"][:100] for m in carry)))
     if miss:
         out.append(u"この指示（貼り付けた引き継ぎ・「下記」で指した本文を含む）には %d 件の要求があり、うち %d 件に対応する"
                    u"記述が最終回答にも今回書いたファイルにも見当たらない:%s\n"

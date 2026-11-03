@@ -394,8 +394,13 @@ def _is_user_row(d):
 
 
 def iter_turns(lines):
-    """Yield dicts {ts, prompt, answer, md, compact} per human turn (compact summaries reset nothing
-    but are yielded as kind 'compact' so the caller can add them to the user corpus)."""
+    """Yield dicts {ts, prompt, answer, md, compact} per human turn. A compact summary is yielded as a
+    separate kind-'compact' item (the caller adds it to the user corpus) and does NOT end the turn:
+    auto-compaction happens in the middle of a long turn, and everything the assistant writes after it
+    still answers the same instruction (v4, 2026-11-03). v3 set cur=None here, so the whole answer of
+    a turn that crossed a compaction was dropped and main() returned on turns[-1]['compact'] -- 4 of
+    the 19 C07 recurrences 2026-10-12..10-30 were such turns and were never read. A summary at the top
+    of a resumed file (no open turn) starts a turn of its own with an empty prompt."""
     cur = None
     for line in lines:
         try:
@@ -411,11 +416,10 @@ def iter_turns(lines):
             cur = {"ts": d.get("timestamp", ""), "prompt": _text(d.get("message")), "texts": [], "md": [],
                    "compact": False}
         elif k == "compact":
-            if cur:
-                yield cur
-            cur = None
             yield {"ts": d.get("timestamp", ""), "prompt": _text(d.get("message")), "texts": [], "md": [],
                    "compact": True}
+            if cur is None:              # resumed file: the answer after the summary has no human row
+                cur = {"ts": d.get("timestamp", "") + "~c", "prompt": "", "texts": [], "md": [], "compact": False}
         elif d.get("type") == "assistant" and cur is not None:
             for b in ((d.get("message") or {}).get("content") or []):
                 if not isinstance(b, dict):

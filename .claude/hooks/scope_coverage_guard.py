@@ -120,6 +120,61 @@ asserted by test_scope_coverage_guard.py):
     rule), block-once re-answer (E26 -- a second block loops), a deliverable
     folder literally named tests/ (E28), and deliberate gaming in general.
 
+REDESIGN 2026-11-03 (C02 recurred 12 times after adoption; reports/CORRECTION_DIGEST_20261102.md)
+-------------------------------------------------------------------------------------------
+Three of the 12 were this hook's class and it missed or misfired on all three:
+  2026-10-30「5本も直して」 -- 3 reports fixed; the answer said the other 5 had the same defect and
+      ended 「直すなら「5本も直して」と言ってください」. Dated names (GENAI_*_20261020.md) are no family.
+  2026-10-14「それらも当然、検証して行を追加しろ」 -- a parameter grid: 「h=0.04 と 0.06 は計算していません」.
+      Not files at all.
+  2026-10-22「両方ともタスクです」 -- 「片方しかない63冊の作成は未対応…始めてよいかだけ決めてください」.
+      The hook DID fire, but on the wrong set (119 drafts, 0 edited: a read-only glob whose output went
+      to `> $S/matrix.txt` counted as a write), and 「全119本中0本を変更」 satisfied it.
+Class, stated without names: the answer itself names a same-kind remainder of the work just done as
+undone and stops -- with no reason belonging to those members, or by handing the go-ahead to the user.
+6. Deferred remainder (any kind of set -- files, books, grid points): in the FINAL message, a sentence
+   that names a remainder of >= 2 (他の/残り N本・冊・件…, N本にも…同じ, 同じ…N章にも, x=a・b は,
+   未対応: …N冊, N冊は未対応) together with an undone marker (未対応/未評価/…/残っています/同じ問題/
+   計算していません), or a rest-count (残りの/他の/次の/片方… N本, N本も) in a sentence asking the user to
+   decide. It blocks only when the message hands the go-ahead to the user (「…なら言ってください」
+   「決めてください」「ご判断ください」「お返事」「進めますか」): REQUIRE_DEFER = True. Not checked when
+   the turn wrote nothing, the prompt limited the job (「3本だけ」「まず3つ」「そこまで」「実行はまだ」) or
+   asked for a status listing (「…どれかを表形式で報告して」). Own once-per-instruction mark (suffix _r),
+   own message 【残りの先送り検査（1回のみ）】.
+7. A shell command whose ONLY write signals are redirects into a scratch path (`> $S/x.txt`, %TEMP%,
+   scratchpad) writes no deliverable: its sliced/templated globs and literal doc paths were read. Its
+   unsliced literal globs still count as edited (that direction can only silence).
+CALIBRATION 2026-11-03 (tests/calibrate_scope_coverage_guard.py --days 7 --fast; HEAD copy via --hook,
+both runs at the same time on the same transcripts): 76 instructions, HEAD fires 6 (7.9%), new 7 (9.2%)
+-- the one new fire is the 2026-10-29T23:53 answer the user corrected (「5本も直して」); C02 recall in
+the window 2/6 -> 3/6. Upper bound counting every message of a turn as a possible stop: also 9.2%.
+30 days, remainder check alone (506 instructions): final message 3 (0.6%), any message 8 (1.6%): 3 were
+corrected (10-14 grid, 10-22 63冊, 10-29 5本), 2 the same pattern uncorrected (「残りの6本も同じ手順で
+直すか決めてください」「残りの15本は…書き直してよいか決めてください（推奨: 待たずに書き直す）」), 3 staged
+plans (「次の10本に進めてよければ…」「段階2の33本も同じ流れで進めるか決めてください」×2).
+Rejected: blocking a named remainder with no own reason even without a hand-off (REQUIRE_DEFER False)
+-> 7 days 14.5% with earlier stops (+6.6 points; progress notes such as 「未着手: 第5・6波の51本」 during
+a wave job); any count + 「決めてください」 without a rest anchor -> 30 days 4.7% (「次の2点をご判断ください」).
+Tests: tests/test_scope_coverage_guard_remainder.py (HEAD 10/17, new 17/17).
+ROUND 2 2026-11-03 (Sonnet attack, tests/fixtures/scope_coverage_guard_attack_20261103.json, 73 cases):
+- A remainder sentence is dropped when it says the rest needs no work (NEGATED: 同じ問題がない / 残って
+  いません / 0件 / 修正済み / 対象外 / 範囲外 / スキップ / 必要がない) or carries a reason of the members' own
+  (OWN_REASON, in it or the sentence before: 権限 / 取り消せない / 購入・費用 / deny・あなたの操作).
+- The hand-off must be bound to the remainder: in it, within the next two sentences, or later when it
+  names the rest (残り / それら / 全部); a generic invite (「ほかに…あれば言ってください」「ご不明点があれば」)
+  is not one. Wider hand-off forms (続けますか / どうしますか / やってよいですか / ご希望でしたら /
+  ご指示をいただければ / 指示してください / should I / want me to) and remainder forms (残りは5本 / 残り五本 /
+  **5本** / 「他にも5本あります。いずれも未対応です。」 / a 未対応 heading over its list / English
+  「the other 5 … still」 / 「他の…にも同じ問題があります」 without a count).
+- The prompt cut-outs no longer silence the whole check: 「まず…1本」 is overridden by 全部 / とも / そのあと,
+  「報告して」 counts only when the prompt orders no work (「全8本を直して、結果を報告して」 is checked).
+- A final 「以上です。」 written right after the hand-off (no tool call between) is skipped.
+- Scratch = the OS temp folder, the scratchpad, or $TEMP/$TMP/$S-style variables; a repo folder that is
+  merely named temp/ and $DOCS/... are deliverable paths.
+- Overlap with delegation_guard (C03): when delegation_guard.stalled() stops the same hand-off sentence
+  (a continuation Claude could decide), this check steps aside -- unless delegation_guard's once-per-
+  instruction mark is already spent. SCOPE_REM_NO_DELEGATION=1 measures this hook alone.
+
 Skipped entirely when CLAUDE_HEADLESS_JOB=1 (scheduled `claude -p` jobs have
 no user to account to).
 
@@ -148,6 +203,8 @@ STATE_DIR = os.path.join(os.path.expanduser("~"), ".claude", "state", NAME + "_s
 # Layout options measured in calibration (see docstring). Module flags so the calibrator can toggle them.
 SIBLING_DIRS = False      # note/a/nt-001.md + note/b/nt-021.md as one family
 PER_ID_DIRS = True        # _posts/nt-001/body.md + _posts/nt-002/body.md as one family
+DEFER_TO_DELEGATION = os.environ.get("SCOPE_REM_NO_DELEGATION") != "1"  # remainder check: leave a self-decidable go-ahead to delegation_guard.stalled() (C03)
+REQUIRE_DEFER = True      # remainder check: block only when the answer hands the go-ahead to the user (see REDESIGN)
 MTIME_SCAN = True         # opaque writes (scripts, sliced globs): docs modified during the turn count as edited
 
 DOC_EXT = (".md", ".markdown", ".html", ".htm", ".txt", ".rst", ".tex", ".adoc")
@@ -326,6 +383,47 @@ def _is_prompt(d):
     return bool(t) and not t.startswith(("<task-notification", "<local-command", "<command-name>", "Caveat:"))
 
 
+_TMP_ROOTS = None
+
+
+def _tmp_roots():
+    """The OS temp folders (and their long/short spellings), lower-cased with forward slashes."""
+    global _TMP_ROOTS
+    if _TMP_ROOTS is None:
+        import tempfile
+        roots = {tempfile.gettempdir()} | {os.environ.get(k) or "" for k in ("TEMP", "TMP", "TMPDIR")}
+        out = set()
+        for r in roots:
+            if r:
+                for v in (r, os.path.realpath(r)):
+                    out.add(v.replace("\\", "/").rstrip("/").lower())
+        out |= {"/tmp", "/var/tmp"}
+        _TMP_ROOTS = sorted(x for x in out if x)
+    return _TMP_ROOTS
+
+
+# shell variables that name a scratch folder: $TEMP / $TMP / $TMPDIR / $env:TEMP / %TEMP% / $S / $SP / $SCRATCH...
+_SCRATCH_VAR = re.compile(r"(?i)^(?:\$\{?(?:env:)?(?:temp|tmp|tmpdir|s|sp|scratch\w*|scratchpad)\}?|%(?:temp|tmp)%)(?:[\/]|$)")
+
+
+def _scratch_redirect(sig):
+    """A `> target` / `>> target` write signal whose target is scratch: the OS temp folder, the session
+    scratchpad, or a variable that names one. A folder that only happens to be called temp/tmp inside a
+    repo (docs/temp/a.md) is a deliverable path, and so is $DOCS/report.md."""
+    m = re.match(r">>?\s*[\"']?(.+?)[\"']?$", sig.strip())
+    if not m:
+        return False
+    t = m.group(1).strip()
+    if t.lower() in ("/dev/null", "nul", "$null"):
+        return True
+    if _SCRATCH_VAR.match(t) or re.search(r"(?i)[\/]scratchpad(?:[\/]|$)", t):
+        return True
+    n = t.replace("\\", "/").lower()
+    if re.match(r"^/[a-z]/", n):                         # Git Bash /c/Users/... -> c:/users/...
+        n = n[1] + ":" + n[2:]
+    return any(n == r or n.startswith(r + "/") for r in _tmp_roots())
+
+
 def shell_paths(cmd, cwd):
     """(edited paths, templated globs, opaque root or "") named by a shell command.
     opaque root = the directory whose docs a script / sliced glob / unresolvable write may have changed."""
@@ -337,9 +435,16 @@ def shell_paths(cmd, cwd):
         if c2:
             cwd = c2
     script = bool(SCRIPT_RUN.search(cmd))
-    if not WRITE_SIG.search(cmd):
+    sigs = list(WRITE_SIG.finditer(cmd))
+    # A command whose ONLY write signals are redirects / tee into a scratch path ($S/x.txt, %TEMP%\x.md,
+    # .../scratchpad/...) writes no deliverable: the globs it names were read (2026-10-22: `python - <<EOF
+    # ... glob(nt-*-DRAFT.md)[:n] ... EOF > $S/matrix.txt` fired on 119 drafts with 0 edited, and the
+    # answer 「全119本中0本を変更」 satisfied the block while the real remainder went unaddressed).
+    # An unsliced literal glob in such a command still counts as edited: that direction can only silence.
+    scratch_only = bool(sigs) and all(_scratch_redirect(m.group(0)) for m in sigs)
+    if not sigs:
         return [], [], (cwd if script else "")
-    edited, templ = [], []
+    edited, templ, from_glob = [], [], []
     sliced = bool(SLICE.search(cmd))
     resolved = False
     for tok in PATH_TOKEN.findall(cmd):
@@ -361,12 +466,16 @@ def shell_paths(cmd, cwd):
                 # an unsliced literal glob is expanded and counted as edited (conservative: it can only
                 # silence the hook). Counting it as "touched only" measured 10.5% firing, LOWER C02 recall.
                 edited.extend(glob.glob(p))
+                from_glob.extend(glob.glob(p))
                 resolved = True
         else:
             p = _norm(tok, cwd)
             if p:
                 edited.append(p)
                 resolved = resolved or os.path.exists(p)
+    if scratch_only:
+        # read-only as far as documents go: keep only the silencing direction (unsliced glob = edited)
+        return from_glob, [], (cwd if script else "")
     opaque = script or bool(templ) or not resolved
     return edited, templ, (cwd if opaque else "")
 
@@ -431,14 +540,19 @@ def _feed(cur, d, text=True):
         return
     cwd = d.get("cwd") or ""
     c = (d.get("message") or {}).get("content")
-    if isinstance(c, list):
-        for b in c:
-            _use(cur, b, cwd)
     if text:
         t = _text(d.get("message")).strip()
         if t:
             cur["answer"] = t
             cur["texts"].append(t)
+            # was there a tool call between the previous text and this one (a text is written before its calls)
+            cur.setdefault("gaps", []).append(bool(cur.get("_tool_since")))
+            cur["_tool_since"] = False
+    if isinstance(c, list):
+        for b in c:
+            _use(cur, b, cwd)
+            if isinstance(b, dict) and b.get("type") == "tool_use":
+                cur["_tool_since"] = True
 
 
 def turns(lines):
@@ -651,6 +765,230 @@ def user_scoped(fam, prompt):
     return all(i in named or any(_stem_in(x, p) for x in fam["members"][i]) for i in fam["edited_ids"])
 
 
+# --------------------------------------------------------------------------- deferred remainder
+# Invariant (any kind of set, not only file families): when the answer ITSELF says that members of the
+# same set as the work just done are still undone -- 「他の5本にも同じ問題が残っています」「h=0.04 と 0.06 は
+# 計算していません」「片方しかない63冊の作成は未対応」 -- the left-out members need a reason of their own
+# (not applicable / no permission / ...). 「直すなら言ってください」「決めてください」 is not such a reason:
+# the same change applies, so it is applied now. Only the final message is read (each stop is checked).
+_COUNTERS = r"(?:本|件|冊|点|個|記事|ファイル|章|話|通り|ケース|セル|種類|レポート|ページ|か所|箇所)"
+_QTY = r"(\d[\d,]*)\s*" + _COUNTERS
+_UNDONE_STRONG = r"(?:未対応|未着手|未作成|未評価|未適用|未修正|未実施|未計算|未検証|未処理)"
+# the rest of a set: 他の5本 / 他にも5本 / 残りは5本 / 残り五本 / 5本にも同じ / 同じ…5本にも / the other 5 reports
+REM_QTY = re.compile(r"(?:他|ほか|残り|残る|残った|あと|その他|それ以外|以外)(?:の|に|にも|は|が|も)?\s*" + _QTY
+                     + r"|" + _QTY + r"\s*(?:に|で|は)?\s*も[^。\n]{0,30}(?:同じ|同様)"
+                     + r"|(?:同じ|同様)[^。\n]{0,30}?" + _QTY + r"\s*(?:に|で)?\s*も"
+                     + r"|(?i:\b(?:the\s+)?(?:other|remaining|rest of the|another)\s+(\d+)\s+[a-z]+)")
+# a parameter grid named by its values: h=0.04 と 0.06 は / x=1, x=2 も
+REM_PARAM = re.compile(r"(?<![\w.])[A-Za-z]\w{0,15}\s*=\s*-?\d[\d.]*(?:\s*(?:[・、,/]|と|や|および)\s*"
+                       r"(?:[A-Za-z]\w{0,15}\s*=\s*)?-?\d[\d.]*)+\s*(?:は|も|が|について)")
+# 「未対応: …63冊の作成」「63冊は未対応」: the undone marker labels the count (a status cell such as
+# 「| …2本) | ほぼ未着手 |」 or 「未作成の11冊にしました」 is not a remainder of this turn's work)
+REM_BOUND = re.compile(_UNDONE_STRONG + r"\W{0,3}[:：][^。\n]{0,40}?" + _QTY
+                       + r"|" + _QTY + r"\s*[はがも]\s*(?:まだ\s*)?" + _UNDONE_STRONG)
+# no count, but the same defect named on the rest of the set: 他のレポートにも同じ問題があります
+REM_NOQTY = re.compile(r"(?:他|ほか|残り|以外)の[^。\n]{1,15}?(?:に|で)も\s*(?:同じ|同様の)\s*(?:問題|不具合|誤り|欠陥|症状|崩れ|バグ)"
+                       r"(?:が|は)?\s*(?:あり|残って|見られ|見つか|出て)")
+UNDONE = re.compile(_UNDONE_STRONG + r"|手つかず|手を付けて(?:い|お)|残って(?:い|お)|残ります|同じ(?:問題|不具合|誤り|欠陥|症状|崩れ)"
+                    r"|同様の(?:問題|不具合|誤り)|(?:評価|計算|検証|修正|対応|作成|適用|実行|直|作|書)(?:して|し|って|いて)"
+                    r"(?:いません|いない|おらず|ません)|まだ(?:直|手を|作|書|や)"
+                    r"|(?i:\bstill\b|\bnot\s+(?:yet\s+)?(?:fixed|done|updated|started|touched|handled)|\buntouched\b"
+                    r"|\bsame\s+(?:bug|issue|problem|error))")
+# the answer hands the go-ahead to the user: an offer, a proceed question, a request to decide
+DEFER = re.compile(r"(?:なら|れば|場合は|ときは|でしたら|たら|であれば)[^。\n]{0,40}(?:言って|お知らせ|ご?指示|お申し付け|教えて|ご連絡|お声がけ)"
+                   r"|(?:ご?指示|ご?希望|ご?要望|ご?依頼|必要|よろしけれ|よけれ|一言)(?:が|を|で|さえ)?"
+                   r"(?:あれば|でしたら|なら|であれば|いただければ|いただけたら|もらえれば|くだされば)"
+                   r"|(?:決めて|お決め|ご判断|判断して|ご指示|ご検討|指示して|お申し付け)(?:ください|下さい|いただ)"
+                   r"|(?:始めて|進めて|直して|作って|広げて|適用して|やって|続けて|対応して)(?:も)?(?:よい|いい|よろしい)(?:か|です|でしょう)"
+                   r"|お返事|ご返事|ご返答|(?:進め|直し|広げ|続け|やり|対応し|修正し|作り)(?:ますか|ましょうか)|どうしますか|どうしましょう|いかがしますか"
+                   r"|(?i:\blet me know\b|\bshall i\b|\bif you want me to\b|\bwant me to\b|\bshould i\b)")
+# a closing that invites feedback in general, not a go-ahead for the remainder
+GENERIC_INVITE = re.compile(r"(?:ほかに|他に|何か|ご不明|不明点|気になる|質問|疑問|違和感|問題が|修正点|ご意見)[^。\n]{0,20}"
+                            r"(?:あれば|ば|なら|でしたら|ございましたら)")
+# the deferral points at the remainder (「残りも直すなら」「それらは」「全部」)
+REM_REF = re.compile(r"残り|それら|これら|続き|全部|すべて|全て|他の|ほかの|同じ手順|同様に|(?i:\bthem\b|\bthe rest\b)")
+# a sentence that says the rest needs no work: no problem / none left / already fixed / out of scope
+NEGATED = re.compile(r"(?:問題|不具合|誤り|欠陥|症状|崩れ|バグ)(?:は|が|も)?\s*(?:なく|ない|無く|無い|ありません|見つかりません|見当たりません|見つからな)"
+                     r"|残って(?:い)?(?:ない|ません)|残っていません|(?<![\d.])0\s*(?:件|本|冊|点|個)|修正済|対応済|直し済|作成済|適用済"
+                     r"|(?:すべて|全て|全部)(?:修正|対応|直し|作成|適用)|必要(?:は|が)?(?:ない|ありません|なし)|不要|スキップ"
+                     r"|範囲外|対象外|当てはまらな|当てはまりません|該当しな|該当しません"
+                     r"|(?i:\bno\s+(?:issue|problem|bug)s?\b|\bnone\b|\balready\s+fixed\b|\bout of scope\b)")
+# a reason that belongs to the left-out members themselves (the user alone can grant / undo / pay)
+OWN_REASON = re.compile(r"権限|ユーザー指定|ご指定|依頼(?:の範囲|に含ま)|意図的|別の?(?:セッション|担当)|できな|できません|不可能"
+                        r"|取り消せ|元に戻せ|不可逆|購入|課金|費用|有料|支払|契約|ログイン|本人(?:の|しか)"
+                        r"|deny|(?:あなた|ユーザー|ご本人)(?:の|が)(?:操作|手作業|手動)|手動で"
+                        r"|(?i:not applicable|no permission|irreversible|requires? (?:purchase|payment|access))")
+# the user limited this instruction to part of the set (「3本だけ」「まず3つ」「そこまで」「実行はまだ」)
+USER_PARTIAL = re.compile(r"\d+\s*(?:本|件|冊|つ|個|点|記事|章)\s*(?:だけ|のみ|まで)|そこまで|(?:まず|試しに|最初に|先に)[^。\n]{0,30}"
+                          r"\d+\s*(?:本|件|冊|つ|個|点|記事|章)|(?:実行|着手|適用)は(?:まだ(?!考え)|しない|せず|不要)|計画(?:だけ|のみ)"
+                          r"|(?i:\bonly\s+(?:the\s+)?(?:first\s+)?\d+\b)")
+# ... unless the same prompt orders the whole set (「5本とも直して。まず1本目の方針を書いて、そのあと全部」)
+USER_WHOLE = re.compile(r"全部|すべて|全て|全件|全\s*\d+|\d+\s*(?:本|件|冊|章|個)\s*(?:とも|全部|すべて)|そのあと|その後|残りも"
+                        r"|(?i:\ball\b)")
+# a count that is a REST of a set (残りの6本 / 片方しかない63冊 / 次の10本 / 33本も), not 「2点をご判断ください」
+REM_ANCHOR = re.compile(r"(?:残り|残る|他の|ほかの|あと|次の|続きの|片方|以外の)[^。\n]{0,12}?" + _QTY
+                        + r"|" + _QTY + r"\s*(?:に|で)?\s*も")
+# the user asked only for a status listing (「適応できていない記事がどれかを…表形式で報告して」): the undone
+# list IS the answer. A prompt that also orders the work (「全8本を直して、結果を報告して」) is not one.
+USER_STATUS = re.compile(r"(?:報告|一覧に|リストアップ|洗い出)して|表(?:形式)?で(?:報告|まとめ|出)")
+USER_WORK = re.compile(r"(?:直|作|書|修正|対応|追加|反映|適用|実行|進め|回|計算|評価|検証|改稿|更新|生成)(?:して|せよ|しろ|って)"
+                       r"|(?i:\b(?:fix|make|write|update|apply|run)\b)")
+CLOSING_ONLY = re.compile(r"^\W*(?:以上|以上です|以上となります|終わりです|done)\W*$", re.I)
+_KANJI_D = {"〇": 0, "一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+
+
+def _kanji_num(s):
+    v, cur = 0, 0
+    for ch in s:
+        if ch in _KANJI_D:
+            cur = _KANJI_D[ch]
+        else:
+            v += (cur or 1) * {"十": 10, "百": 100, "千": 1000}[ch]
+            cur = 0
+    return v + cur
+
+
+def _rem_clean(text):
+    a = _clean(text)
+    a = re.sub(r"`[^`\n]*`", " ", a)
+    a = re.sub(r"\*\*|__", "", a)                               # **5本** -> 5本
+    a = re.sub(r"(?m)^\s*>\s?", "", a)                          # a quoted hand-off is still a hand-off
+    return re.sub(r"[〇一二三四五六七八九十百千]+(?=\s*" + _COUNTERS + ")", lambda m: str(_kanji_num(m.group(0))), a)
+
+
+def _plural(m):
+    """A matched remainder count of at least 2 (「FAIL 1件」 is one finding, not the rest of a set)."""
+    nums = [g for g in m.groups() if g] if m else []
+    return bool(m) and any(int(g.replace(",", "")) >= 2 for g in nums if g.replace(",", "").isdigit())
+
+
+def _units(a):
+    """Sentences / lines, keeping blank lines as paragraph breaks (None)."""
+    out = []
+    for line in a.split("\n"):
+        if not line.strip():
+            out.append(None)
+            continue
+        for s in re.split(r"(?<=[。！？!?])|(?<=\.)\s+(?=[A-Z])", line):
+            if s and s.strip():
+                out.append(s.strip())
+    return out
+
+
+def _defer(s):
+    return bool(s and DEFER.search(s) and not (GENERIC_INVITE.search(s) and not REM_REF.search(s)))
+
+
+def _is_rem(s):
+    anchor = REM_ANCHOR.search(s)
+    return bool(((_plural(REM_QTY.search(s)) or REM_PARAM.search(s)) and UNDONE.search(s))
+                or _plural(REM_BOUND.search(s)) or REM_NOQTY.search(s)
+                or (_plural(anchor) and not re.search(r"\d\s*点", anchor.group(0)) and _defer(s)))
+
+
+def remainder_units(text):
+    """[(sentence, index of its last unit, units)] for each sentence that states a same-kind remainder as undone, with no
+    statement in it that the rest needs no work (NEGATED) and no reason of the members' own (OWN_REASON,
+    in it or in the sentence just before: 「削除は取り消せません。残り30本は未実施です。」)."""
+    us = _units(_rem_clean(text))
+    out = []
+    for i, s in enumerate(us):
+        if s is None:
+            continue
+        cand, end = s, i
+        if not _is_rem(s):
+            nxt = next((u for u in us[i + 1:i + 2] if u), None)
+            if re.match(r"^\W*" + _UNDONE_STRONG + r"\W*(?:" + _QTY + r"\W*)?$", s):    # 「**未対応**」 + its list lines
+                lst = []
+                for u in us[i + 1:]:
+                    if u is None or not re.match(r"^\s*(?:[-*・+]|\d+[.)])", u):
+                        break
+                    lst.append(u)
+                cand, end = s + ": " + " ".join(lst), i + len(lst)
+                if not (_plural(re.search(_QTY, cand)) or len(lst) >= 2):
+                    continue
+            elif nxt and (_plural(REM_QTY.search(s)) or _plural(REM_ANCHOR.search(s))) and UNDONE.search(nxt) \
+                    and not re.search(_QTY, nxt):           # 「他にも5本あります。いずれも未対応です。」
+                cand, end = s + nxt, us.index(nxt, i + 1)
+            else:
+                continue
+        prev = next((u for u in reversed(us[:i]) if u), "") if i else ""
+        if NEGATED.search(cand) or OWN_REASON.search(cand) or OWN_REASON.search(prev or ""):
+            continue
+        out.append((cand, end, us))
+    return out
+
+
+def remainder_sentences(text):
+    """Sentences of the text that state a same-kind remainder as undone."""
+    return [c for c, _i, _us in remainder_units(text)]
+
+
+def _bound_defer(i, us):
+    """The hand-off sentence tied to the remainder at units[i]: in it, in the next two sentences (across a
+    blank line), or anywhere after it when it names the rest (「残りも直すなら言ってください」)."""
+    seen = 0
+    for u in us[i:]:
+        if u is None:
+            continue
+        if _defer(u) and (seen <= 2 or REM_REF.search(u)):
+            return u
+        seen += 1
+    return None
+
+
+def _delegation_stalls(text, prompt, sents):
+    """True when delegation_guard (C03) already stops one of these hand-off sentences as a continuation
+    Claude could decide itself: the go-ahead is self-decidable, so that hook owns the block."""
+    try:
+        here = os.path.dirname(os.path.abspath(__file__))
+        if here not in sys.path:
+            sys.path.insert(0, here)
+        import delegation_guard
+        st = delegation_guard.stalled(text, prompt)
+    except Exception:
+        return False
+    if not st:
+        return False
+    s = re.sub(r"\*\*", "", unicodedata.normalize("NFKC", st[1] or "")).strip()
+    return bool(s) and any(s in x or x in s for x in sents)
+
+
+def deferred_remainder(turn, text=None, defer_to_delegation=None):
+    """[sentences] when the answer leaves a same-kind remainder it names as undone and hands the go-ahead
+    for it to the user (REQUIRE_DEFER), without a reason of the members' own; else []."""
+    if not turn or not (turn.get("edited") or turn.get("templ") or turn.get("roots")):
+        return []                                    # nothing was worked on: a status answer, not a partial job
+    pr = unicodedata.normalize("NFKC", turn.get("prompt") or "")
+    if USER_PARTIAL.search(pr) and not USER_WHOLE.search(pr):
+        return []
+    if USER_STATUS.search(pr) and not USER_WORK.search(pr):
+        return []
+    if text is None:
+        texts = turn.get("texts") or [turn.get("answer", "")]
+        gaps = turn.get("gaps") or []
+        text = texts[-1]
+        if CLOSING_ONLY.match(_clean(text).strip()) and len(texts) > 1 and len(gaps) == len(texts) and not gaps[-1]:
+            text = texts[-2]                             # 「以上です。」 right after the real answer (no work between)
+    hits = remainder_units(text)
+    if not hits:
+        return []
+    if not REQUIRE_DEFER:
+        return [c for c, _i, _us in hits]
+    out = []
+    for c, i, us in hits:
+        d = _bound_defer(i, us)
+        if d:
+            out.append((c, d))
+    if not out:
+        return []
+    if defer_to_delegation is None:
+        defer_to_delegation = DEFER_TO_DELEGATION and not turn.get("_dlg_spent")
+    if defer_to_delegation and _delegation_stalls(text, turn.get("prompt") or "", [x for p in out for x in p]):
+        return []
+    return [c for c, _d in out]
+
+
 def pattern(key):
     d, ext, pre, tag = key
     if pre.startswith("dir:"):
@@ -663,6 +1001,20 @@ def pattern(key):
 
 
 def decide(turn, now=None):
+    """First uncovered family touched by this turn as a dict (kind "family"; with "remainder" when the
+    answer also defers a named remainder), or {"kind": "remainder", "sentences": [...]}, or None.
+    """
+    if not turn or not turn.get("prompt"):
+        return None
+    rem = deferred_remainder(turn)
+    fam = decide_family(turn, now)
+    if fam:
+        fam["remainder"] = rem
+        return fam
+    return {"kind": "remainder", "sentences": rem} if rem else None
+
+
+def decide_family(turn, now=None):
     """First uncovered family touched by this turn as a dict, or None.
     now: end of the turn's window for the mtime scan (the hook passes time.time(); the calibrator
     leaves it None and the turn's last timestamp is used)."""
@@ -714,7 +1066,7 @@ def decide(turn, now=None):
         rest = sorted(i for i in live if i not in ids)
         if not rest:
             continue
-        fam = {"key": k, "members": live, "dead": dead, "edited_ids": mine, "unedited_ids": rest,
+        fam = {"kind": "family", "key": k, "members": live, "dead": dead, "edited_ids": mine, "unedited_ids": rest,
                "edited": [sorted(live[i])[-1] for i in mine], "unedited": [sorted(live[i])[-1] for i in rest]}
         if user_scoped(fam, turn.get("prompt")):
             continue
@@ -730,7 +1082,27 @@ def decide(turn, now=None):
 
 
 # --------------------------------------------------------------------------- hook
+REM_HEAD = "【残りの先送り検査（1回のみ）】"
+
+
+def reason_remainder(sentences):
+    q = " / ".join("「%s」" % s[:120] for s in sentences[:3])
+    return (REM_HEAD + "回答が、いま手を付けた集合と同じ種類の残りを自分で挙げながら、適用せずに止めている: %s。"
+            "同じ変更・同じ評価が当てはまるなら、今このターンで残り全部に適用し、回答に「全N件中M件」の形で総数と処理数を書け。"
+            "適用しないものは1件ずつ（同じ理由なら範囲でまとめて）、そのもの自体の理由を書け"
+            "（当てはまらない・権限がない・購入など取り消せない費用が要る 等）。"
+            "「直すなら言ってください」「決めてください」「お返事待ち」は理由にならない"
+            "（CLAUDE.md §11.2・依頼の取りこぼし C02）。" % q)
+
+
 def reason_for(fam):
+    if fam.get("kind") == "remainder":
+        return reason_remainder(fam["sentences"])
+    extra = (" " + reason_remainder(fam["remainder"])) if fam.get("remainder") else ""
+    return _reason_family(fam) + extra
+
+
+def _reason_family(fam):
     names = [os.path.basename(p) for p in fam["unedited"]]
     more = "" if len(names) <= 10 else "（他%d本）" % (len(names) - 10)
     m = len(fam["edited"])
@@ -769,10 +1141,19 @@ def main():
     if not os.path.isfile(tp):
         return
     turn = read_turn(tp)
+    if turn:
+        # delegation_guard blocks once per instruction (same key): after its block, a hand-off it would stop
+        # again goes through, so the remainder check must not step aside for it any more
+        dk = hashlib.sha1((turn.get("ts", "") + (turn.get("prompt") or "")).encode("utf-8", "replace")).hexdigest()[:16]
+        turn["_dlg_spent"] = os.path.exists(os.path.join(
+            os.path.expanduser("~"), ".claude", "state", "delegation_guard_seen",
+            "".join(ch for ch in (ev.get("session_id") or "x") if ch.isalnum() or ch in "-_") + "_" + dk))
     fam = decide(turn, now=time.time())
     if not fam:
         return
     key = hashlib.sha1((turn.get("ts", "") + (turn.get("prompt") or "")).encode("utf-8", "replace")).hexdigest()[:16]
+    if fam.get("kind") == "remainder":
+        key += "_r"                    # its own once-per-instruction mark: a family block earlier does not hide it
     mark = os.path.join(STATE_DIR, "".join(ch for ch in (ev.get("session_id") or "x") if ch.isalnum() or ch in "-_") + "_" + key)
     if os.path.exists(mark):
         return

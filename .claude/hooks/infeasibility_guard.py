@@ -137,6 +137,53 @@ real hook by tests/test_infeasibility_guard.py):
     constraint stated without a recap marker (社内 VPN 外からは ... アクセス
     できない) -- still blocks once.
 
+REDESIGN 2026-11-03 (C01 recurred 10 times after adoption; reports/CORRECTION_DIGEST_20261102.md)
+---------------------------------------------------------------------------------------------
+Sorting the 10 answers before those corrections (transcript replay, this module and the neighbours
+imported): 1 is external_state_claim_guard's (sheet state asserted), 1 is delegation_guard v3's
+(decision request), 1 is primarily external_state's known gap (screen state, wrong browser read),
+4 are wrong facts / stale premises / new instructions (out of scope), and 2 -- plus a sentence of
+the screen case -- are this class and passed v1:
+  CLASS: the answer says nothing can be done now, or stops to wait for an external event (a mail,
+  another session's push, a job), without checking whether the blocking condition still holds.
+Added (by morphology / turn shape, not strings):
+  B2   ichidan potential + negation (閉じられません, 届けられない); stems whose られ is passive in
+       practice (求め・認め・含め・考え・忘れ・信じ ...) excluded.
+  E    zero-count capability: <potential verb>る … は 0本 / 1件もありません (今すぐ私が直せる記事は0本です).
+  WAIT a sentence whose continuation is conditional on an external event -- 〜たら / 次第 / てから /
+       たあと + an own future act or 「一言ください」 -- where the event is of a kind this turn can look
+       at (MAIL / REMOTE push・session / JOB / WEB). It passes when this turn contacted that kind
+       (Gmail-type connector; git fetch|ls-remote|pull, origin/, gh; a background job or agent launched;
+       a browser / fetch) -- unless the answer itself says part of that check is not done (未確認 /
+       まだ確かめていません about the same thing), or the deferred step IS the check (「push を確かめた
+       あと…します」), which never passes. Not WAIT: the user's own act (ご確認いただいたら・許可・ログ
+       イン・決まったら -- delegation_guard's domain), contingencies (問題が出たら・必要が出たら・割ったら),
+       branches (〜なら、), procedures with no event kind (位置を目で確かめてから打ちます), progressive
+       descriptions (確認してから消しています).
+  Boundary with delegation_guard v4.1: it treats 「an external event to wait for」 as a stake that
+  excuses a stall and any MCP call as an attempt; WAIT checks only that excuse (was the event looked
+  at?), never request / stall wording.
+Calibration (real main-agent turns, old = git HEAD copy, new = this file, both decide() imported):
+  7 days 76 turns 1.3% -> 3.9% (+2); 21 days 381 turns 2.4% -> 3.4% (+4: three are the answers the
+  user then corrected, one unclear 「私からは別のセッションを始められないためです」). Tests:
+  tests/test_infeasibility_guard.py (19 new rows; HOOK=<HEAD copy> fails the 10 BLOCK rows).
+V2 (same day, Sonnet attack -- tests/fixtures/infeasibility_guard_attack_20261103.json, 101 cases):
+  v1 let 15/42 evasions through (35.7%) and stopped 14/43 legitimate answers (32.6%); 45 days showed 3 B2
+  false fires. Fixed: dictionary / まで待つ / のを待つ / を待つ / 確認でき次第 / 時点で / のち / 届くと forms and
+  an event named in the sentence before; work launched in an EARLIER turn and still running
+  (pending_jobs(): launch ids minus <task-notification> status ids, read in the 4 MB window, same idea as
+  delegation_guard.bg_pending but implemented here) and schedulers / SendMessage / detached processes
+  excuse a job wait; 完了通知 is a job, not a mail; one kind's tool is no evidence for another (an Agent
+  does not check a push; quoted strings / echo do not count; Gmail must be a read call); descriptions
+  (自動で / されます / 設計 / 手順: lines), the user's own work (手動で…, or an answer that asks the user
+  to paste / run / reply) and own checks of a job already run this turn pass; B2 needs Claude's side
+  (こちら・私・ここから・画面・タブ・ツール ...) and not a past report; E needs a self / now marker
+  (私・今すぐ・いま・このターン), skips 0件でした and analytic verbs, and reads a table row's
+  「直せる記事 | 0本」. Attack re-run: evasions 38/42 caught (left: 3 English, 1 B2 without Claude's
+  side -- by design), legitimate 2/43 stopped (both synthetic: a wait with no launch in the transcript,
+  one launch closed by its notification while the text says 4 remain). 45 days 654 turns: 3.1% -> 3.7%
+  (+4: three answers the user then corrected, one unclear). Tests 143/143 (HEAD copy 126/143).
+
 FAIL-OPEN: any exception -> exit 0. CLAUDE_HEADLESS_JOB=1 -> skip entirely.
 LOOP SAFETY: stop_hook_active -> return; one block per instruction.
 
@@ -169,8 +216,29 @@ _CAP_DEKI = re.compile(
 _GODAN = ("書き込め|書け|読み込め|読め|見られ|見れ|開け|送れ|貼り付けられ|貼れ|使え|扱え|載せられ|埋め込め|入れられ"
           "|動かせ|呼び出せ|呼べ|取り込め|取れ|出せ|作れ|直せ|変えられ|消せ|置け|残せ|聞け|探せ|渡せ|付けられ"
           "|戻せ|繋げ|つなげ|行え|走らせ|回せ|叩け|触れられ|上げられ|落とせ|拾え|押せ|選べ|移せ|写せ|撮れ"
-          "|立ち上げられ|立てられ|飛ばせ|入れ込め|差し込め|組み込め|持ち込め|書き換えられ|登録でき")
+          "|立ち上げられ|立てられ|飛ばせ|入れ込め|差し込め|組み込め|持ち込め|書き換えられ|登録でき|試せ")
 _CAP_GODAN = re.compile(r"(?P<v>" + _GODAN + r")" + _NEG)
+# B2 (2026-11-03). Ichidan potential by MORPHOLOGY, not by list: <kanji>(い段/え段 kana)?られ + negation
+# -- 閉じられません / 届けられない / 止められません. The list above missed 閉じられません (2026-10-30).
+# Stems whose られ is passive/honorific in practice (求められない, 認められない) are not capability.
+_CAP_ICHIDAN = re.compile(
+    r"(?P<v>(?![求認含定与考感課迫褒責決避忘信耐比])[一-龠][いきぎしじちにびみりえけげせぜてでねべめれ]?)られ" + _NEG)
+# E (2026-11-03). Zero-count capability: 「今すぐ私が直せる記事は0本です」 says nothing can be done, with no
+# negation verb to anchor on (2026-10-28: the blocking condition -- another session still writing -- was
+# never checked and had ended long before).
+_POT = r"(?:" + _GODAN + r"|[一-龠々ァ-ヴー]{1,8}(?:でき|出来|られ))る"
+_CAP_ZERO = re.compile(
+    r"(?P<v>" + _POT + r")[^。、]{0,15}?(?:は|が|も)\s*(?:0|０|ゼロ)\s*(?:本|件|個|つ|点|行|枚|人|社|ファイル|項目)?"
+    r"(?=\s*(?:です|でした|だ|。|$|\*|（|\())"
+    r"|(?P<v2>" + _POT + r")[^。、]{0,15}?(?:は|が)(?:一つも|1つも|ひとつも|1本も|1件も|何も)(?:ありません|ない|無い)"
+    r"|(?P<v3>" + _POT + r")[^。、:：]{0,15}?\s*[:：]\s*\**\s*(?:0|０|ゼロ)\s*(?:本|件|個|つ|点|行|枚|人|社|ファイル|項目)?\s*\**\s*$"
+    r"|(?P<v4>(?:でき|やれ)る)こと(?:は|が)[^。]{0,8}?(?:ありません|ない|無い)")
+# B2 / E are read only when the side that cannot act is Claude's (its tools, access, operations) or "now":
+# a market explanation (証拠金なしでは建てられません), a past report (切り分けられませんでした) and a limit of an
+# answer's basis (注入されていなければ答えられない) are not capability claims about this turn (45-day FPs).
+SELF_SIDE = re.compile(r"こちら|私|ここ(?:から|では|で)|当方|自分|Claude|このセッション|このターン|ツール|コネクタ"
+                       r"|ブラウザ|\bAPI\b|MCP|画面|タブ|ダイアログ|ウィンドウ|ボタン|設定|コマンド|ターミナル")
+NOW_SIDE = re.compile(r"私|こちら|ここから|自分|今すぐ|いま|今は|現時点|このターン|当方")
 # C. passive negative: 反映されません / 表示されない / 読み込まれていない
 _CAP_PASSIVE = re.compile(
     r"(?P<v>[一-龠々ァ-ヴー]{2,12})され(?:ない|ません|ず)"
@@ -183,7 +251,9 @@ _CAP_SUPPORT = re.compile(
     r"|\b(?:does not|doesn't|do not|don't|cannot|can't|can not|is not able to|isn't able to|unable to|won't)\s+"
     r"(?:support|render|display|show|access|open|read|write|run|execute|load|connect|edit|upload|embed|be\s+(?:used|displayed|rendered|opened))\b"
     r"|\bnot supported\b|\bunsupported\b|\bnot possible\b|\bno way to\b", re.I)
-CAP_PATTERNS = (_CAP_DEKI, _CAP_GODAN, _CAP_PASSIVE, _CAP_SUPPORT)
+CAP_PATTERNS = (_CAP_DEKI, _CAP_GODAN, _CAP_ICHIDAN, _CAP_PASSIVE, _CAP_SUPPORT, _CAP_ZERO)
+_ZERO_CELL = re.compile(r"^(?P<v>.{0,30}?" + _POT + r")[^|]{0,15}$")
+_ZERO_VAL = re.compile(r"^\s*\**\s*(?:0|０|ゼロ)\s*(?:本|件|個|つ|点|行|枚|人|社|ファイル|項目)?\s*\**\s*$")
 EXHAUSTIVE = re.compile(
     r"(?:手段|方法|やり方|術|手立て|打ち手|打つ手|選択肢|方策|アプローチ)(?:は|が|も)?(?:何も|一切|他に|もう|どこにも)?"
     r"(?:ない|無い|なく|ありません|存在しない|存在しません|見当たらない|見当たりません|見つか(?:らない|らず|りません|らなかった)|なさそう)"
@@ -222,6 +292,214 @@ EXCUSE = re.compile(
 # status, it does not assert that something cannot be done.
 ATTRIBUTIVE = re.compile(r"^(?:の(?!で|ため|は|に)|な(?!ので|ため|のは|ん)|[一-龠ァ-ヴ])")
 NEGATED_EXCUSE = re.compile(r"[^、。,]{0,24}(?:ではなく|ではありませんが|ではないが|じゃなくて|とは関係なく)[、,]?")
+
+# ---------------------------------------------------------------- WAIT (2026-11-03, v2 after the Sonnet attack)
+# Class: the answer stops and waits for an EXTERNAL EVENT (a mail to arrive, another session / person
+# to finish and push, a job to end, a page to reflect) -- or defers its own check of one -- although
+# whether the event has already happened is checkable now and this turn did not check it, or the
+# answer itself says part of the check is not done. Real cases (correction_history C01):
+#   2026-10-21 「案内メールが届いたら「届いた」と一言ください」 with 「迷惑メールに入っている可能性は、
+#       まだ確かめていません」 -> 「…にとどいているので確認して」
+#   2026-10-28 「向こうの push が終わったら…検査します」 / 「文体セッションの push を確かめたあと、残りの
+#       15本を検査します」 -> 「文体セッションの push はとっくに終わっているので、残りの15本を進めて」
+# Boundary: delegation_guard v4.1 treats 「an external event to wait for」 as a stake that EXCUSES a
+# stall, and v3 excuses a request when the turn made any MCP call. This family checks exactly that
+# excuse -- was the awaited event looked at? -- and nothing else (no request / stall wording).
+# The user's own act (ご確認いただいたら / 許可したら / ログインしたら / 手動で…終わったら) is NOT an event
+# here: waiting for the user is delegation_guard's question.
+# v2 (attack fixtures/infeasibility_guard_attack_20261103.json): the dictionary / terminal forms of the
+# wait (終わるまで待ちます・届くのを待って・push を待ちます・確認でき次第・終わった時点で・したのち・届くと),
+# an event named only in the previous sentence (「…終わっていません。終わったら検査します」), work still
+# running from an EARLIER turn (pending_jobs(): launches minus completion notifications in the read
+# window), schedulers / messages / detached processes as a job, one kind's evidence no longer standing
+# in for another's, descriptions of a design or procedure (自動で / されます / 設計 / 手順:) passed.
+_EV_VERB = (r"(?:届い|届き|着い|到着し|来|終わっ|終わり|終え|終了し|完了し|済ん|反映され|公開され|揃っ|返っ|返ってき|戻っ"
+            r"|入っ|出|空い|解除され|push\s*され|push\s*し|マージされ|確定し|処理され|生成され|書き終わ|走り終わ"
+            r"|確かめ|確認し|確認でき|調べ|見)")
+_EV_COND = r"(?:たら|次第|てから|た(?:あと|後|のち|時点で|段階で|うえで|上で)(?:で|に)?|るまで|るのを待っ)"
+# dictionary form + まで待つ / のを待つ / と(すぐ): 「push が終わるまで待ちます」「メールが届くのを待って」「届くと、すぐ」
+_EV_DICT = r"(?:届く|着く|終わる|終える|終了する|完了する|済む|反映される|公開される|揃う|返ってくる|戻る|push\s*される|マージされる|来る)"
+WAIT = re.compile(
+    r"(?P<ev>[^。、]{0,40}?)(?P<verb>" + _EV_VERB + r")" + _EV_COND +
+    r"|(?P<ev2>[^。、]{0,40}?)(?P<verb2>" + _EV_DICT + r")(?:まで|のを)待(?=ち|っ)" +
+    r"|(?P<ev3>[^。、]{0,40}?)(?P<verb3>" + _EV_DICT + r")と(?=[、,]|\s*すぐ)" +
+    # noun + を待つ: 「別セッションの push を待ってから」「向こうの push を待ちます」「完了を待って」
+    r"|(?P<ev4>[^。、]{1,40}?)(?P<verb4>を)待(?=ち|っ)")
+OWN_CHECK = re.compile(r"^(?:確かめ|確認し|確認でき|調べ|見)$")
+# what makes the sentence a stop: an own non-past act (〜します / 進めます / 検査します), or a request to be told
+CONTINUE = re.compile(r"(?<!てい)(?<!てお)(?<!でい)(?:ます|ましょう|る予定|る方針)(?:[。．]|$|\s|\*|（|\()"
+                      r"|(?:一言|ご連絡|連絡|お知らせ|知らせて|教えて|送って|声をかけて)(?:ください|下さい|いただ|頂|もら)")
+# the answer hands the user a piece of work (paste / run / press / reply): a job- or page-type wait in such an
+# answer is a wait on the user's work -- delegation_guard's question, not this hook's (45-day FPs 09-28, 10-28)
+USER_WORK = re.compile(r"(?:貼って|貼り付けて|実行して|押して|開いて|入力して|操作して|ログインして|設定して|インストールして"
+                       r"|ダウンロードして|アップロードして|選んで|許可して|クリックして|返信して|返して|送って)(?:ください|下さい|いただ)")
+ASK_USER = re.compile(r"(?:一言|ご連絡|連絡|お知らせ|知らせて|教えて|送って|声をかけて)(?:ください|下さい|いただ|頂|もら)")
+# the continuation describes a design / automation / output, not Claude's own next act
+DESCRIBES = re.compile(r"自動|され(?:ます|る)|設計|仕組み|仕様|ようになって|(?:届き|消え|出|始まり|残り|流れ|走り)ます|走らせます")
+DESC_LINE = re.compile(r"^\s*(?:[-*+]\s*)?(?:\*\*)?(?:手順|設計|仕様|注意|仕組み|例|動作)\s*[0-9０-９]*\s*(?:\*\*)?\s*[:：]")
+# the event's actor is the user / a person deciding: delegation_guard's domain
+USER_EVENT = re.compile(r"ご|お[一-龠]|いただ|頂|本人|あなた|ユーザー|ご自身|決ま|承認|許可|ログイン|判断|返答|回答|答え|返事|指示"
+                        r"|手動|お手元|そちらで|お手数")
+# a contingency (「問題が出たら」「必要が出たら」「1,650万円を割ったら」) is a rule for the future, not a wait
+# on an event that may already have happened; neither is a branch on a condition (「〜なら、…確認してから」).
+CONTINGENCY = re.compile(r"場面|場合|問題|不具合|エラー|必要|ズレ|違和感|疑問|異常|変化|差分|割っ|割り込|超え|下回|上回|気にな|困っ")
+COND_BRANCH = re.compile(r"(?:もし|仮に)|(?:なら|場合は|ときは|時は|であれば|でしたら)[、,]")
+UNVERIFIED = re.compile(r"未確認|未検証|(?:確かめ|確認し|調べ|見)て(?:い)?(?:ない|ません)"
+                        r"|確認できて(?:い)?(?:ない|ません)|(?:確かめ|確認|チェック)(?:は|も)?(?:まだ|未)")
+_Q = re.compile(r"'[^']*'|\"(?:\\.|[^\"\\])*\"")
+# kinds of awaited event -> what this turn must contain to have looked at it. A tool of one kind is not
+# evidence for another (an Agent launch does not check a push; a git fetch does not check a mail).
+EV_KINDS = (
+    ("MAIL", re.compile(r"メール|返信|受信|着信|\bmail\b", re.I),
+     lambda n, c: bool(re.search(r"gmail|mail|outlook", n, re.I) and re.search(r"search|get|list|read|fetch|thread", n, re.I))
+     or bool(re.search(r"\b(?:imap|mail)\b", c, re.I))),
+    ("REMOTE", re.compile(r"push|プッシュ|コミット|マージ|ブランチ|セッション|リモート|origin|GitHub|PR\b|プルリク|反映|作業", re.I),
+     lambda n, c: bool(re.search(r"github", n, re.I)) or bool(re.search(
+         r"git\s+(?:-C\s+\S+\s+)?(?:fetch|ls-remote|pull)\b|origin/|@\{u\}|\bgh\s+(?:api|pr|run|repo)\b|api\.github\.com", c))),
+    ("JOB", re.compile(r"処理|計算|ジョブ|実行|タスク|ビルド|テスト|\bCI\b|エージェント|サブエージェント|[0-9０-９一二三四五六七八九十]体"
+                       r"|完了通知|バックグラウンド|学習|集計|収集|調査|検証|レビュー|ダウンロード|生成|変換|書き出し|結果|出力"),
+     None),   # see _job_seen / pending_jobs
+    ("WEB", re.compile(r"画面|ページ|サイト|表示|公開|デプロイ|ブラウザ|審査|掲載|URL", re.I),
+     lambda n, c: bool(FETCH_TOOL.search(n)) or bool(re.search(r"\bcurl\b|\bwget\b|Invoke-WebRequest|Invoke-RestMethod", c))),
+)
+
+
+def _wait_match(m):
+    for k in ("", "2", "3", "4"):
+        if m.group("verb" + k) is not None:
+            return m.group("ev" + k) or "", m.group("verb" + k), k
+    return "", "", ""
+
+
+def find_waits(answer):
+    """[(sentence, event clause, verb)] for sentences that stop on an external event."""
+    out = []
+    prev = ""
+    for s, line, raw in _segments(answer):
+        if DESC_LINE.match(raw) or DESC_LINE.match(line):
+            prev = s
+            continue
+        for m in WAIT.finditer(s):
+            ev, verb, form = _wait_match(m)
+            rest = s[m.end():]
+            if not _content(ev):
+                if re.search(r"(?:ください|下さい|いただけ|お願い)", prev):
+                    continue             # the sentence before asks the user for it: the user's act
+                ev = prev[-40:]          # 「…終わっていません。終わったら検査します」: the event is in the sentence before
+            if COND_BRANCH.search(s[:m.end()]) or USER_EVENT.search(ev + verb) or CONTINGENCY.search(ev):
+                continue
+            # only an event of a kind this turn could have looked at (mail / remote / job / web). A procedure
+            # step (「位置を目で確かめてから打ちます」) or an unnamed event (「データが届いたら」) is not checked.
+            kinds = [k for k, rx, _f in EV_KINDS if rx.search(ev + verb)]
+            if not kinds:
+                continue
+            waits = form in ("2", "4") or (form == "3")
+            if not _content(ev) or not (waits or CONTINUE.search(rest)):
+                continue
+            if re.search(r"[？?]\s*\**\s*$", rest) or DESCRIBES.search(rest):
+                continue
+            if set(kinds) <= {"JOB", "WEB"} and USER_WORK.search(answer or ""):
+                continue
+            if ASK_USER.search(rest) and kinds == ["JOB"]:
+                continue                 # 「〜が終わったら教えてください」: the user runs the job -- delegation_guard
+            out.append((s.strip(), ev.strip(), verb))
+            break
+        prev = s
+    return out
+
+
+JOB_TOOLS = ("Agent", "Task", "Monitor", "TaskOutput", "BashOutput", "Workflow", "CronCreate", "ScheduleWakeup",
+             "SendMessage")
+DETACH = re.compile(r"Start-Process|Start-Job|\bnohup\b|\bstart\s+/b\b|&\s*$|\bsetsid\b|\bdisown\b", re.I)
+
+
+def _job_seen(tools):
+    """The turn launched / scheduled / messaged something that will report back by itself."""
+    for n, i in tools:
+        i = i or {}
+        if n in JOB_TOOLS:
+            return True
+        if n in EXEC_TOOL:
+            c = _Q.sub(" Q ", str(i.get("command", "")))
+            if i.get("run_in_background") and not re.match(r"^\s*sleep\b", c):
+                return True
+            if DETACH.search(c):
+                return True
+    return False
+
+
+_LAUNCH_ID = re.compile(r"agentId: ([0-9a-f]{8,})|background with ID: (\w+)|resumedAgentId\W{1,8}([0-9a-f]{8,})")
+_DONE_ID = re.compile(r"<task-id>(\w+)</task-id>.{0,600}?<status>(?:completed|failed|killed|stopped)", re.S)
+
+
+def pending_jobs(rows):
+    """How many subagents / background commands launched anywhere in the read window (this turn or an
+    earlier one) have no completion notification yet. Same idea as delegation_guard.bg_pending(), kept
+    here so the hooks stay independent: ids from the launch results minus ids in <task-notification>
+    status lines. A foreground agent result carries <usage> (it has finished). A launch whose result has
+    no id is counted anonymously and is closed by a notification without an id."""
+    launched, done, anon = set(), set(), 0
+    bg_calls = {}
+    for d in rows:
+        if not isinstance(d, dict) or d.get("isSidechain"):
+            continue
+        c = (d.get("message") or {}).get("content")
+        if d.get("type") == "assistant" and isinstance(c, list):
+            for b in c:
+                if isinstance(b, dict) and b.get("type") == "tool_use":
+                    inp = b.get("input") or {}
+                    if b.get("name") in ("Agent", "Task") or (b.get("name") in EXEC_TOOL and inp.get("run_in_background")):
+                        bg_calls[b.get("id")] = True
+            continue
+        raw = json.dumps(d, ensure_ascii=False)
+        if isinstance(c, list):
+            for b in c:
+                if isinstance(b, dict) and b.get("type") == "tool_result" and b.get("tool_use_id") in bg_calls:
+                    r = json.dumps(b.get("content"), ensure_ascii=False)
+                    ids = [x for m in _LAUNCH_ID.finditer(r) for x in m.groups() if x]
+                    if ids and "<usage>" not in r:
+                        launched.update(ids)
+                    elif not ids and "<usage>" not in r:
+                        anon += 1
+        for m in _LAUNCH_ID.finditer(raw):
+            if m.group(3):
+                launched.add(m.group(3))
+        for m in _DONE_ID.finditer(raw):
+            done.add(m.group(1))
+        if "<task-notification" in raw and not _DONE_ID.search(raw):
+            anon = max(0, anon - raw.count("<task-notification"))
+    return len(launched - done) + anon
+
+
+def wait_unchecked(sent, ev, verb, tools, answer, pending=0):
+    """"" if this turn looked at the awaited event, else a short reason."""
+    clause = ev + verb
+    kinds = [k for k, rx, _f in EV_KINDS if rx.search(clause)]
+    # JOB evidence counts only when the event is a job and nothing else (an Agent does not check a push)
+    job_ok = kinds == ["JOB"] and (_job_seen(tools) or pending > 0)
+    if OWN_CHECK.match(verb):
+        ran = any(_classify(n, i) in ("exec", "fetch", "mcp") for n, i in tools)
+        if kinds == ["JOB"] and (job_ok or ran):
+            return ""                          # 「結果を確認してから、コミットします」 after running it this turn
+        return "own check deferred"            # 「push を確かめたあと…します」: the check itself is not done
+    ks = _tokens(clause)
+    # the answer itself says part of the check is not done (in a sentence about the same thing)
+    for s2, _l, _r in _segments(answer):
+        if s2.strip() != sent and UNVERIFIED.search(s2) and ks and _shares(ks, s2):
+            return "answer admits the check is not done"
+    if job_ok:
+        return ""
+    for k, rx, f in EV_KINDS:
+        if k not in kinds or k == "JOB":
+            continue
+        for n, i in tools:
+            c = _Q.sub(" Q ", str((i or {}).get("command", ""))) if n in EXEC_TOOL else ""
+            if re.match(r"^\s*(?:echo|printf|Write-(?:Output|Host))\b", c):
+                continue
+            if f(n, c):
+                return ""
+    return "event not looked at this turn"
+
 
 # ---------------------------------------------------------------- evidence
 # A specific error identifier quoted in the claim's own line is evidence by itself.
@@ -316,15 +594,20 @@ def find_claims(answer, had_tools=False):
         found = None
         for pat in CAP_PATTERNS:
             for m in pat.finditer(s):
-                v = (m.groupdict().get("v") or m.groupdict().get("v2") or "")
+                v = (m.groupdict().get("v") or m.groupdict().get("v2") or m.groupdict().get("v3") or "")
                 head, rest = s[:m.start()], s[m.end():]
+                if pat is _CAP_ICHIDAN and (not SELF_SIDE.search(head) or re.match(r"\s*でし", rest)):
+                    continue
+                if pat is _CAP_ZERO and (not NOW_SIDE.search(head + m.group(0)) or re.match(r"\s*でし", rest)
+                                         or ANALYTIC.search(re.sub(r"(?:でき|出来|られ)る$", "", v))):
+                    continue
                 if NOT_ASSERTED.match(rest) or QUESTION.match(rest) or re.search(r"(?:もし|仮に)", head):
                     continue
                 if v and (ANALYTIC.search(v) or REFUSAL_VERB.search(v)):
                     continue
                 if pat is _CAP_DEKI and ANALYTIC.search(re.sub(r"(?:すること|こと)?(?:が|は|も)?$", "", head)):
                     continue
-                if len(_content(head)) < 2 and pat is not _CAP_SUPPORT:
+                if len(_content(head)) < 2 and pat is not _CAP_SUPPORT and pat is not _CAP_ZERO:
                     continue                                     # bare 「適用できない」 cell: no subject at all
                 if EVIDENCE_USE.search(head):
                     continue                                     # 比較に使えない / 証拠として使えない: about evidence
@@ -338,6 +621,16 @@ def find_claims(answer, had_tools=False):
                 break
         if found:
             out.append(found[1])
+    for raw in (answer or "").splitlines():
+        st = raw.strip()
+        if not st.startswith("|") or re.match(r"^\|[\s:|-]+\|?$", st):
+            continue
+        cells = [_clean_line(c) for c in st.strip("|").split("|")]
+        for a, b in zip(cells, cells[1:]):
+            m = _ZERO_CELL.match(a.strip())
+            if m and _ZERO_VAL.match(b) and NOW_SIDE.search(a) \
+                    and not ANALYTIC.search(re.sub(r"(?:でき|出来|られ)る.*$", "", m.group("v"))):
+                out.append(("CAPABILITY", (a.strip() + " | " + b.strip()), st, a, raw))
     return out
 
 
@@ -437,7 +730,7 @@ def has_evidence(sent, line, raw, head, tools, answer):
     return False
 
 
-def decide(answer, tools):
+def decide(answer, tools, pending=0):
     """Return (kind, claim sentence) for the first unchecked claim, or None.
     `tools` is a list of (name, input dict) of this turn's tool calls."""
     tools = [(n or "", i if isinstance(i, dict) else {}) for n, i in (tools or [])]
@@ -447,6 +740,9 @@ def decide(answer, tools):
         if has_evidence(sent, line, raw, head, tools, answer or ""):
             continue
         return kind, sent
+    for sent, ev, verb in find_waits(answer):
+        if wait_unchecked(sent, ev, verb, tools, answer or "", pending):
+            return "WAIT", sent
     return None
 
 
@@ -524,7 +820,22 @@ def main():
     if not os.path.isfile(tp):
         return
     prompt, pts, answer, tools = read_turn(tp)
-    hit = decide(answer, tools) if prompt else None
+    pending = 0
+    if prompt and answer and find_waits(answer):
+        try:
+            size = os.path.getsize(tp)
+            with open(tp, "rb") as f:
+                f.seek(max(0, size - TAIL_BYTES))
+                rows = []
+                for line in f.read().decode("utf-8", "replace").splitlines():
+                    try:
+                        rows.append(json.loads(line))
+                    except Exception:
+                        pass
+            pending = pending_jobs(rows)
+        except Exception:
+            pending = 0
+    hit = decide(answer, tools, pending) if prompt else None
     if not hit:
         return
     key = hashlib.sha1((pts + (prompt or "")).encode("utf-8", "replace")).hexdigest()[:16]
@@ -539,6 +850,18 @@ def main():
     _record_firing(NAME, ev)
     kind, sent = hit
     claim = sent if len(sent) <= 160 else sent[:157] + "..."
+    if kind == "WAIT":
+        head = ("【確かめずに待機（1回のみ）】回答が外部の出来事を待って作業を止めている（「%s」）が、その出来事がもう"
+                "起きたかを、このターンで確かめていない（または回答自身が「まだ確かめていない」と書いている）。" % claim)
+        reason = head + (
+            "待つ前に、今このターンで確かめよ。"
+            "メールなら受信箱全体（迷惑メール・すべてのフォルダ・送信元や件名を絞らない検索）、"
+            "他のセッション・他の人の push なら git fetch のあと git log origin/<branch>（ブランチは git rev-parse で取得）、"
+            "処理・ジョブなら出力ファイルやプロセス、画面・公開ページなら実際に開いて読む。"
+            "起きていれば、そのまま続きの作業を行って結果を報告し直せ。"
+            "起きていなければ、確かめた手段と結果を1文書いてから待つ（「確かめたら進めます」と確認を先送りしない）。")
+        sys.stdout.buffer.write(json.dumps({"decision": "block", "reason": reason}, ensure_ascii=True).encode("ascii"))
+        return
     if kind == "EXHAUSTIVE":
         head = ("【不可能の断定（1回のみ）】回答が「手段・方法が無い」と言い切っている（「%s」）。"
                 "試した手段が幾つあっても、それで「方法が無い」ことは証明できない。" % claim)
