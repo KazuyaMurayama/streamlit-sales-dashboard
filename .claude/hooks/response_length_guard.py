@@ -422,6 +422,102 @@ def split_inters(ev):
     return inters, [e[1] for e in ev[cut + 1:] if e[0] == "text"]
 
 
+# RE-ANSWERS THAT REPEAT THE PREVIOUS ONE (2026-11-03, user: 「ほとんど回答しているのに、
+# ほとんど同じ文言でもう一度同じような回答をしている…最終的なチェックの上、1回の回答に
+# まとめてくれないと…鬱陶しい」). Replay of 262 human turns (10-20..11-03): 99 (37.8%)
+# showed two or more answers carrying the report format (留保 / Next Action / 成果物表);
+# the second one is written after a Stop hook re-opens the turn or a background task
+# wakes the model. Text already shown cannot be withdrawn, so this is measured here and
+# fed back at the next prompt; prevention is answer_precheck.py (run before writing).
+REPEAT_MIN = 150          # a re-answer shorter than this is a delta, not a re-answer
+REPEAT_OVERLAP = 0.30     # share of the re-answer's 4-grams already shown this turn
+REPEAT_TAIL_SIM = 0.60    # a 留保 / Next Action line this close to an earlier one
+TAIL_LABEL_RE = re.compile(u"^\\s*(?:[-*]\\s*)?\\*{0,2}(留保|代替案|Next Action)\\*{0,2}\\s*[:：]\\s*\\*{0,2}\\s*(.*)$")
+
+
+def _grams(text, n=4):
+    s = re.sub(r"\s+", "", _visible(text))
+    return {s[i:i + n] for i in range(max(0, len(s) - n + 1))}
+
+
+def answers_of_turn(ev):
+    """Visible answers of one human turn, oldest first: the text written right
+    before each Stop-hook re-open or wake (what the user had on screen then) and
+    the final text. Text followed by a tool call is an intermediate, not an answer."""
+    out, cur = [], []
+    for e in ev:
+        if e[0] == "text":
+            cur.append(e[1])
+        elif e[0] == "tool":
+            cur = []
+        elif e[0] == "mark":
+            if cur:
+                out.append("\n".join(cur))
+            cur = []
+    if cur:
+        out.append("\n".join(cur))
+    return out
+
+
+def _table_files(text):
+    files, in_tbl = [], False
+    for ln in (text or "").splitlines():
+        t = ln.strip()
+        if t.startswith("|") and u"成果物" in t and (u"リンク" in t or u"開く" in t):
+            in_tbl = True
+            continue
+        if in_tbl and t.startswith("|"):
+            cells = [c.strip() for c in t.strip("|").split("|")]
+            if cells and not set(cells[0]) <= set("-: "):
+                files.append(_visible(cells[0]).strip("` *"))
+            continue
+        in_tbl = False
+    return [f for f in files if f]
+
+
+def _tail_lines(text):
+    out = {}
+    for ln in (text or "").splitlines()[-TAIL_WINDOW:]:
+        m = TAIL_LABEL_RE.match(ln)
+        if m and m.group(2).strip():
+            out.setdefault(m.group(1), m.group(2).strip())
+    return out
+
+
+def repetition(prevs, draft):
+    """-> reasons the draft repeats answers already shown in this human turn."""
+    prevs = [p for p in prevs if p and p.strip()]
+    if not prevs or _count(draft) < 30:
+        return []
+    out = []
+    shown = set()
+    for p in prevs:
+        shown |= _grams(p)
+    mine = _grams(draft)
+    if _count(draft) >= REPEAT_MIN and mine:
+        ov = len(mine & shown) / float(len(mine))
+        if ov >= REPEAT_OVERLAP:
+            out.append(u"前の回答と同じ文言が%d%%" % round(100 * ov))
+    old_files = set()
+    for p in prevs:
+        old_files.update(_table_files(p))
+    again = [f for f in _table_files(draft) if f in old_files]
+    if again:
+        out.append(u"成果物表の再掲%d行（%s）" % (len(again), again[0][:30]))
+    old_tail = {}
+    for p in prevs:
+        for k, v in _tail_lines(p).items():
+            old_tail.setdefault(k, []).append(v)
+    for k, v in _tail_lines(draft).items():
+        g = _grams(v)
+        for o in old_tail.get(k, []):
+            go = _grams(o)
+            if g and go and len(g & go) / float(len(g)) >= REPEAT_TAIL_SIM:
+                out.append(u"%sの再掲" % k)
+                break
+    return out
+
+
 def analyze(ev):
     kind = classify(ev)
     inters, finals = split_inters(ev)
@@ -442,6 +538,10 @@ def analyze(ev):
         "inter_bad": [(inter_problem(t), _visible(t).strip()[:40]) for t in inters
                       if inter_problem(t)],
     }
+    answers = answers_of_turn(ev)
+    res["answers"] = len(answers)
+    res["repeat"] = [(i + 1, why) for i in range(1, len(answers))
+                     for why in [repetition(answers[:i], answers[i])] if why]
     res["violations"] = violations(res)
     return res
 
@@ -449,6 +549,9 @@ def analyze(ev):
 def violations(r):
     """Most severe first: on_prompt shows only the head of this list."""
     out = []
+    if r.get("repeat"):
+        n, why = r["repeat"][0]
+        out.append(u"前の回答の再掲 %d本（%d本目: %s）" % (len(r["repeat"]), n, u"・".join(why)))
     if r["body"] > r["budget"]:
         out.append(u"本文 %d字／上限 %d字（%s・+%d%%）" % (
             r["body"], r["budget"], LABEL[r["kind"]],
@@ -481,7 +584,11 @@ RULES = (u"【回答の長さ上限】本文は 質問への回答600字／作�
          u"大きな節目だけ書き、ツールを呼ぶたびには書かない。通知で起きてまだ待つだけなら書かない）。"
          u"削る順: 自分の作業経緯→確認済みの細部→重複。残す: 結論・判断に効く数値・ユーザーがすること。"
          u"「補足が N 点あります」「影響はありません」「誤検出と判断してそのままにしています」のような、"
-         u"ユーザーが何もしなくてよい補足は書かない。")
+         u"ユーザーが何もしなくてよい補足は書かない。"
+         u"最終回答は1回にまとめる: ファイルを変えたターンは、最終回答を書く前に下書きを"
+         u"`python ~/.claude/hooks/answer_precheck.py` に標準入力で通し、出た指摘を直してから1回だけ書く"
+         u"（Stop フックに差し戻されて2本目を書かないため）。Stop フックの差し戻しや通知のあとで書き足すときは、"
+         u"前の回答の結論・成果物表・留保・Next Action を再掲せず、変わった点だけを書く。")
 
 
 def _state_path(ev, suffix=""):
@@ -641,7 +748,8 @@ def on_wake(ev, rows, in_tx):
     else:
         msg = head + (u"まだ待っているタスクがあるなら、テキストを書かずに終える。"
                       u"全件そろった・続きの作業をするなら、途中経過は書かずにツールへ進むか"
-                      u"最終回答を1本だけ書く。")
+                      u"最終回答を1本だけ書く。前の回答に書いた結論・成果物表・留保・Next Action は"
+                      u"再掲せず、変わった点だけを書く（同じ文言の回答が2本並ぶのを防ぐ）。")
     _record_firing(NAME, ev)
     _emit("UserPromptSubmit", msg)
 
@@ -671,6 +779,10 @@ def on_prompt(ev):
         if tr:
             msg += u"。直近%d回の本文は上限の中央値%d%%" % (tr[1], tr[0])
         msg += u"。今回はこの分を削ること。"
+        rpt = [v for v in prev[1:] if v.startswith(u"前の回答の再掲")]
+        if rpt:
+            msg += u"\n【前回・再掲】" + rpt[0] + u"。最終回答は下書きを answer_precheck.py に通してから1回だけ書き、"\
+                   u"差し戻し・通知の後は変わった点だけを書く。"
         obv = [v for v in prev[1:] if v.startswith(u"自明な補足")]
         if obv:   # a different class from length: show it even when it is not the worst item
             msg += u"\n【前回・自明な補足】" + obv[0] + u"。「補足が N 点」「影響はありません」「そのままにしています」"\

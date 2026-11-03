@@ -216,8 +216,16 @@ NO_NOISE = ("追記してよいのは、読んでユーザーの判断・行動�
             "空の応答はハーネスが差し戻すため実測 2026-10-13 で不可）。")
 
 
+# answer_precheck.py runs this hook on a DRAFT before the answer is written (2026-11-03,
+# user: 「最終的なチェックの上、1回の回答にまとめて」). There the review result goes
+# into the draft, not into a second message.
+PRE_NOTE = ("これは最終回答を書く前の点検である。不足は下書きに入れ、直した下書きを"
+            "answer_precheck.py に通してから最終回答を1回だけ書く（追記・「以上」は不要）。")
+
+
 def _prompt(tier, request, files, answer):
     """Build the review instruction. Kept short: it is paid on every fire."""
+    tail_note = PRE_NOTE if os.environ.get("ANSWER_PRECHECK") else NO_NOISE
     req = (request or "").strip()
     req = re.sub(r"<[^>]+>.*?</[^>]+>", "", req, flags=re.S).strip()
     if len(req) > 700:
@@ -228,7 +236,7 @@ def _prompt(tier, request, files, answer):
                 "①依頼どおりの動作を実際に確認したか ②未確認事項を「未確認」と"
                 "明示したか ③ユーザーに影響する省略（依頼の一部を省いた・別の方法で済ませた等）を明示したか を点検せよ。"
                 "点検は思考内で行う。不足を補った場合のみ、その内容だけを追記する。"
-                + NO_NOISE + "\n---\n" + req)
+                + tail_note + "\n---\n" + req)
 
     fired = _triggers(files, answer)
     notes = [t for k, t in LATENT if k in fired]
@@ -245,7 +253,7 @@ def _prompt(tier, request, files, answer):
             "不足があればこのターンで補い、補った内容だけを追記する。問題なければ追記しない。"
             "未回答の項目は「未回答: 〜」と1行で明記し、閾値を下げて充足扱いにしない。"
             "意図的な部分回答（計画の承認待ち等）ならその旨と残項目を1行で述べてよい。"
-            + NO_NOISE)
+            + tail_note)
     if notes:
         body += "\n【該当する潜在期待】\n" + "\n".join("・" + n for n in notes)
     return body + "\n---\n【依頼原文】\n" + req
@@ -285,6 +293,15 @@ def main():
     tier, reasons = tc.classify(request, files_written=files, answer=answer)
     if tier == 0:
         return
+    # answer_precheck.py already showed this review on this exact answer before it
+    # was written; forcing it again is what made the user read the same answer
+    # twice (2026-11-03).
+    try:
+        import answer_precheck as _ap
+        if _ap.passed(tp, ev.get("session_id")):
+            return
+    except Exception:
+        pass
 
     # Dedupe: do not re-review the same request unless new files appeared.
     path = os.path.join(STATE_DIR, _sid(ev) + ".json")
