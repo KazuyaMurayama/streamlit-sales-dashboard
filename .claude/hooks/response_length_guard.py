@@ -484,8 +484,9 @@ def _tail_lines(text):
     return out
 
 
-def repetition(prevs, draft):
-    """-> reasons the draft repeats answers already shown in this human turn."""
+def repetition(prevs, draft, changed=()):
+    """-> reasons the draft repeats answers already shown in this human turn.
+    `changed`: basenames written after the last shown answer; their rows may return."""
     prevs = [p for p in prevs if p and p.strip()]
     if not prevs or _count(draft) < 30:
         return []
@@ -501,7 +502,9 @@ def repetition(prevs, draft):
     old_files = set()
     for p in prevs:
         old_files.update(_table_files(p))
-    again = [f for f in _table_files(draft) if f in old_files]
+    changed = {c.lower() for c in (changed or ())}
+    again = [f for f in _table_files(draft) if f in old_files
+             and not any(c and (c in f.lower() or f.lower() in c) for c in changed)]
     if again:
         out.append(u"成果物表の再掲%d行（%s）" % (len(again), again[0][:30]))
     old_tail = {}

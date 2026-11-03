@@ -38,6 +38,17 @@ HOW
      runs on the real answer.
 
 Exit code is always 0; the verdict is the first output line (PASS / FIX).
+
+CALIBRATION (実測 2026-11-03)
+  * Repetition check = response_length_guard.repetition. On 30 days of real turns
+    (649 human turns) it flags 24.2% of turns (14 days: 29.7%, 78/263); a random
+    sample of 12 flagged turns read by hand: about 8-9 were a second answer that
+    restated the first (the user's complaint, incl. the 11-03 screenshot turn), 3-4
+    were a genuinely new status report that shared format lines. A false hit costs
+    one rewrite of a draft that has not been shown yet, so the threshold is kept.
+  * Runtime: 25 Stop hooks in parallel, 10.7-11.2 s per run on this machine.
+  * The user's 11-03 example (d192b99a, 交差検証の2本目) is FIX here
+    (tests/fixtures/reanswer_20261103.json); HEAD without this file: no check at all.
 Deployed from claude-governance/templates/hooks/ -- edit there, not here.
 """
 import glob
@@ -90,6 +101,22 @@ def project_dir(rows):
     return None
 
 
+def session_start(tp):
+    try:
+        with io.open(tp, encoding="utf-8", errors="replace") as f:
+            for _ in range(200):
+                ln = f.readline()
+                if not ln:
+                    break
+                ts = (json.loads(ln) if ln.strip() else {}).get("timestamp")
+                if ts:
+                    import calendar
+                    return calendar.timegm(time.strptime(ts[:19], "%Y-%m-%dT%H:%M:%S")) - 3600
+    except Exception:
+        pass
+    return None
+
+
 def turn_key(rows):
     for r in reversed(rows):
         if R._is_boundary(r):
@@ -107,6 +134,17 @@ def final_text(rows):
 
 
 # ---------------------------------------------------------------- own checks
+def changed_since_last_answer(ev):
+    """Basenames of files written after the last answer shown in this turn."""
+    last = max([i for i, e in enumerate(ev) if e[0] == "mark"], default=-1)
+    out = set()
+    for e in ev[last + 1:]:
+        if e[0] == "tool" and e[1] in R.WRITE_TOOLS:
+            fp = (e[2] or {}).get("file_path") or (e[2] or {}).get("notebook_path") or ""
+            if fp:
+                out.add(os.path.basename(fp.replace("\\", "/")))
+    return out
+
 def own_checks(rows, draft):
     out = []
     ev = R.turn_events(rows) or []
@@ -119,7 +157,7 @@ def own_checks(rows, draft):
         out.append(u"[待ち] 自分で起動したバックグラウンド作業が%d件まだ終わっていない。結果が報告に入るなら、"
                    u"いま最終回答を書かずに終え、全件そろってから1回だけ書く（途中で書くと同じ報告が2本になる）。" % pending)
     prevs = R.answers_of_turn(ev)
-    why = R.repetition(prevs, draft)
+    why = R.repetition(prevs, draft, changed_since_last_answer(ev))
     if why:
         out.append(u"[再掲] この指示ですでに表示した回答と重なる（%s）。前に書いた結論・成果物表・留保・"
                    u"Next Action は書かず、変わった点だけを書く。" % u"・".join(why))
@@ -140,7 +178,7 @@ def _junction(src, dst):
             return False
 
 
-def build_home(base):
+def build_home(base, since=None):
     """HOME whose .claude/state is a fresh copy of the recent real state; every
     other entry points at the real one (hooks read repos, settings, memory)."""
     home = os.path.join(base, "home")
@@ -171,7 +209,10 @@ def build_home(base):
             raise RuntimeError("isolated state is a link: refusing to delete " + st)
         shutil.rmtree(st, ignore_errors=True)
     real_st = os.path.join(REAL_HOME, ".claude", "state")
-    cut = time.time() - STATE_RECENT_S
+    # Everything written since the session started (its *_seen / once-per-instruction
+    # state) and the last 24h (shared files). A 24h cut alone dropped 56 of 70 state
+    # files of a 2-day session and re-fired once-only hooks here (Fable I1).
+    cut = min(time.time() - STATE_RECENT_S, since or time.time())
     for root, dirs, files in os.walk(real_st):
         for fn in files:
             src = os.path.join(root, fn)
@@ -222,6 +263,25 @@ def stop_commands(cwd, settings_paths=None):
     return cmds
 
 
+def git_bash():
+    """Claude Code runs hook commands with Git Bash on Windows; repo settings use
+    POSIX commands (`P=$(command -v python3 ...); exec "$P" ...`). cmd.exe fails on
+    them and the global copy defers to the failed local one: zero checks, PASS
+    (Fable review 2026-11-03 C1). WSL's System32\\bash.exe is not Git Bash."""
+    if os.name != "nt":
+        return shutil.which("bash")
+    cands = [os.environ.get("CLAUDE_CODE_GIT_BASH_PATH") or ""]
+    g = shutil.which("git")
+    if g:
+        root = os.path.dirname(os.path.dirname(g))
+        cands += [os.path.join(root, "bin", "bash.exe"), os.path.join(root, "usr", "bin", "bash.exe")]
+    cands += [r"C:\Program Files\Git\bin\bash.exe", r"C:\Program Files\Git\usr\bin\bash.exe"]
+    for c in cands:
+        if c and os.path.isfile(c) and "system32" not in c.lower():
+            return c
+    return None
+
+
 def run_hooks(cmds, payload, home, tmpd, cwd):
     env = dict(os.environ)
     env.update({"USERPROFILE": home, "HOME": home, "TEMP": tmpd, "TMP": tmpd,
@@ -229,9 +289,11 @@ def run_hooks(cmds, payload, home, tmpd, cwd):
                 "PYTHONIOENCODING": "utf-8"})
     data = json.dumps(payload).encode("utf-8")
     procs = []
+    bash = git_bash()
     for name, c in cmds:
         try:
-            p = subprocess.Popen(c, shell=True, cwd=cwd, env=env, stdin=subprocess.PIPE,
+            argv = [bash, "-c", c] if bash else c
+            p = subprocess.Popen(argv, shell=not bash, cwd=cwd, env=env, stdin=subprocess.PIPE,
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             procs.append((name, p))
         except Exception as e:
@@ -252,6 +314,9 @@ def run_hooks(cmds, payload, home, tmpd, cwd):
         if p.returncode == 2:
             out.append((name, "block", se or so))
             continue
+        if p.returncode != 0:
+            out.append((name, "error", "exit %d: %s" % (p.returncode, (se or so)[-200:])))
+            continue
         try:
             j = json.loads(so) if so else {}
         except Exception:
@@ -266,12 +331,24 @@ def _state_path(sid):
     return os.path.join(STATE_DIR, _sid_key(sid) + ".json")
 
 
+def _records(sid):
+    try:
+        with io.open(_state_path(sid), encoding="utf-8") as f:
+            st = json.load(f)
+        return st if isinstance(st, list) else [st]
+    except Exception:
+        return []
+
+
 def save_state(sid, rec):
+    # A list, not one record: a subagent runs with its parent's session id, and its
+    # precheck must not erase the parent's PASS (Fable I5).
     try:
         os.makedirs(STATE_DIR, exist_ok=True)
         p = _state_path(sid)
+        recs = (_records(sid) + [rec])[-20:]
         with io.open(p + ".tmp", "w", encoding="utf-8") as f:
-            json.dump(rec, f)
+            json.dump(recs, f)
         os.replace(p + ".tmp", p)
     except Exception:
         pass
@@ -280,15 +357,15 @@ def save_state(sid, rec):
 def passed(transcript_path, session_id):
     """True when the turn's final answer is a draft this script passed (review_gate)."""
     try:
-        with io.open(_state_path(session_id), encoding="utf-8") as f:
-            st = json.load(f)
-        if not st.get("ok"):
+        recs = [r for r in _records(session_id) if r.get("ok")]
+        if not recs:
             return False
         rows = R.read_rows(transcript_path, need_boundary=True)
-        if st.get("turn") != turn_key(rows):
+        tk, fin = turn_key(rows), final_text(rows)
+        if not fin.strip():
             return False
-        fin = final_text(rows)
-        return bool(fin.strip()) and norm_hash(fin) == st.get("hash")
+        h = norm_hash(fin)
+        return any(r.get("turn") == tk and r.get("hash") == h for r in recs)
     except Exception:
         return False
 
@@ -332,7 +409,7 @@ def main(argv):
     tmpd = os.path.join(base, "tmp")
     shutil.rmtree(tmpd, ignore_errors=True)
     os.makedirs(tmpd, exist_ok=True)
-    home = build_home(base)
+    home = build_home(base, session_start(tp))
     fake = os.path.join(base, "transcript.jsonl")
     shutil.copyfile(tp, fake)
     row = {"type": "assistant", "uuid": str(uuid.uuid4()), "sessionId": sid,
@@ -347,8 +424,8 @@ def main(argv):
 
     blocks = [(n, r) for n, k, r in results if k == "block" and n not in ADVISORY]
     advice = [(n, r) for n, k, r in results if k == "block" and n in ADVISORY]
-    broken = [(n, k) for n, k, r in results if k in ("timeout", "error")]
-    ok = not blocks and not findings
+    broken = [(n, k + (": " + r[:120] if r else "")) for n, k, r in results if k in ("timeout", "error")]
+    ok = not blocks and not findings and not broken   # a crashed check is not a pass (C2)
     save_state(sid, {"turn": turn_key(rows), "hash": norm_hash(draft), "ok": ok,
                      "t": int(time.time()), "blocks": [n for n, _ in blocks],
                      "own": len(findings)})
@@ -359,7 +436,7 @@ def main(argv):
                      u"（review_gate は一致した下書きのときだけ差し戻しを省く）。")
     else:
         lines.append(u"FIX: 指摘%d件。直した下書きをもう一度通してから最終回答を書く。"
-                     % (len(blocks) + len(findings)))
+                     % (len(blocks) + len(findings) + len(broken)))
     for f in findings:
         lines.append(u"- " + f)
     for n, r in blocks:
@@ -369,8 +446,8 @@ def main(argv):
         r = (r or "").strip()
         lines.append(u"【%s】%s" % (ADVISORY[n], r[:REASON_MAX * 2]))
     if broken:
-        lines.append(u"（実行できなかった検査: %s。本番の Stop では動く）"
-                     % u"、".join(u"%s=%s" % x for x in broken))
+        lines.append(u"- [実行できなかった検査] %s。本番の Stop では動くかもしれないが、ここでは未確認なので PASS にしない。"
+                     % u"、".join(u"%s=%s" % (n, k) for n, k in broken))
     sys.stdout.buffer.write((u"\n".join(lines) + u"\n").encode("utf-8"))
     return 0
 
