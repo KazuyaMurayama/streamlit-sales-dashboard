@@ -66,7 +66,12 @@ CLOCK READ IN A SHELL / FILE WRITTEN BY A SCRIPT（2026-11-04 依頼者指摘）
   B2 FAIL  git commit される .md の冒頭の 最終更新日 が、そのファイルを最後に書いた時刻
            （作業ツリーの mtime）より 15 分超前、または現在 JST より 5 分超先。T3（10分）と同じ
            「本文を書いた時刻 ≒ 最終更新日」の不変条件を、どの道具で書いたかに関係なく commit で見る。
-           例外: 直前のコミットの時刻をちょうど 9 時間直す変更（このずれの訂正）。
+           判定は (a) 現在より5分超先 (b) mtime より8.5〜10.5時間前（UTC の典型）
+           (c) 本文を変えたのに最終更新日が HEAD のまま・mtime より15分超前 (d) 時刻なしで今日でない。
+           書き直したスタンプが mtime より数時間前なだけでは止めない（stash pop・checkout・整形で
+           mtime だけ進む。Fable I1）。ステージ≠作業ツリーならステージ側を now と比べる（C3）。
+           例外: 直前のコミットの UTC ずれ（その commit がスタンプの8.5〜10.5時間後）をちょうど9時間直す変更。
+           Fable QC（2026-11-04）: C1 `TZ=:Asia/Tokyo`・C2 時刻なし・C3 add 後の再編集・I1〜I5 を反映。
 
 NON-GOALS (stated so the next reader does not "fix" them by widening):
   Prose dates ("8/31 判定", "締切8月25日") are NOT checked. They are frequently
@@ -408,17 +413,66 @@ def _check(after, before, today, is_new, now=None, report_name=False):
 
 # ---------------------------------------------------------------- Bash / commit (B1, B2)
 # `TZ=Asia/Tokyo date` / `TZ="Asia/Tokyo" python ...`: a region name, not a POSIX offset
-RE_TZ_REGION = re.compile(r"""\bTZ\s*=\s*["']?(?:[A-Za-z_]+/[A-Za-z_]+|Japan)\b""")
-RE_DATE_CMD = re.compile(r"\b(?:date|python3?|py|strftime)\b")
-SKEW = timedelta(minutes=15)
+# Only an assignment in command position (start, after ; & | ( newline, export/env/set) or
+# PowerShell's $env:TZ. A commit message that *mentions* it is prose (2026-11-04 self-hit).
+RE_TZ_REGION = re.compile(
+    r"""(?:(?:^|[;&|(\n`])\s*(?:(?:export|env|set|declare\s+-x)\s+)?TZ|\$env:TZ)\s*=\s*["']?:?"""
+    r"""(?:[A-Za-z_]+/[A-Za-z_]+|Japan)\b""", re.I)
+SKEW = timedelta(minutes=15)    # commit が作業ツリーの mtime より後ろへずれる余裕（T3 の10分＋整形・add の時間）
+UTC_BAND = (8.5, 10.5)          # 9時間ずれ（UTC を JST と書いた）＋書いてから commit までの最大1.5時間
 
 
 def _tz_region_reason(cmd):
-    if os.name != "nt" or not RE_TZ_REGION.search(cmd) or not RE_DATE_CMD.search(cmd):
+    if os.name != "nt" or not RE_TZ_REGION.search(cmd):
         return None
-    return ("[B1] Windows の Git Bash は `TZ=Asia/Tokyo` を知らず、黙って UTC を返します"
+    return ("[B1] Windows の Git Bash の date・perl 等は `TZ=Asia/Tokyo` を知らず、黙って UTC を返します"
             "（JST より9時間前。2026-11-04 に 19:10 の更新が「10:10 JST」と記録された）。"
-            "`TZ=JST-9 date \"+%Y-%m-%d %H:%M JST\"` を使ってください。")
+            "時刻は `TZ=JST-9 date \"+%Y-%m-%d %H:%M JST\"` で読んでください（Git Bash・Linux・Web 版で同じ値）。")
+
+
+def _commit_aliases(cwd):
+    """git aliases whose expansion starts with `commit` (`git ci`), incl. -c alias.x=commit."""
+    try:
+        import topic_split_guard as T
+        out = set()
+        for ln in T._lines(T._git(cwd, ["config", "--get-regexp", r"^alias\."])):
+            k, _, v = ln.partition(" ")
+            if v.strip().startswith("commit"):
+                out.add(k.split(".", 1)[1])
+        return out
+    except Exception:
+        return set()
+
+
+def _commit_re(cwd, cmd=""):
+    import topic_split_guard as T
+    names = {"commit"} | _commit_aliases(cwd)
+    names |= set(re.findall(r"-c\s+[\"']?alias\.([\w-]+)=[\"']?commit", cmd))
+    return re.compile(T._GIT_PREFIX + r"(?:" + "|".join(sorted(map(re.escape, names))) + r")\b" + T._Q)
+
+
+_VAL_OPTS = {"-m", "--message", "-F", "--file", "-C", "--reuse-message", "-c", "--reedit-message",
+             "--author", "--date", "-t", "--template", "--fixup", "--squash", "--cleanup", "--trailer"}
+
+
+def _commit_pathspecs(seg):
+    """Pathspecs given to `git commit` itself (after `--`, or bare words after the options)."""
+    import shlex
+    try:
+        w = shlex.split(seg, posix=True)
+    except Exception:
+        w = seg.split()
+    if "--" in w:
+        return [x for x in w[w.index("--") + 1:] if x]
+    out, skip = [], False
+    for x in w:
+        if skip:
+            skip = False
+        elif x in _VAL_OPTS:
+            skip = True
+        elif not x.startswith("-"):
+            out.append(x)
+    return out
 
 
 def _commit_targets(cmd, cwd):
@@ -428,14 +482,20 @@ def _commit_targets(cmd, cwd):
     except Exception:
         return []
     out = []
-    for m in T._COMMIT.finditer(cmd):
+    for m in _commit_re(cwd, cmd).finditer(cmd):
         d = T.effective_cwd(cmd, m.start(), cwd)
         root = T._root_for(m, d)
         if not root:
             continue
-        seg = cmd[m.end():].split("\n")[0]
+        seg = re.split(r"&&|\|\||;|\|", cmd[m.end():].split("\n")[0])[0]
         files = set(T._lines(T._git(root, ["diff", "--cached", "--name-only", "--diff-filter=AM"])))
         added = set()       # added by this command: what is committed is the file on disk
+        # `git commit [-o|-i] [--] <pathspec>` commits those paths from the work tree
+        cspecs = _commit_pathspecs(seg)
+        if cspecs:
+            added |= set(T._lines(T._git(d, ["diff", "--name-only", "HEAD", "--"] + cspecs)))
+            added |= set(T._lines(T._git(d, ["ls-files", "--others", "--exclude-standard",
+                                             "--full-name", "--"] + cspecs)))
         if re.search(r"(?:^|\s)(?:-[b-zA-Z]*a[a-zA-Z]*|--all)\b", seg):
             added |= set(T._lines(T._git(root, ["diff", "--name-only", "--diff-filter=AM"])))
         for am in T._ADD.finditer(cmd[:m.start()]):
@@ -476,29 +536,56 @@ def _commit_findings(cmd, cwd, cfg, now):
             except Exception:
                 continue
             staged = T._git(root, ["show", ":" + rel])
+            text, ref = work, mtime
             if not will_add and staged and _norm_text(staged) != work:
-                continue        # what is committed is not the file on disk; its mtime says nothing
-            m = _head(RE_UPDATED, work)
-            st = _stamp(m) if m else None
-            if st is None:
-                continue
+                # what is committed is the index, not the file on disk: check the index
+                # against now (its mtime says nothing) — Fable C3
+                text, ref = _norm_text(staged), now
             head = _norm_text(T._git(root, ["show", "HEAD:" + rel]))
-            if head == work:
+            if head == text:
                 continue
+            m = _head(RE_UPDATED, text)
+            if not m:
+                continue
+            st = _stamp(m)
             hm = _head(RE_UPDATED, head) if head else None
+            if st is None:
+                # date only: a script that read a UTC clock writes yesterday before 09:00 JST (Fable C2)
+                if _ymd(m) != now.date().isoformat() and not (hm and _ymd(hm) == _ymd(m) and hm.group(0) == m.group(0)
+                                                             and ref is now):
+                    fails.append("[B2] %s: 本文を変えたのに 最終更新日 が %s のまま（時刻なし・今日 %s でない）" % (
+                        rel, _ymd(m), now.date().isoformat()))
+                continue
             hst = _stamp(hm) if hm else None
-            if hst is not None and abs((st - hst).total_seconds() - 9 * 3600) < 60:
-                continue        # correcting exactly this 9-hour slip
-            if st > now + AHEAD:
+            if st > now + AHEAD:          # before the correction exception (Fable I4)
                 fails.append("[B2] %s: 最終更新日 %s が現在 %s より先です" % (
                     rel, st.strftime("%m-%d %H:%M"), now.strftime("%m-%d %H:%M JST")))
-            elif st < mtime - SKEW:
-                gap = (mtime - st).total_seconds() / 3600.0
-                hint = ("。9時間前後のずれは UTC を JST と書いた典型（Git Bash の `TZ=Asia/Tokyo`・Web 版の date）"
-                        if 8.5 <= gap <= 10.5 else "")
-                fails.append("[B2] %s: 最終更新日 %s が、このファイルを最後に書いた %s より %.1f 時間前です%s" % (
-                    rel, st.strftime("%m-%d %H:%M JST"), mtime.strftime("%m-%d %H:%M JST"), gap, hint))
+                continue
+            if hst is not None and abs((st - hst).total_seconds() - 9 * 3600) < 60 \
+                    and _head_was_utc(T, root, rel, hst):
+                continue        # correcting exactly this 9-hour slip of the previous commit
+            gap = (ref - st).total_seconds() / 3600.0
+            if UTC_BAND[0] <= gap <= UTC_BAND[1]:
+                fails.append("[B2] %s: 最終更新日 %s が、このファイルを最後に書いた %s より %.1f 時間前です。"
+                             "9時間前後のずれは UTC を JST と書いた典型（Git Bash の `TZ=Asia/Tokyo`・Web 版の素の date）" % (
+                                 rel, st.strftime("%m-%d %H:%M JST"), ref.strftime("%m-%d %H:%M JST"), gap))
+            elif ref is mtime and hst is not None and st == hst and gap * 60 > SKEW.total_seconds() / 60:
+                # body changed, stamp not touched (T3 through a script). A stamp that WAS
+                # rewritten but is older than mtime is not judged: checkout / stash pop /
+                # formatters move mtime without a new edit (Fable I1)
+                fails.append("[B2] %s: 本文を変えたのに 最終更新日 が %s のまま（ファイルを最後に書いたのは %s）" % (
+                    rel, st.strftime("%m-%d %H:%M JST"), mtime.strftime("%m-%d %H:%M JST")))
     return fails
+
+
+def _head_was_utc(T, root, rel, hst):
+    """The previous commit's stamp really was UTC: committed 8.5-10.5h after it."""
+    try:
+        ct = int(T._git(root, ["log", "-1", "--format=%ct", "--", rel]).strip())
+        g = (datetime.fromtimestamp(ct, JST) - hst).total_seconds() / 3600.0
+        return UTC_BAND[0] <= g <= UTC_BAND[1]
+    except Exception:
+        return False
 
 
 def _bash(data, cfg):
@@ -509,8 +596,9 @@ def _bash(data, cfg):
     r = _tz_region_reason(cmd)
     if r:
         reasons.append(r)
-    if re.search(r"(?i)\bcommit\b", cmd):
-        reasons += _commit_findings(cmd, data.get("cwd") or os.getcwd(), cfg, datetime.now(JST))
+    cwd = data.get("cwd") or os.getcwd()
+    if re.search(r"(?i)\bcommit\b", cmd) or (re.search(r"\bgit\b", cmd) and _commit_aliases(cwd)):
+        reasons += _commit_findings(cmd, cwd, cfg, datetime.now(JST))
         if any(x.startswith("[B2]") for x in reasons):
             reasons.append("直し方: 冒頭の 最終更新日 を今の JST（`TZ=JST-9 date \"+%Y-%m-%d %H:%M JST\"`）"
                            "に書き直して add し直してから commit する。")
