@@ -933,8 +933,26 @@ def on_stop(ev):
                        "前からある違反か、transcript から自分の書き込みと確認できない未コミットの文書なので止めない。\n" + "\n".join(warn[:5])
                        + ("\n  ほか %d 本" % (len(warn) - 5) if len(warn) > 5 else ""))
         msg += notes
-        _emit({"systemMessage": "⚠ report_render_guard: " + "\n".join(msg)})
+        _log_warn("report_render_guard", "\n".join(msg), ev)
 
+
+
+def _log_warn(name, text, ev):
+    """止めない警告を ~/.claude/logs/stop_warn.log に残す（画面には出さない）。
+    WHY（2026-11-04 依頼者「大量のStop says:、ユーザーに知らせる意味あんのか？」）: systemMessage は
+    依頼者の画面にだけ出て、モデルには届かない。止めない警告は依頼者がすることが無く、直す側にも届かないまま
+    Stop のたびに並んでいた（直近3日で report_render_guard 143回・near_duplicate_guard 78回）。直させたい違反は
+    block で返す（モデルに届く）。止めない警告が増えていないかは、このログの行数で確かめる。
+    STOP_WARN_LOG でログの場所を変えられる（テスト用）。"""
+    try:
+        p = os.environ.get("STOP_WARN_LOG") or os.path.join(os.path.expanduser("~"), ".claude", "logs", "stop_warn.log")
+        if not os.path.isdir(os.path.dirname(p)):
+            os.makedirs(os.path.dirname(p))
+        with io.open(p, "a", encoding="utf-8") as f:
+            f.write(u"%s\t%s\t%s\t%s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), ev.get("session_id") or "", name,
+                                            text.replace("\n", " / ")))
+    except Exception:
+        pass
 
 
 def _emit(obj):
