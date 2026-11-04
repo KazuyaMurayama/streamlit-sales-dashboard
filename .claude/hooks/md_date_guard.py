@@ -54,6 +54,20 @@ TIME OF DAY (2026-10-06 ユーザー指示「作成日と最終更新日に何�
   本文の表や引用の「更新日:」や、サイト生成器が日付型で読む `updated:` を
   冒頭の日付行と取り違えないため（front matter に時刻を足すと日付型が壊れる）。
 
+CLOCK READ IN A SHELL / FILE WRITTEN BY A SCRIPT（2026-11-04 依頼者指摘）:
+  Soulful-Content/_meta/REVIEW_REQUIRED_FILES_20260918.md に 19:10 JST の更新で
+  「最終更新日: 2026-11-04 10:10 JST」と書かれた。原因は Bash で `TZ=Asia/Tokyo date` を
+  読んだこと: Git Bash（Windows）はタイムゾーン表を持たず、知らない地域名を黙って UTC として
+  扱う（実測: 19:44 JST に `TZ=Asia/Tokyo date` → 10:44 GMT）。書き込みは Bash の Python
+  スクリプトだったので、Write|Edit しか見ない T2/T3 を素通りした。597本の冒頭時刻付き .md を
+  コミット時刻と照らすと、同じ 9 時間ずれが17本あった（Web 版の UTC の時計も同じずれ方をする）。
+  B1 FAIL  Windows の Bash/PowerShell で `TZ=<地域名>`（Asia/Tokyo 等）を付けて時刻を読む。
+           POSIX の書き方 `TZ=JST-9` はどの環境でも JST になる（Git Bash で実測）。
+  B2 FAIL  git commit される .md の冒頭の 最終更新日 が、そのファイルを最後に書いた時刻
+           （作業ツリーの mtime）より 15 分超前、または現在 JST より 5 分超先。T3（10分）と同じ
+           「本文を書いた時刻 ≒ 最終更新日」の不変条件を、どの道具で書いたかに関係なく commit で見る。
+           例外: 直前のコミットの時刻をちょうど 9 時間直す変更（このずれの訂正）。
+
 NON-GOALS (stated so the next reader does not "fix" them by widening):
   Prose dates ("8/31 判定", "締切8月25日") are NOT checked. They are frequently
   correct references to other days, so flagging them trains the user to ignore
@@ -266,6 +280,11 @@ def _in_scope(fp, cfg):
     norm = rel.replace("\\", "/").lower()
     if norm.startswith("../"):
         norm = os.path.basename(norm)
+    return _scope_norm(norm, cfg)
+
+
+def _scope_norm(norm, cfg):
+    """norm: lower-case path relative to the repo root, '/' separators."""
     base = os.path.basename(norm)
 
     for ex in (cfg.get("exclude") or DEFAULT_EXCLUDE):
@@ -387,6 +406,127 @@ def _check(after, before, today, is_new, now=None, report_name=False):
     return fails, warns
 
 
+# ---------------------------------------------------------------- Bash / commit (B1, B2)
+# `TZ=Asia/Tokyo date` / `TZ="Asia/Tokyo" python ...`: a region name, not a POSIX offset
+RE_TZ_REGION = re.compile(r"""\bTZ\s*=\s*["']?(?:[A-Za-z_]+/[A-Za-z_]+|Japan)\b""")
+RE_DATE_CMD = re.compile(r"\b(?:date|python3?|py|strftime)\b")
+SKEW = timedelta(minutes=15)
+
+
+def _tz_region_reason(cmd):
+    if os.name != "nt" or not RE_TZ_REGION.search(cmd) or not RE_DATE_CMD.search(cmd):
+        return None
+    return ("[B1] Windows の Git Bash は `TZ=Asia/Tokyo` を知らず、黙って UTC を返します"
+            "（JST より9時間前。2026-11-04 に 19:10 の更新が「10:10 JST」と記録された）。"
+            "`TZ=JST-9 date \"+%Y-%m-%d %H:%M JST\"` を使ってください。")
+
+
+def _commit_targets(cmd, cwd):
+    """[(repo_root, [(repo-relative .md path, added by this command?)])]."""
+    try:
+        import topic_split_guard as T
+    except Exception:
+        return []
+    out = []
+    for m in T._COMMIT.finditer(cmd):
+        d = T.effective_cwd(cmd, m.start(), cwd)
+        root = T._root_for(m, d)
+        if not root:
+            continue
+        seg = cmd[m.end():].split("\n")[0]
+        files = set(T._lines(T._git(root, ["diff", "--cached", "--name-only", "--diff-filter=AM"])))
+        added = set()       # added by this command: what is committed is the file on disk
+        if re.search(r"(?:^|\s)(?:-[b-zA-Z]*a[a-zA-Z]*|--all)\b", seg):
+            added |= set(T._lines(T._git(root, ["diff", "--name-only", "--diff-filter=AM"])))
+        for am in T._ADD.finditer(cmd[:m.start()]):
+            words = re.split(r"\s+", am.group("args").strip())
+            specs = [T._unq(x) for x in words if x and not x.startswith("-")]
+            if any(w in ("-A", "--all", "-u", "--update") for w in words):
+                specs = specs or [":/"]       # the whole work tree
+            if not specs:
+                continue
+            ad = T.effective_cwd(cmd, am.start(), cwd)
+            added |= set(T._lines(T._git(ad, ["diff", "--name-only", "--diff-filter=AM", "--"] + specs)))
+            added |= set(T._lines(T._git(ad, ["ls-files", "--others", "--exclude-standard",
+                                              "--full-name", "--"] + specs)))
+        out.append((root, sorted((f, f in added) for f in files | added if f.lower().endswith(".md"))))
+    return out
+
+
+def _norm_text(t):
+    return t.lstrip("\ufeff").replace("\r\n", "\n")
+
+
+def _commit_findings(cmd, cwd, cfg, now):
+    try:
+        import topic_split_guard as T
+    except Exception:
+        return []
+    fails = []
+    for root, rels in _commit_targets(cmd, cwd):
+        for rel, will_add in rels:
+            rel = rel.replace("\\", "/")
+            if not _scope_norm(rel.lower(), cfg):
+                continue
+            ap = os.path.join(root, rel)
+            try:
+                with open(ap, "rb") as f:
+                    work = _norm_text(f.read().decode("utf-8", "replace"))
+                mtime = datetime.fromtimestamp(os.path.getmtime(ap), JST)
+            except Exception:
+                continue
+            staged = T._git(root, ["show", ":" + rel])
+            if not will_add and staged and _norm_text(staged) != work:
+                continue        # what is committed is not the file on disk; its mtime says nothing
+            m = _head(RE_UPDATED, work)
+            st = _stamp(m) if m else None
+            if st is None:
+                continue
+            head = _norm_text(T._git(root, ["show", "HEAD:" + rel]))
+            if head == work:
+                continue
+            hm = _head(RE_UPDATED, head) if head else None
+            hst = _stamp(hm) if hm else None
+            if hst is not None and abs((st - hst).total_seconds() - 9 * 3600) < 60:
+                continue        # correcting exactly this 9-hour slip
+            if st > now + AHEAD:
+                fails.append("[B2] %s: 最終更新日 %s が現在 %s より先です" % (
+                    rel, st.strftime("%m-%d %H:%M"), now.strftime("%m-%d %H:%M JST")))
+            elif st < mtime - SKEW:
+                gap = (mtime - st).total_seconds() / 3600.0
+                hint = ("。9時間前後のずれは UTC を JST と書いた典型（Git Bash の `TZ=Asia/Tokyo`・Web 版の date）"
+                        if 8.5 <= gap <= 10.5 else "")
+                fails.append("[B2] %s: 最終更新日 %s が、このファイルを最後に書いた %s より %.1f 時間前です%s" % (
+                    rel, st.strftime("%m-%d %H:%M JST"), mtime.strftime("%m-%d %H:%M JST"), gap, hint))
+    return fails
+
+
+def _bash(data, cfg):
+    cmd = (data.get("tool_input") or {}).get("command") or ""
+    if not cmd:
+        return
+    reasons = []
+    r = _tz_region_reason(cmd)
+    if r:
+        reasons.append(r)
+    if re.search(r"(?i)\bcommit\b", cmd):
+        reasons += _commit_findings(cmd, data.get("cwd") or os.getcwd(), cfg, datetime.now(JST))
+        if any(x.startswith("[B2]") for x in reasons):
+            reasons.append("直し方: 冒頭の 最終更新日 を今の JST（`TZ=JST-9 date \"+%Y-%m-%d %H:%M JST\"`）"
+                           "に書き直して add し直してから commit する。")
+    if not reasons:
+        return
+    _record_firing("md_date_guard", data)
+    body = "\n".join("・" + x for x in reasons[:8])
+    if cfg.get("mode", "deny") == "deny":
+        print(json.dumps({"hookSpecificOutput": {
+            "hookEventName": "PreToolUse", "permissionDecision": "deny",
+            "permissionDecisionReason": "時刻のずれを検出しました:\n" + body}}))
+    else:
+        print(json.dumps({"hookSpecificOutput": {
+            "hookEventName": "PreToolUse", "additionalContext": "⚠ 時刻チェック:\n" + body}}))
+
+
 def main():
     if _registered_local_copy_exists():
         return
@@ -400,6 +540,9 @@ def main():
         raw = sys.stdin.buffer.read()
         data = _codex_normalize(json.loads(raw.decode("utf-8", "replace")))
         tool = data.get("tool_name") or ""
+        if tool in ("Bash", "PowerShell"):
+            _bash(data, cfg)
+            return
         ti = data.get("tool_input") or {}
         fp = ti.get("file_path") or ""
         if not _in_scope(fp, cfg):

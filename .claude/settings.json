@@ -27,10 +27,6 @@
           },
           {
             "type": "command",
-            "command": "P=$(command -v python3 || command -v python) || exit 0; exec \"$P\" .claude/hooks/md_date_guard.py"
-          },
-          {
-            "type": "command",
             "command": "P=$(command -v python3 || command -v python) || exit 0; exec \"$P\" .claude/hooks/pre_report_quality_guard.py"
           },
           {
@@ -124,6 +120,15 @@
           {
             "type": "command",
             "command": "P=$(command -v python3 || command -v python) || exit 0; exec \"$P\" .claude/hooks/topic_split_guard.py"
+          }
+        ]
+      },
+      {
+        "matcher": "Write|Edit|Bash|PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "P=$(command -v python3 || command -v python) || exit 0; exec \"$P\" .claude/hooks/md_date_guard.py"
           }
         ]
       }
