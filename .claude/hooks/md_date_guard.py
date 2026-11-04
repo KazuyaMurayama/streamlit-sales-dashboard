@@ -415,8 +415,9 @@ def _check(after, before, today, is_new, now=None, report_name=False):
 # `TZ=Asia/Tokyo date` / `TZ="Asia/Tokyo" python ...`: a region name, not a POSIX offset
 # Only an assignment in command position (start, after ; & | ( newline, export/env/set) or
 # PowerShell's $env:TZ. A commit message that *mentions* it is prose (2026-11-04 self-hit).
+# No backtick: Markdown inline code (`TZ=Asia/Tokyo date`) in a heredoc / -m is prose too.
 RE_TZ_REGION = re.compile(
-    r"""(?:(?:^|[;&|(\n`])\s*(?:(?:export|env|set|declare\s+-x)\s+)?TZ|\$env:TZ)\s*=\s*["']?:?"""
+    r"""(?:(?:^|[;&|(\n])\s*(?:(?:export|env|set|declare\s+-x)\s+)?TZ|\$env:TZ)\s*=\s*["']?:?"""
     r"""(?:[A-Za-z_]+/[A-Za-z_]+|Japan)\b""", re.I)
 SKEW = timedelta(minutes=15)    # commit が作業ツリーの mtime より後ろへずれる余裕（T3 の10分＋整形・add の時間）
 UTC_BAND = (8.5, 10.5)          # 9時間ずれ（UTC を JST と書いた）＋書いてから commit までの最大1.5時間
