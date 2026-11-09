@@ -104,6 +104,7 @@ import unicodedata
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")
+    sys.stdin.reconfigure(encoding="utf-8")  # 既定の cp932 で UTF-8 の入力を化けたまま読み、見出しを全部落ちたと誤判定した（2026-11-06）
     sys.stderr.reconfigure(encoding="utf-8")
 except Exception:
     pass

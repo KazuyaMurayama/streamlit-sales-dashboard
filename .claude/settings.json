@@ -40,15 +40,6 @@
         ]
       },
       {
-        "matcher": "Grep|Read|Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "P=$(command -v python3 || command -v python) || exit 0; exec \"$P\" .claude/hooks/pre_index_read_guard.py"
-          }
-        ]
-      },
-      {
         "matcher": "mcp__.*Gmail__.*",
         "hooks": [
           {
@@ -129,6 +120,15 @@
           {
             "type": "command",
             "command": "P=$(command -v python3 || command -v python) || exit 0; exec \"$P\" .claude/hooks/md_date_guard.py"
+          }
+        ]
+      },
+      {
+        "matcher": "Grep|Read|Bash|Write|Edit|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "P=$(command -v python3 || command -v python) || exit 0; exec \"$P\" .claude/hooks/pre_index_read_guard.py"
           }
         ]
       }
@@ -298,6 +298,14 @@
           {
             "type": "command",
             "command": "P=$(command -v python3 || command -v python) || exit 0; exec \"$P\" .claude/hooks/external_state_claim_guard.py"
+          },
+          {
+            "type": "command",
+            "command": "P=$(command -v python3 || command -v python) || exit 0; exec \"$P\" .claude/hooks/pre_index_read_guard.py"
+          },
+          {
+            "type": "command",
+            "command": "P=$(command -v python3 || command -v python) || exit 0; exec \"$P\" .claude/hooks/plain_language_guard.py"
           }
         ]
       }
