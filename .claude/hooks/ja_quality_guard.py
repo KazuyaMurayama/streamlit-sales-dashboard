@@ -32,6 +32,11 @@ inline code, URLs and link targets removed first)
   J  LLM judge: a light model (claude -p --model haiku, user hooks not loaded)
      reads the answer for classes A/D/E/F/J/K/L and must quote the sentence
      verbatim; a quote not found in the answer is dropped.
+     Since 2026-11-16 also aspect N (C06: a 倍率 whose object is missing), measured on
+     Fable's attack sentences: 倍率 defects 15/17 stopped, legitimate unit sentences 0/43,
+     60 random real answers 0/60. Aspect C (C03 delegation) and N for 字数・ポイント missed
+     the target and are off (JUDGE_ASPECTS / JUDGE_ASPECTS_ON). The judge sees the turn's
+     tool names (tools_line). U (regex 倍率・字数・ポイント) is report-only since then.
 Which checks block and which only report is set by CALIBRATION below.
 
 CALIBRATION (実測 2026-11-15, tests/calibrate_ja_quality_guard.py imports analyze()):
@@ -83,6 +88,7 @@ CLI: python ja_quality_guard.py --answer FILE [--no-llm]  -> JSON, exit 1 if blo
 fail-open: any exception -> exit 0. stop_hook_active -> mechanical checks only (no J).
 Deployed from claude-governance/templates/hooks/ -- edit there, not here.
 """
+import collections
 import hashlib
 import io
 import json
@@ -127,6 +133,8 @@ DICT_PATH = os.path.join(HERE, "ja_wording_dict.json")
 SERVER_JS = os.path.join(HERE, "ja_textlint_server.js")
 
 # Set from calibration (see module docstring). Checks not listed only report.
+# U (C06 regex) is report-only since 2026-11-16: Fable round 2 showed it overfits
+# (1/9 字数 defects stopped, 3 legitimate stopped); C06 moved to the judge aspect N.
 BLOCK_CHECKS = {"W", "P", "X", "J"}
 JUDGE_MIN_CHARS = 80         # prose shorter than this is not sent to the model
 JUDGE_TIMEOUT_S = 45         # + textlint 8 s + mechanical < answer_precheck's 90 s
@@ -266,6 +274,106 @@ def check_param(p, prompt=""):
     return out
 
 
+# ---------------------------------------------------------------- U
+# C06 (2026-11-16, loop action C06 -- reports/CORRECTION_DIGEST_20261116.md): a number given
+# without what it is a number OF. Invariants (no proper nouns), each judged in the sentence and the
+# one before it (U2, after the Fable attack of 2026-11-16: v1 read the whole answer and the prompt, so
+# one unrelated 「5%」 or 「レバ」 anywhere excused every sentence):
+#   pt   (report only: 5.4% of 1,875 ordinary answers, mostly bare pp in backtest reports)
+#        a point change (12ポイント・12pp・12pts・%ポイント・十二ポイント) with no pair of percentages
+#        (from / to, or 「N%から」「N%に対して」) in the window; parenthesised asides do not count, and a
+#        table row passes when its table's header carries %. Not points of change: reward points
+#        (付く・付与・貯まる), font size (pt + 文字/フォント/サイズ), index / price points, 「3ポイントにまとめ」.
+#   倍率 倍率・乗数 not tied to what is multiplied: 「<measurable>の倍率」「<measurable>倍率」「倍率（…）」
+#        「倍率とは」, or 「何倍にするか」 in the sentence before. A label 「倍率: 1〜6倍」 is not a definition.
+#        Also 「固定で3倍にした」 -- N倍にする with nothing をN倍 in the sentence.
+#   字数 a character-count RULE (区切る・収める・までとする・以内にする・上限にして書く; not a fact 「31字で切れます」,
+#        not a report 「収めました／収めています」) with no reason in the window (〜ないよう・ため・ので・
+#        すると・過ぎると・そこで; 「規則なので」 is no reason), unless the prompt gave the same count.
+SENT_U = re.compile(r"[^。！？!?\n]+[。！？!?]?")
+_NUM = r"(?:\d+(?:\.\d+)?|[一二三四五六七八九十百]+)"
+RE_PT = re.compile(r"[+\-−±]?\s?" + _NUM + r"\s?(?:パーセントポイント|%\s?ポイント|ポイント|pts?|pp|PT|Pt)(?![A-Za-z])")
+RE_PCT = re.compile(r"\d(?:\.\d+)?\s?%")
+PCT_BASE = re.compile(r"\d(?:\.\d+)?\s?%\s?(?:から|→|->|に対し|より|と比べ|と比較|だった|でした)")
+PT_NOT_CHANGE = re.compile(r"気配|指値|成行|値幅|先物|日経|ダウ|S&P|NASDAQ|ナスダック|TOPIX|指数|ティック|呼値|約定|"
+                           r"付く|付き|付与|貯ま|還元|ポイントカード|購入で|"
+                           r"フォント|文字の?(?:大きさ|サイズ)|サイズ|級|"
+                           r"ポイントに(?:まとめ|絞)|つのポイント|ポイントは(?:次|以下)|要点")
+_PAREN = re.compile(r"[（(][^）)\n]*[）)]")
+RE_BAI = re.compile(r"倍率|乗数")
+BAI_DOMAIN = (r"レバ[^のをが、。\n]{0,4}|損失回避|リスク回避|顕微鏡|レンズ|光学|望遠|拡大|ズーム|点数|ポイント|入試|受験|志願|求人|応募|競争|株価|価格|"
+              r"オッズ|建玉|自己資金|資金|売上|利益|PER|PBR|有効求人")
+BAI_DEF = re.compile(r"(?:" + BAI_DOMAIN + r")(?:[（(][^）)\n]*[）)])?の?(?:倍率|乗数)|(?:倍率|乗数)\s?[（(][^）)\n]{2,}[）)]|"
+                     r"(?:倍率|乗数)とは|何倍に")
+RE_NBAI = re.compile(r"(?<!上限)(?<!最大)(?<!下限)(?<!最高)(?:固定で|一律で?|常に)?\s?" + _NUM + r"\s?倍(?:に(?:する|した|して|固定)|で固定)")
+RE_LEN = re.compile(_NUM + r"\s?(?:字|文字)(?:ほど|程度|前後|くらい|ぐらい)?(?:以内|以下|まで|を上限|が上限)?"
+                    r"\s?(?:で|に|と|を)?(?:区切|切る|切って|切り|まとめ|収め|抑え|縮め|する|とする|して書|書く)")
+LEN_REPORT = re.compile(r"(?:ました|ています|てあります|でした)[。！]?\s*$")
+LEN_WHY = re.compile(r"ないよう|ないため|ため(?!に区切|に収)|(?<!規則な)(?<!決まりな)(?<!ルールな)ので|すると|過ぎると|超えると|そこで|"
+                     r"読みやす|表示され|切れて|欠けて")
+
+
+def _table_header_has_pct(lines, i):
+    j = i
+    while j > 0 and lines[j - 1].lstrip().startswith("|"):
+        j -= 1
+    return any("%" in lines[k] for k in range(j, i) if not re.match(r"^\s*\|[\s:|-]+\|\s*$", lines[k]))
+
+
+def check_units(p, prompt=""):
+    out = []
+    lines = [l for l in _unquoted(p, prompt).splitlines() if not l.lstrip().startswith(">")]
+    prev = ""
+    hay = _norm(prompt)
+    for li, line in enumerate(lines):
+        is_row = line.lstrip().startswith("|")
+        for s in SENT_U.findall(line):
+            win = prev + " " + s
+            # pt
+            for m in RE_PT.finditer(s):
+                if PT_NOT_CHANGE.search(s) or (is_row and _table_header_has_pct(lines, li)):
+                    continue
+                w = _PAREN.sub(" ", RE_PT.sub(" ", win))
+                if len(RE_PCT.findall(w)) >= 2 or PCT_BASE.search(w):
+                    continue
+                out.append({"check": "U?", "type": "pt", "quote": s.strip()[:80],
+                            "fix": "何%から何%への差かを同じ文か直前の文に書く（例: 「+25ポイント」→「1%から26%へ（+25ポイント）」）"})
+                break
+            # 倍率
+            for m in RE_BAI.finditer(s):
+                if BAI_DEF.search(s) or re.search(r"何倍", prev):
+                    continue
+                out.append({"check": "U", "type": "倍率", "quote": s.strip()[:80],
+                            "fix": "何を何倍にするのかを書く（例: 「固定の倍率3倍」→「レバレッジ（自己資金に対する建玉の大きさ）を3倍に固定」）"})
+                break
+            else:
+                m = RE_NBAI.search(s)
+                if m and "を" not in s[:m.start()] and not BAI_DEF.search(s):
+                    out.append({"check": "U", "type": "倍率", "quote": s.strip()[:80],
+                                "fix": "何を何倍にするのかを書く（例: 「固定で3倍にした」→「レバレッジを3倍に固定した」）"})
+            # 字数
+            for m in RE_LEN.finditer(s):
+                if LEN_REPORT.search(s.strip()) or LEN_WHY.search(win):
+                    continue
+                num = re.match(_NUM, m.group(0)).group(0)
+                if hay and (num + "字") in hay:
+                    continue
+                out.append({"check": "U", "type": "字数", "quote": s.strip()[:80],
+                            "fix": "数値の基準ではなく目的を書く（例: 「1文を40字ほどで区切る」→「読点が続く長い文は2つに分ける」）"})
+                break
+            prev = s
+    return out
+
+
+def analyze_text(text):
+    """For pre_report_quality_guard (files): U findings with line numbers."""
+    out = []
+    for n, line in enumerate((text or "").splitlines(), 1):
+        for i in check_units(prose(line)):
+            out.append({"line": n, "type": i["type"], "quote": i["quote"]})
+    return out
+
+
 # ---------------------------------------------------------------- X
 FUNC = set("the a an is are was were be been not never no it its this that these those to of in on for "
            "with and or but if then so as by from at into than do does did can cannot should must will "
@@ -378,18 +486,38 @@ def check_textlint(p, wait_s=0.0):
 
 
 # ---------------------------------------------------------------- J
-JUDGE_PROMPT = """下の「回答」は、AI が日本語の読者に書いた回答です。読者は「その分野を知らないが理解力はある人」で、直前に「依頼」を書いた本人です。会話のそれより前の部分は読者も見ています。
-読者が意味を取れない箇所だけを指摘してください。文体の好み・内容の正誤・長さ・書式は指摘しないでください。
+JUDGE_HEAD = """下の「回答」は、AI が日本語の読者に書いた回答です。読者は「その分野を知らないが理解力はある人」で、直前に「依頼」を書いた本人です。会話のそれより前の部分は読者も見ています。
+下の型に当たる箇所だけを指摘してください。文体の好み・内容の正誤・長さ・書式は指摘しないでください。
 
-指摘する型（過去に読者が「意味不明」と言った実例つき）:
+指摘する型（過去に読者が「意味不明」「自分でやって」と言った実例つき）:
 A 省略しすぎ: 何の値か・誰のことか・どの条件かが抜けた名詞句や数値。例「月80万円の不能証明と限界診断」（何が月80万円か無い）
 D 造語: 一般に通じる語（パスワード・ツール・シグナル・ランダム化など）を自作の和語や比喩に言い換え、原語を復元できない。例「コンテナの窓に合言葉を入れてほしい」「くじで分けた29研究」
 E 語の結びつき: 係り受けや語の組み合わせが日本語として不自然。例「自信がつくのを待つ順番を、私は勧めません」「設計で減る」
 F 論理: 否定・条件・対比が逆になっている。例「効果がないならやっても損はない」
 J 手順の欠落: 読者がする作業で、どのファイル・どの画面・何をするかが抜けている。例「バックアップ2ファイルを貼り戻して保存」
 K 両義: 2通りに読める、または指す先が不明。例「年率の目的（交差検証の検証側）」
-
-severity: 3 = 読者がこの文の意味を取れない・誤解する（上の実例と同じ程度）／2 = 少し考えれば分かる／1 = 好みの範囲。
+"""
+# C03 / C06 (correction digest 2026-11-16) as judge aspects, after the regex versions
+# overfit (Fable round 2: 15/51 defects stopped, 26/50 legitimate stopped). One sentence
+# of class definition + the boundary with legitimate text. JUDGE_ASPECTS_ON is set from
+# the measurement in CHANGELOG 2026-11-16 (targets: defects >= 80 %, legitimate <= 10 %);
+# an aspect that misses the target stays out of the prompt (and out of PROMPT_VER).
+JUDGE_ASPECTS = {
+    "C": """C 丸投げ: AI が自分でできる作業・決定を読者に回して止めている。次の3つ。
+ C-1 確認事項: 言い方は問わず（「ご確認いただきたい点」「積み残し」「どちらにしますか」等）、依頼された作業の中で AI が自分で直せる・推奨案で決められる項目を並べ、読者に見る・決める・知らせることを求めて終わっている。
+ C-2 本人の環境が要る: 「ログインが必要」「権限がない」「本人の環境でしか確かめられない」等の理由で作業を読者に回しているのに、試した手段と、出たエラー文・画面の表示が書かれていない。
+ C-3 実行依頼: 読者にコマンド・スクリプトの実行や結果の貼り付けを求めている（AI はシェルを自分で実行できる）のに、実行が拒否されたエラー文の引用が無い。
+ C ではないもの: 試した手段と出たエラー文を引用したうえでの依頼／取り消せない・お金・公開・本人の好みに関わる決定を、推奨と理由を添えて聞くこと／依頼がレビュー・調査・報告のときに見つけた問題を報告すること／AI が直した箇所の報告／仕組み・ルール・フックの説明／読者自身が依頼で書いた言葉の言い直し／読者が自分で行う手順を依頼で求めたときのその手順。
+""",
+    # N was first written for 倍率・字数・ポイント; only 倍率 met the target (see CHANGELOG
+    # 2026-11-16 v5.2), so the aspect covers 倍率 alone. Examples are not fixture sentences.
+    "N": """N 倍率の中身が無い: 「N倍」「倍率」と書いた数値について、何を何倍にしたのか（何に対する倍率か）が、その文にも前後の文・表の見出しにも無い。例「上限を2倍に引き上げました」（何の上限か無い）「倍率は1.5にしてあります」（何の倍率か無い）
+ N ではないもの: 前後の文・表の見出しで対象が分かる（「金利が2倍になった」）／読者が依頼で指定した値の言い直し／仕組み・ルールの説明、旧版の文の引用・指摘／コードの中の値。
+""",
+}
+JUDGE_ASPECTS_ON = ("N",)   # C (delegation) missed the target: 42 % of defects; report-only regex v5 only
+JUDGE_TAIL = """
+severity: 3 = 読者がこの文の意味を取れない・誤解する（上の実例と同じ程度）／2 = 少し考えれば分かる／1 = 好みの範囲。A〜K のほかの型は、型にはっきり当てはまれば 3、当てはまるか迷えば 2。
 依頼の中で読者自身が使った語・その会話で読者が知っている固有名（ファイル名・コマンド名など）は指摘しない。
 
 出力は JSON だけ: {"issues":[{"type":"A","severity":3,"quote":"回答中の文字列を一字一句そのまま（40字以内）","why":"どう読めないか（30字以内）","fix":"書き直し案"}]}
@@ -400,10 +528,13 @@ severity: 3 = 読者がこの文の意味を取れない・誤解する（上の
 %s
 >>>
 
+AI がこの回答の前に実行したツール: %s
+
 回答:
 <<<
 %s
 >>>"""
+JUDGE_PROMPT = JUDGE_HEAD + "".join(JUDGE_ASPECTS[k] for k in JUDGE_ASPECTS_ON) + JUDGE_TAIL
 JUDGE_BLOCK_SEVERITY = 3     # severity 3 blocks; 2 is reported only (see CALIBRATION)
 
 
@@ -451,11 +582,18 @@ def _real_home_env(env):
     return env
 
 
-def check_judge(answer, prompt=""):
+def tools_line(tools):
+    """[(name, ...)] or [name] -> 「Bash×2、Read×1」; 「なし」 when nothing ran."""
+    c = collections.Counter((t[0] if isinstance(t, (list, tuple)) else t) for t in (tools or []))
+    return "、".join("%s×%d" % kv for kv in c.most_common(12)) or "なし"
+
+
+def check_judge(answer, prompt="", tools=None):
     raw_answer = answer
     txt = judge_text(answer)
     ctx = judge_context(prompt)
-    key = hashlib.sha1((PROMPT_VER + "\0" + ctx + "\0" + txt).encode("utf-8", "replace")).hexdigest()[:20]
+    tl = tools_line(tools)
+    key = hashlib.sha1((PROMPT_VER + "\0" + ctx + "\0" + tl + "\0" + txt).encode("utf-8", "replace")).hexdigest()[:20]
     cp = _judge_cache(key)
     try:
         if os.path.exists(cp):
@@ -477,7 +615,7 @@ def check_judge(answer, prompt=""):
         r = subprocess.run([exe, "-p", "--model", "haiku", "--setting-sources", "local",
                             "--tools", "", "--strict-mcp-config", "--no-session-persistence",
                             "--output-format", "json", "--system-prompt", "あなたは日本語の文章の校閲者です。"],
-                           input=(JUDGE_PROMPT % (ctx or "（なし）", txt)).encode("utf-8"), capture_output=True,
+                           input=(JUDGE_PROMPT % (ctx or "（なし）", tl, txt)).encode("utf-8"), capture_output=True,
                            timeout=JUDGE_TIMEOUT_S, cwd=wd, env=env)
         out = r.stdout.decode("utf-8", "replace")
         try:
@@ -524,12 +662,12 @@ def check_judge(answer, prompt=""):
 
 
 # ---------------------------------------------------------------- analysis
-def analyze(answer, use_llm=True, use_textlint=True, textlint_wait=0.0, prompt=""):
+def analyze(answer, use_llm=True, use_textlint=True, textlint_wait=0.0, prompt="", tools=None):
     p = prose(answer)
     res = {"japanese": _is_japanese(p), "issues": [], "textlint": "skipped", "judge": "skipped"}
     # W and P also run on short answers (a 1-line answer can carry 「合言葉」); X,
     # textlint and J only on answers that are Japanese prose.
-    iss = check_wording(p, prompt) + check_param(p, prompt) if _ja_count(p) >= 8 else []
+    iss = check_wording(p, prompt) + check_param(p, prompt) + check_units(p, prompt) if _ja_count(p) >= 8 else []
     if not res["japanese"]:
         res["issues"] = iss
         return res
@@ -539,7 +677,7 @@ def analyze(answer, use_llm=True, use_textlint=True, textlint_wait=0.0, prompt="
         res["textlint"] = "unavailable" if t is None else "ok"
         iss += t or []
     if use_llm and len(re.sub(r"\s", "", p)) >= JUDGE_MIN_CHARS:
-        j = check_judge(answer, prompt)
+        j = check_judge(answer, prompt, tools)
         res["judge"] = "unavailable" if j is None else "ok"
         iss += j or []
     res["issues"] = iss
@@ -553,7 +691,7 @@ def blocking(issues):
 
 
 LABEL = {"W": "本人に指摘された言い回し", "P": "裸のパラメータ", "X": "英語の地の文", "X?": "英語の題名・表示らしき語句",
-         "T": "textlint", "J": "読み手が意味を取れない箇所"}
+         "T": "textlint", "J": "読み手が意味を取れない箇所", "JC": "自分でできることの丸投げ", "JN": "何の数値か・なぜその値かが無い", "U": "何の数値かが無い", "U?": "基準の無いポイント差（注意のみ）"}
 
 
 def reason_text(block, report):
@@ -562,7 +700,8 @@ def reason_text(block, report):
              "語そのものを話題にするときは `合言葉` のようにコードの記法で囲む。"]
     for i in block[:8]:
         extra = (" ／" + i["why"]) if i.get("why") and i["check"] == "J" else ""
-        lines.append("- [%s%s] 「%s」%s → %s" % (LABEL[i["check"]], ("・" + i["type"]) if i.get("type") else "",
+        lab = LABEL.get("J" + i.get("type", "")) if i["check"] == "J" else None
+        lines.append("- [%s%s] 「%s」%s → %s" % (lab or LABEL[i["check"]], ("・" + i["type"]) if i.get("type") and not lab else "",
                                                  i["quote"], extra, i["fix"]))
     if report:
         lines.append("参考（止めない）: " + " ／ ".join("「%s」(%s)" % (i["quote"][:30], i.get("rule") or i["check"])
@@ -590,6 +729,22 @@ def _judge_here(rows, ev):
     if _entrypoint(rows) == "sdk-cli" or ev.get("stop_hook_active"):
         return False
     return bool(os.environ.get("ANSWER_PRECHECK"))
+
+
+def _turn_tools(rows):
+    """Tool names called since the last human prompt (judge aspect C needs them)."""
+    out = []
+    for d in rows:
+        if d.get("isSidechain"):
+            continue
+        if _plg.is_prompt_row(d):
+            out = []
+            continue
+        if d.get("type") == "assistant":
+            for b in ((d.get("message") or {}).get("content") or []):
+                if isinstance(b, dict) and b.get("type") == "tool_use":
+                    out.append(b.get("name") or "")
+    return out
 
 
 def _issue_key(i):
@@ -655,7 +810,7 @@ def main():
         return
     sid = "".join(ch for ch in (ev.get("session_id") or "x") if ch.isalnum() or ch in "-_")
     use_llm = _judge_here(rows, ev)
-    res = analyze(answer, use_llm=use_llm, textlint_wait=8.0, prompt=prompt)
+    res = analyze(answer, use_llm=use_llm, textlint_wait=8.0, prompt=prompt, tools=_turn_tools(rows) if use_llm else None)
     if use_llm and res["judge"] == "unavailable":
         _record_firing(NAME + "_judge_unavailable", ev)   # visible in the firing log, not silent
     # Once per issue (check + quoted text) per session, not per answer text: the draft

@@ -213,7 +213,7 @@ def _registered_local_copy_exists():
 
 
 def _load_config():
-    cfg = {"mode": "warn", "checks": ["numeric", "rigor", "state"],
+    cfg = {"mode": "warn", "checks": ["numeric", "rigor", "state", "units"],
            "include": None, "exclude": None}
     try:
         p = os.path.join(os.getcwd(), ".claude", "report_quality.json")
@@ -337,6 +337,11 @@ def _analyze(text, cfg, mods):
     if "state" in cfg["checks"] and len(mods) > 2 and mods[2]:
         for f in mods[2].analyze_text(text):
             out.append(("現状値の根拠化", f"L{f['line']}「{f['state']}」{f['text'][:50]}"))
+    # C06 (2026-11-16): a number without what it is a number of (+25Pt with no base, a bare 倍率,
+    # a 字数 rule without a reason). Same functions as the final-answer Stop check (ja_quality_guard).
+    if "units" in cfg["checks"] and len(mods) > 3 and mods[3]:
+        for f in mods[3].analyze_text(text):
+            out.append(("何の数値かが無い", f"L{f['line']}（{f['type']}）{f['quote'][:50]}"))
     return out
 
 
@@ -363,9 +368,13 @@ def main():
             import startup_state_check as ssc
         except Exception:
             ssc = None
-        if npc is None and rrc is None and ssc is None:
+        try:
+            import ja_quality_guard as jqg
+        except Exception:
+            jqg = None
+        if npc is None and rrc is None and ssc is None and jqg is None:
             return
-        mods = (npc, rrc, ssc)
+        mods = (npc, rrc, ssc, jqg)
 
         # Read stdin as BYTES and decode UTF-8 explicitly. json.load(sys.stdin)
         # uses the Windows locale encoding (CP932 here), which mojibakes every

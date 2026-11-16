@@ -150,6 +150,46 @@ kind, a resume re-opens an id, the sentence must name the delegated work. 29/33 
 unrelated pending job plus a sentence that does name agents (「エージェントに任せるか私が続けます」) still
 passes; English closings and launches outside the 4 MB window are blocked once (fail-safe side).
 
+V5 (2026-11-16, loop action C03 -- reports/CORRECTION_DIGEST_20261116.md)
+-------------------------------------------------------------------------
+v4.1 was followed by 4 more C03 corrections (2026-11-04..12). Replayed through v4.1 (decide, decide_batch,
+unattempted, stalled -- the hook's own functions): 1 fired (11-04 11:01, v3, 'この費用で全数へ広げてください'; the
+answer the user saw was the one after that single block), 3 passed:
+  * 11-12 05:40 a body section '見てほしい点（直さず計画に記録）' with 4 numbered items, closing on a /compact
+    stop -- the hand-off sat in the BODY as a list of open review items, not in the closing.
+  * 11-10 10:25 'サイトはこの環境から開けないため ... 本人の環境でしか確かめられないので、ここで止めます' -- an
+    inability claim after WebSearch/WebFetch only; no browser route was tried.
+  * 11-04 17:43 'Next Action: PowerShell で code "..." を実行して窓を開き ...' -- v3 excused it because the turn's
+    PowerShell calls shared a word with the request; Claude has a shell itself.
+Invariants (beyond(), each in the final answer):
+  * review   = a heading/lead line naming points for the user to check, review or decide (見てほしい点・確認して
+               ほしい点・確認事項・ご判断いただきたい点・要確認 ...) followed by 2+ list items, or carrying a count
+               (4点); passes when every item carries a recommendation/decision of Claude's own (推奨・〜とします・
+               直しました) or the instruction itself asked for such a list (質問・確認事項・懸念・レビュー・洗い出し).
+  * cant     = a claim that only the user / the user's environment can open, log in, check or operate
+               (ログインが必要・本人の環境でしか・この環境からは開けない); passes only if this turn called a browser or
+               computer route (playwright / Claude_Browser / claude-in-chrome / computer-use) AND the answer quotes
+               how it failed (エラー・拒否・denied・403 ...).
+  * run_cmd  = a request that the user run / paste a command in PowerShell, a terminal or a shell; never excused by
+               tool-word overlap, only by a quoted denial or error of Claude's own attempt.
+V5.1 (2026-11-16, Fable attack, tests/fixtures/adversarial_c03_c06_20261116.json, 66 cases): v5.0 matched only the
+words of the 3 replayed answers (rephrasings stopped by beyond(): 0/38). Now: review = a heading that ADDRESSES the
+reader (a desiderative/honorific ask before the noun, or 気がかり/気になる/残った論点/要確認; done or negated headings
+pass), whose list items, table rows, (1) items or paragraphs are counted, and 「推奨なし」 is not a decision; cant = a
+barrier (ログインが必要・認証の都合・Cookie・本人だけ・お手元の画面・この環境から) paired with giving up in the same or next
+sentence, excused only by a browser tool plus an error that happened (not 「エラーが出ませんでした」); run_cmd = any
+exec verb + shell word or concrete command, legit only when an own attempt's failure is quoted, the user asked for
+the command / the way, or the sentence reports own work -- and a v3 'action' hit on such a legit sentence is
+excused (v3_excused). Result on the fixture through the real hook: defects 42/42, legitimate 0/22.
+Real data (1,522 turns): +1.3% fires (review 0.7%, cant 0.3%, run_cmd 0.3%).
+Blocked once per instruction (same mark). Tests: tests/test_delegation_guard_v5_20261116.py (the 3 answers as
+they were, plus legitimate counterparts). Calibration: CHANGELOG 2026-11-16.
+
+V5.2 (2026-11-16, Fable round 2, 101 new sentences): the regexes overfit (defects 15/51 stopped,
+legitimate 26/50 stopped), so v5 is REPORT-ONLY: a systemMessage, logged as delegation_guard_v5_review in
+the firing log; it never blocks. A judge-based C03 (ja_quality_guard J aspect C) was measured and missed the
+target (defects 42 %), so it is off. v4.1 and earlier (decide/decide_batch/unattempted/stalled) unchanged.
+
 Deployed from claude-governance/templates/hooks/ -- edit there, not here.
 """
 import hashlib
@@ -741,6 +781,185 @@ def final_and_tools(events):
     return "\n\n".join(finals), tools
 
 
+# ---------------------------------------------------------------- V5 (see docstring)
+# V5.1 (2026-11-16, Fable attack 116 sentences): the v5.0 lexicon matched only the words of the 3 replayed
+# answers. Now each check is an invariant over a heading/sentence shape, not a word list.
+# the heading must address the reader: a desiderative / honorific ask (〜てほしい・〜いただきたい・〜をお願いしたい・
+# 仰ぎたい・伺いたい) before the noun, or 気がかり/気になる/残った論点/要確認. 「判断に効く発見3点」「レビューで直した主な点」
+# 「判断すること」 are Claude's own findings, not asks (real data 2026-11-16: the bare verb list fired on 3.5% of turns).
+_ASK_N = r"(?:見|目を通|お目通し|ご?意見|ご?判断|判断を|ご?確認|確認を|チェック|レビュー|ご?検討|ご?相談|決め|お決め|選ん|お選び)"
+_WANT = r"(?:て(?:ほしい|欲しい|いただきたい|頂きたい|もらいたい)|いただきたい|頂きたい|をお願いしたい|お願いしたい|を仰ぎたい|仰ぎたい|を伺いたい|伺いたい|したい)"
+REVIEW_HEAD = re.compile(_ASK_N + r"[^。\n]{0,6}?" + _WANT + r"[^。\n]{0,4}?(?:点|箇所|ところ|事項|項目|論点|こと|もの)"
+                         r"|気がかりな?(?:点|箇所|ところ|こと)|気になる(?:点|箇所|ところ)|(?:残った|残る|未解決の)論点|要(?:確認|レビュー|検討|判断)(?:\W*$|の?(?:点|事項|項目))")
+HEAD_DONE = re.compile(r"(?:した|しました|済み?|済|でした|ました)(?:点|こと|もの|事項|箇所|ところ)?\W*$|特に(?:ありません|なし|ない)|(?:は|が)(?:ありません|なし|ない)|^\W*未確認")
+_LABEL_LINE = re.compile(r"^\s*(?:#{1,6}\s|\*\*[^*\n]{1,40}\*\*\s*(?:[（(][^）)\n]*[）)])?\s*[:：]?\s*$|【[^】\n]{1,30}】\s*$|[^。\n]{1,30}[:：]\s*$)")
+_STOP_LABEL = re.compile(r"^\s*\*\*(?:Next Action|留保|代替案|推奨|成果物)|^\s*#{1,6}\s|^\s*\|?\s*成果物\s*\|")
+_COUNTED = re.compile(r"[0-9０-９一二三四五六七八九十]+\s*(?:点|件|つ|項目|箇所)")
+_ITEM = re.compile(r"^\s*(?:\d+[.)．、]|[(（]\d+[)）]|[①-⑳]|[-*・]\s|\*\*[^*\n]+\*\*)")
+_NOT_DECIDED = re.compile(r"推奨(?:は)?(?:なし|無し|ありません|できません|はない)|未定|決めていません|決まっていません")
+_DECIDED = re.compile(r"推奨|おすすめ|お勧め|とします|にします|で進めます|進めました|直しました|修正しました|対応しました|採りました|"
+                      r"決めました|判断しました|足しました|揃えました|そのまま採|見つかりませんでした|見つからなかった|記載がありませんでした|記載がない|"
+                      r"ありませんでした|解決し|反映し|反映済|(?:て|で)あります")
+ASKED_LIST = re.compile(r"質問|確認事項|懸念|気になる点|レビューして|洗い出|列挙|挙げて|リストアップ|論点")
+
+
+def _units_after(lines, i):
+    """List items / table body rows / paragraphs under heading line i, up to the next label."""
+    units, para, in_table = [], [], False
+    for ln in lines[i + 1:i + 25]:
+        st = ln.strip()
+        if _STOP_LABEL.match(ln) or (_LABEL_LINE.match(ln) and not _ITEM.match(ln) and units):
+            break
+        if st.startswith("|"):
+            if re.match(r"^\|[\s:|-]+\|$", st):
+                in_table = True
+                if units:
+                    units.pop()     # the row above the separator was the header
+                continue
+            units.append(st)
+            continue
+        if not st:
+            if para:
+                units.append(" ".join(para))
+                para = []
+            continue
+        if _ITEM.match(ln):
+            if para:
+                units.append(" ".join(para))
+                para = []
+            units.append(st)
+        else:
+            para.append(st)
+    if para:
+        units.append(" ".join(para))
+    return units
+
+
+def _decided(u):
+    return bool(_DECIDED.search(_NOT_DECIDED.sub("", u))) and not _NOT_DECIDED.search(u)
+
+
+def _review_list(final, prompt):
+    if ASKED_LIST.search(prompt or ""):
+        return None
+    lines = final.splitlines()
+    for i, ln in enumerate(lines):
+        st = ln.strip()
+        if not st or st.startswith("|") or not REVIEW_HEAD.search(st) or HEAD_DONE.search(st):
+            continue
+        is_head = bool(_LABEL_LINE.match(ln)) or len(re.sub(r"[*#（(][^）)]*[）)]|[*#]", "", st)) <= 24
+        if is_head:
+            units = _units_after(lines, i)
+            if len(units) >= 2 and not all(_decided(u) for u in units):
+                return st[:120]
+        elif _COUNTED.search(st) and not PAST.search(st.rstrip("。")) and not _DECIDED.search(st):
+            # 「見てほしい点が4点あります。」 -- a counted ask in a sentence
+            return st[:120]
+    return None
+
+
+# cant: a barrier (login / auth / the user's own screen) paired, in the same or next sentence, with giving up
+BARRIER = re.compile(r"(?:ログイン|サインイン)(?:が必要|が必須|が要|しないと|しなければ|した状態|していない|の先|後の(?:画面|ページ)|が前提)|"
+                     r"要ログイン|(?:二段階)?認証(?:の都合|が必要|の先|を通ら|が要)|二段階認証|会員(?:向け|限定|専用)|Cookie|クッキー|"
+                     r"(?:ご?本人|あなた|ユーザー)(?:だけ|のみ|しか|の(?:環境|PC|ブラウザ|端末|アカウント|画面))|お?手元(?:の(?:画面|ブラウザ|PC|環境|端末)|で)|"
+                     r"(?:私|こちら|Claude(?: Code)?)の?側(?:では|から)|この環境(?:から|では)", re.I)
+GIVE_UP = re.compile(r"確かめられ(?:ない|ません)|確かめていません|確かめずに|確認でき(?:ない|ません)|確認していません|未確認|"
+                     r"取得でき(?:ない|ません)|取得できませんでした|見送り|止めます|止めました|到達でき(?:ない|ません)|開け(?:ない|ません|ず)|"
+                     r"見え(?:ない|ません)|見られ(?:ない|ません)|表示されない|アクセスでき(?:ない|ません)|"
+                     r"見て(?:ください|もらう|いただ)|確かめて(?:ください|もらう|いただ)|確認して(?:ください|もらう|いただ)|ご確認ください|お願いします")
+BROWSER_TOOL = re.compile(r"playwright|Claude_Browser|claude-in-chrome|computer", re.I)
+# evidence that an attempt failed: an error that HAPPENED (not 「エラーが出ませんでした」, not a hypothetical)
+ERR_EVIDENCE = re.compile(r"(?:拒否され|denied|Permission for|forbidden|HTTP\s?40[0-9]|status\s?40[0-9]|40[13]\s?が返|"
+                          r"エラー(?:で|に|が返|文|になり|:|：)|タイムアウトし|timed out|失敗しました(?!と)|弾かれ|ブロックされ|"
+                          r"転送されました|リダイレクトされ|ログイン画面(?:へ|に)|で止まりました|画面で止ま)"
+                          r"(?![^。\n]{0,6}(?:ませんでした|なかった|ない|と表示|と出|たら))", re.I)
+
+
+def _sents(final):
+    out = []
+    for s in re.split(r"(?<=[。！？\n])", final):
+        if s.strip() and not s.lstrip().startswith("|"):
+            out.append(s.strip())
+    return out
+
+
+def _cant(final, tools):
+    names = " ".join(n for n, _i in tools)
+    ss = _sents(final)
+    for k, s in enumerate(ss):
+        if not BARRIER.search(s):
+            continue
+        win = s + " " + (ss[k + 1] if k + 1 < len(ss) else "")
+        if not GIVE_UP.search(win):
+            continue
+        ctx = (ss[k - 1] if k else "") + " " + win
+        if BROWSER_TOOL.search(names) and ERR_EVIDENCE.search(ctx):
+            continue
+        return s[:120]
+    return None
+
+
+# run_cmd: a request that the user run a command. Legit only when (a) an attempt of Claude's own failed and the
+# answer quotes how, (b) the user asked for the command / the way to do it, or (c) the sentence reports own work.
+SHELL = re.compile(r"PowerShell|ターミナル|コマンドライン|コマンドプロンプト|Windows Terminal|\bcmd\b|Git Bash|Bash|シェル|コンソール", re.I)
+CONCRETE_CMD = re.compile(r"`[^`]+`|\"[^\"]{3,}\"|(?:次の|この|上の|以下の|下の|下記の)(?:[0-9０-９]+行|コマンド|一行)|(?:次|以下|下記)を|"
+                          r"(?<![A-Za-z])(?:python|py|git|npm|npx|node|pip|docker|code|claude|clasp|gh|pwsh|winget)\s+[A-Za-z\-./]")
+EXEC_V = re.compile(r"実行|走らせ|叩い|叩き|打っ|打ち|入力|貼っ|貼り付|流し")
+REQ_END = re.compile(r"ください|下さい|ほしい|欲しい|お願い|いただけ|頂け|もらえ|くれ")
+HOWTO = re.compile(r"教えて|方法|やり方|使い方|手順|どうやって|どうすれば|自分の手で|自分で(?:実行|打|叩)|[はか][？?]\s*$")
+
+
+def cmd_requests(final, prompt=""):
+    """[(sentence, legit)] for every sentence asking the user to run a command."""
+    ss = _sents(final)
+    howto = bool(HOWTO.search(prompt or ""))
+    fails = [s for s in ss if ERR_EVIDENCE.search(s) and not REQ_END.search(s)]
+    out = []
+    for s in ss:
+        if not (EXEC_V.search(s) and REQ_END.search(s) and (SHELL.search(s) or CONCRETE_CMD.search(s))):
+            continue
+        if not (SHELL.search(s) and re.search(r"(?:次|以下|下記)を", s)) and not CONCRETE_CMD.search(s):
+            continue
+        body = re.sub(r"[^。]*(?:とのご依頼|と依頼され|とのことで)[^、。]*", "", s)
+        if not REQ_END.search(body) or PAST.search(s.rstrip()):
+            out.append((s, True))       # a report of own work, not a request
+            continue
+        out.append((s, bool(fails) or howto))
+    return out
+
+
+def beyond(final, tools, prompt=""):
+    """V5: ('review'|'cant'|'run_cmd', sentence) or None."""
+    if not final:
+        return None
+    r = _review_list(final, prompt)
+    if r:
+        return ("review", r)
+    c = _cant(final, tools)
+    if c:
+        return ("cant", c)
+    for s, ok in cmd_requests(final, prompt):
+        if not ok:
+            return ("run_cmd", s[:120])
+    return None
+
+
+V5_LABEL = {"review": "確認事項の列挙", "cant": "要ログイン・本人の環境でしか、の主張",
+            "run_cmd": "コマンド実行の依頼"}
+
+
+def v3_excused(v3, final, prompt=""):
+    """A v3 'action' hit whose sentence is a legitimate command request (cmd_requests) is not a hand-off."""
+    if not v3 or v3[0] in ("batch", "compute", "decision"):
+        return False
+    def _n(x):
+        return re.sub(r"`[^`]*`|\"[^\"]*\"|\s+|\*", "", x)
+    sent = _n(v3[1])[:16]
+    for s, ok in cmd_requests(final, prompt):
+        if ok and sent and sent in _n(s):
+            return True
+    return False
+
 def main():
     try:
         me = os.path.abspath(__file__)
@@ -761,15 +980,27 @@ def main():
     prompt, pts, answer = read_turn(tp)
     hit = decide(answer) if prompt else None
     batch = None if hit or not prompt else decide_batch(answer)
-    v3, final = None, ""
+    v3, final, tools = None, "", []
     if prompt and not hit and not batch:
         _p, _t, final, tools = read_turn_full(tp)
         v3 = unattempted(final, tools)
+        if v3_excused(v3, final, prompt):
+            v3 = None
     if v3 and v3[0] == "batch":
         batch, v3 = v3[1], None
     stall = None
     if prompt and not hit and not batch and not v3:
         stall = stalled(final, prompt, bool(bg_pending(tp, pts)))
+    v5 = None
+    if prompt and not hit and not batch and not v3 and not stall:
+        v5 = beyond(final, tools, prompt)
+    if v5 and not (hit or batch or v3 or stall):
+        # v5 is report-only since 2026-11-16 (Fable round 2: 15/51 defects, 26/50 legitimate
+        # stopped -- the regexes overfit). Still logged; C03 moved to ja_quality_guard J aspect C.
+        _record_firing(NAME + "_v5_review", ev)
+        sys.stdout.buffer.write(json.dumps({"systemMessage": "【丸投げ検査v5（注意のみ・止めない）】%s: 「%s」"
+                                            % (V5_LABEL[v5[0]], v5[1][:60])}, ensure_ascii=True).encode("ascii"))
+        return
     if not hit and not batch and not v3 and not stall:
         return
     # keyed on the prompt's timestamp too: the same words sent again later
