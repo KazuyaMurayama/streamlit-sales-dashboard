@@ -1037,6 +1037,9 @@ def main():
                   "外部の出来事を待つ）が締めに書かれていない。その続行は自分で決めてよいので、このターンで続けて実行し、"
                   "終わった結果を報告し直せ（CLAUDE.md Top10 の6「事前確認しない」・§11.2）。止める理由が本当にあるなら、"
                   "どの争点か（例: 「削除は取り消せないため」「課金が発生するため」「/compact が必要なため」）を締めに1文で書け。"
+                  "続きが時間を置く作業（数時間後・明日・別の処理の完了後）なら、今続けるのではなく、自分を起こす仕組み"
+                  "（CronCreate・/schedule・タスク スケジューラ・完了を待つ run_in_background）をこのターンで設定し、"
+                  "ジョブ ID と次に動く時刻を書け（deferred_action_guard・2026-11-16）。"
                   % (what, sent[:120]))
         sys.stdout.buffer.write(json.dumps({"decision": "block", "reason": reason}, ensure_ascii=True).encode("ascii"))
         return
