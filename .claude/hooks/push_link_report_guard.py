@@ -43,12 +43,12 @@ CALIBRATION (measured 2026-11-19 on the newest 300 transcripts under ~/.claude/p
   v2: 268 interactive instructions -> 16 blocks (6.0%): PUSH_NO_LINK 14, LOCAL_IN_TABLE 2, DEFLECT 0.
   The first v2 draft hit DEFLECT twice on 「前の回答のとおり」-type sentences not about links; the object
   is now required to be the link or the table.
-  v1 measured 6.4% but a different model's attack fixture (tests/fixtures/push_link_report_attack_20261119.json,
+  v1 measured 6.4% but a different model's attack fixture (templates/hooks/tests/fixtures/push_link_report_attack_20261119.json,
   91 cases) showed v1 missed 55 of 64 evasions and wrongly blocked 19 of 27 benign cases; v2 passes all 91.
   Hand review of the 14 PUSH_NO_LINK hits: pushes whose final answer carries no /blob/ link for that
   repo (e.g. "Waiting on the quality check." after a push), i.e. the invariant, not noise.
   The session that motivated the guard: all 3 complained-about answers block, the 3 answers that fixed
-  them pass (tests/fixtures/push_link_report_session_20261119.json).
+  them pass (templates/hooks/tests/fixtures/push_link_report_session_20261119.json).
 
 FAIL-OPEN: any exception -> exit 0. CLAUDE_HEADLESS_JOB=1 -> skip.
 LOOP SAFETY: stop_hook_active -> return; one block per instruction.
