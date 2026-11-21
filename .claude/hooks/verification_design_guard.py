@@ -80,7 +80,7 @@ TEST_PATH = re.compile(r"(?:^|/)(?:tests?|__tests__)/|(?:^|/)test_[^/]*$|_test\.
 UNIT_TEST_BODY = re.compile(r"\bdef test_|\bassert\b|unittest|pytest|\bdescribe\(|\bexpect\(")
 HOOK_PATH = re.compile(r"/\.claude/hooks/|/templates/hooks/|^\.claude/hooks/|^templates/hooks/", re.I)
 # a body that emits pass/fail verdicts makes a checker whatever the name
-VERDICT_BODY = re.compile(r"\b(?:FAIL|PASS|MISS)\b|不合格|合格|[\"']\s*[○×✗✓]\s*[\"']|sys\.exit\(\s*1\s+if|exit\(\s*0\s+if|\breject(?:ed)?\b|verdict", re.I)
+VERDICT_BODY = re.compile(r"\b(?:FAIL|PASS|MISS)\b|不合格|合格|[\"']\s*[○×✗✓]\s*[\"']|sys\.exit\(\s*1\s+if|exit\(\s*0\s+if|\b[Rr]eject(?:ed)?\b|\b[Vv]erdict\b")
 JUDGE_MD = re.compile(r"判定役|判定(?:し|する|せよ|を返)|judge|grader|合格\s*/\s*不合格|PASS\s*/\s*FAIL|MISS", re.I)
 PLAN_HEAD = re.compile(
     r"(?m)^#{1,6}\s*[^\n]*(?:検証|検査|受理|合格|判定|完了の?条件|受け入れ|検収|チェックリスト|QC|品質(?:確認|基準)"
@@ -90,7 +90,8 @@ PLAN_LINE = re.compile(r"(?:なら|れば|で|を)\s*(?:受理|合格|完了|○
 # shell commands that write files; every script/rule path token in such a command is a candidate
 SHELL_MUTATE = re.compile(
     r"(?<![<>&\d])>{1,2}(?!&)|\btee\b|\bcp\b|\bmv\b|\bsed\s+-i|\bperl\s+-[a-z]*i|Out-File|Set-Content|Add-Content|WriteAll(?:Text|Lines|Bytes)"
-    r"|Copy-Item|Move-Item|\bgit\s+(?:apply|checkout\s+[^\n;|&]*--|restore\b(?!\s+--staged))|\bcurl\b[^\n;|&]*\s-o\b|write_text|write_bytes|\.write\(", re.I)
+    r"|Copy-Item|Move-Item|\bgit\s+(?:apply|checkout\s+[^\n;|&]*--|restore\b(?!\s+--staged))|\bcurl\b[^\n;|&]*\s-o\b|write_text|write_bytes|\.write\("
+    r"|\bsed\s+(?:-[A-Za-z]+\s+)*-[A-Za-z]*i|shutil\.(?:copy|move)|json\.dump|writeFileSync|fs\.writeFile|(?:^|[;|&]\s*)sc\s", re.I | re.M)
 PATH_TOKEN = re.compile(r"([\w./\\:~$-]*[\w-]+\.(?:py|js|mjs|cjs|ts|ps1|sh|gs|json|ya?ml|toml|md))(?![\w])")
 VERDICT_FLAG = r"(?:[^;|&\n]*?)\s--(?:gate|check|verify|accept|audit|qa|lint|judge)\b"
 # a delegation that tells another agent to write/change a checker
@@ -99,11 +100,12 @@ CHECKER_WORD = re.compile(r"[\w-]*(?:gate|check|verif|validat|judge|audit)[\w-]*
 
 # the checker is the object of the verb: 「ゲートを作って」「phase2_gate.py を書いて」「write a checker」
 _CK = r"(?:" + CHECKER_WORD.pattern + r"|検査|チェック)"
-AGENT_MAKE = re.compile(_CK + r"\s*(?:を|に|の(?:コード|規則|ルール|判定|条件|閾値|基準)を)\s*(?:新しく|新たに|1つ|一つ)?\s*(?:" + MAKE_VERB.pattern + r")"
-                        r"|\b(?:write|create|implement|add|build)\s+(?:a|an|the)?\s*(?:new\s+)?(?:checker|validator|gate|grader|rubric|check script|acceptance test)", re.I)
+_CK2 = r"(?:" + _CK + r"|判定(?:スクリプト|ロジック|処理|の(?:コード|基準))|受理(?:スクリプト|処理)|合否(?:の基準|判定))"
+AGENT_MAKE = re.compile(_CK2 + r"\s*(?:を|に|も|の(?:コード|規則|ルール|判定|条件|閾値|基準)を)[^。\n]{0,12}?(?:" + MAKE_VERB.pattern + r"|用意|準備|決めて|組んで|整備|仕上げ)(?!\s*(?:しないで|しない|せず|ない|禁止))"
+                        r"|\b(?:write|create|implement|add|build|make|set up|prepare)\s+(?:\w+\s+){0,4}?(?:checker|validator|gate|grader|rubric|check(?:s| script)?|acceptance (?:test|criteria))\b", re.I)
 
 ATTACK = re.compile(u"壊せ|壊して|攻撃|反証|突破|すり抜|穴を|抜け道|見逃し|批判的|break|attack|bypass|adversar|evade|red[- ]?team|falsif", re.I)
-FAKE_ATTACK = re.compile(u"(?:反証|攻撃|批判)(?:は|を)?(?:不要|しない|しなくて|せず|いらない)|要約|転記|まとめるだけ|summari[sz]e|copy", re.I)
+FAKE_ATTACK = re.compile(u"(?:反証|攻撃|批判)(?:は|を)?(?:不要|しない|しなくて|せず|いらない)|(?:要約|転記|まとめる)(?:する)?だけ|要約して(?!返)|summari[sz]e (?:it|the spec) only", re.I)
 FABLE_RESULT = re.compile(r"(?:Fable|フェイブル)[^。\n]{0,80}(?:指摘|破れ|反証|見つけ|穴|抜け|漏れ|直し|直した|残っ)", re.I)
 
 # (B) a report that a check passed
@@ -119,7 +121,7 @@ PASS = re.compile(
     r"|" + _N + r"本(?:が|は|とも)?[^。\n]{0,15}基準を満たし"
     r"|○\s*に\s*(?:しました|した|変え|更新)|○を付け|(?:が|を|は)\s*○\s*(?:に|と)?[^。\n]{0,10}?" + _N + r"本", re.I)
 PASS_NOT = re.compile(
-    r"ではなく|に(?:は)?なっていません|に(?:は)?なっていない|目指し|誤り|でしたが|と報告し|予定|なら|れば|たら|を条件|を受理の条件|まで(?:に|は)"
+    r"ではなく|に(?:は)?なっていません|に(?:は)?なっていない|目指し|誤り|でしたが|と報告し|予定(?!どおり|通り)|なら|れば|たら|を条件|を受理の条件|まで(?:に|は)"
     r"|(?:不合格|FAIL|NG|MISS|違反)\s*(?:は|が)?\s*[1-9]|[1-9]\d*\s*(?:件|本)(?:が)?\s*(?:残|不合格|FAIL)|0x[0-9a-f]"
     r"|ビルド|単体テスト|pytest|unit test|テスト(?:は)?\s*\d+\s*(?:件|/)|試験\d*件|「[^」]*(?:合格|FAIL|○)[^」]*」", re.I)
 CHECK_WORD = re.compile(r"検査|ゲート|チェック|テスト|判定|監査|gate|check|test|lint|audit", re.I)
@@ -132,7 +134,7 @@ DISC_COUNT = re.compile(_HIDE + r"[^。\n]{0,40}?\d+\s*(?:項目|個|件|点|本
 DISC_LIST = re.compile(_HIDE + r"[^。\n:：]{0,15}[:：]\s*\S{2,}")
 DISC_INSTR = re.compile(r"(?:指示|依頼|要件)(?:どおり|通り|の(?:通り|とおり)?)?[^。\n]{0,20}?(?:確かめてい(?:な|ませ)|確かめられてい(?:な|ませ)|確認してい(?:な|ませ)|未確認|未検証|分から(?:な|ず)|わから(?:な|ず)|判定でき(?:な|ませ))")
 DISC_TABLE = re.compile(r"(?:全項目|すべての(?:指示|項目))[^。\n]{0,20}見て[^。\n]{0,40}(?:対応表|[\w./-]+\.(?:md|json|csv))")
-DISC_NEG = re.compile(_HIDE + r"[^。\n]{0,20}?(?:はありません|は無い|はない|はなし|はゼロ|は0)|(?:は|が)?(?:ありません|ない)。?$")
+DISC_NEG = re.compile(_HIDE + r"[^。\n]{0,20}?(?:はありません|は無い|はない|はなし|はゼロ|は0|\s*[:：]\s*(?:なし|無し|0\s*(?:件|項目)?|ありません|ゼロ))|(?:は|が)?(?:ありません|ない)。?$")
 UNREVIEWED_DECL = re.compile(r"未反証(?:です|だ|のまま|で(?:す|、)|。|$)(?!の点)")
 SENT = re.compile(r"[^。\n]+")
 
@@ -207,7 +209,7 @@ def _edit_body(inp):
     return "\n".join(parts)
 
 
-_SCRIPT_WRITE = re.compile(r"\.write\(|write_text|write_bytes|open\([^)\n]*['\"][wa]b?\+?['\"]|WriteAll(?:Text|Lines|Bytes)|writeFileSync|fs\.writeFile", re.I)
+_SCRIPT_WRITE = re.compile(r"\.write\(|write_text|write_bytes|open\([^)\n]*['\"][wa]b?\+?['\"]|WriteAll(?:Text|Lines|Bytes)|writeFileSync|fs\.writeFile|shutil\.(?:copy|move)|json\.dump", re.I)
 _INLINE = re.compile(r"\b(?:python3?|py|node|perl|ruby)\b[^\n;|&]*?(?:\s-\s|\s-$|\s-c\s|\s-e\s|<<)", re.I | re.M)
 _SEG = re.compile(r"\s*(?:;|&&|\|\||\||\n)\s*")
 
@@ -235,15 +237,19 @@ def shell_write_targets(cmd):
         out.add(m.group(1))
     for m in re.finditer(r"\bcurl\b[^\n;|&]*\s-o\s+" + tok, cmd):
         out.add(m.group(1))
-    head = cmd.split("<<", 1)[0] if "<<" in cmd else cmd
+    head = re.sub(r"(?ms)<<-?\s*['\"]?(\w+)['\"]?([^\n]*)\n.*?^\1\s*$", r"\2", cmd)
     for seg in _SEG.split(head):
         seg = seg.strip()
-        if re.match(r"(?:sed\s+-i|perl\s+-[a-z]*i|git\s+(?:apply|checkout|restore)\b)", seg):
+        if re.search(r"\b(?:sed\s+(?:-[A-Za-z]+\s+)*-[A-Za-z]*i|perl\s+-[a-z]*i|git\s+(?:apply|checkout|restore)\b)", seg):
             out.update(m.group(1) for m in PATH_TOKEN.finditer(seg))
-        elif re.match(r"(?:cp|mv|Copy-Item|Move-Item)\b", seg, re.I):
+        elif re.search(r"(?:^|\s)(?:cp|mv|Copy-Item|Move-Item|cpi|copy|move)\s", seg, re.I):
+            words = seg.split()
             toks = [m.group(1) for m in PATH_TOKEN.finditer(seg)]
-            if toks:
+            last = words[-1].strip("'\"") if words else ""
+            if toks and (last == toks[-1] or last.endswith(toks[-1])):
                 out.add(toks[-1])
+            elif toks and (last.endswith("/") or last.endswith("\\") or last in (".", "..") or "." not in os.path.basename(last)):
+                out.add(last.rstrip("/\\") + "/" + os.path.basename(_norm(toks[0])))   # cp src/gate.py scripts/
     if _INLINE.search(cmd) and _SCRIPT_WRITE.search(cmd):
         for m in re.finditer(r"['\"]([^'\"\n]*?[\w-]+\.[A-Za-z]{1,5})['\"]", cmd):
             out.add(m.group(1))       # p='scripts/phase2_gate.py' in a heredoc that writes
@@ -285,7 +291,7 @@ def checker_changes(events):
                     out.append((k, os.path.basename(_norm(tok))))
         elif name in AGENT_TOOLS:
             text = " ".join(v for kk in ("prompt", "description") for v in [inp.get(kk)] if isinstance(v, str))
-            if AGENT_MAKE.search(text) and not ATTACK.search(text):
+            if AGENT_MAKE.search(text) and not (ATTACK.search(text) and _agent_model(inp).startswith(("fable", "claude-fable"))):
                 out.append((k, "サブエージェントに書かせた検査"))
     return out
 
