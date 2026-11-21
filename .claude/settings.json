@@ -331,6 +331,10 @@
           {
             "type": "command",
             "command": "P=$(command -v python3 || command -v python) || exit 0; exec \"$P\" .claude/hooks/push_link_report_guard.py"
+          },
+          {
+            "type": "command",
+            "command": "P=$(command -v python3 || command -v python) || exit 0; exec \"$P\" .claude/hooks/verification_design_guard.py"
           }
         ]
       }
