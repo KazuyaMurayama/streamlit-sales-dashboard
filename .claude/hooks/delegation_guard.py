@@ -960,6 +960,162 @@ def v3_excused(v3, final, prompt=""):
             return True
     return False
 
+# ---------------------------------------------------------------- V6 (2026-11-21)
+# The answer written right after this guard's block. Claude Code sends that Stop with stop_hook_active=True
+# and main() used to return on it, so whatever the re-answer said passed: twice in one session
+# (Soulful-Content wave 4, 2026-11-20/21) Claude did no work after the block and wrote a reason in the
+# block's own escape hatch -- 「依頼が「計画して」だけで…実行の指示を受けて始めるもの」,
+# 「今回の依頼が…確認までで、書き換えるかどうかを決めるのはあなただからです」 -- and the user answered
+# 「嘘つくな！やれ！」. Invariant (Fable QC: 50 attack sentences, tests/test_delegation_guard_v6_20261121.py):
+#   after the last delegation block of this turn
+#   (a) no work at all (no write tool, no write command, no subagent launch), and the reply names no stake
+#       the machine can match (an irreversible / paid / outward operation with its reason in the same
+#       sentence, a quoted permission error, a pending background job, a scheduled job id, a context-limit
+#       percentage), and the instruction itself did not hold or bound the work (HOLD / BOUNDED on the
+#       PROMPT, never on the answer's own quotes) -> block;
+#   (b) work was done, but the reply still declares the asked work not done AND hands the decision or the
+#       scope back to the user (NOT_CONT + USER_OWN) -> block.
+# At most 2 extra blocks per instruction; after that a systemMessage tells the user it is unresolved.
+V6_BLOCK = re.compile(r"Stop hook feedback[\s\S]{0,400}?(?:丸投げ検査|決定の一括依頼)")
+WRITE_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit", "Agent", "Task")
+WRITE_CMD = re.compile(r"git\s+(?:commit|push|apply|mv|rm)\b|(?<![<>=!2])>{1,2}\s*[\w\"'./$~]|Set-Content|Out-File|Add-Content|New-Item"
+                       r"|\bsed\s+-i|\.write(?:_text|_bytes)?\(|open\([^)]*['\"][wa]b?['\"]|\bcp\s|\bmv\s|Copy-Item|Move-Item"
+                       r"|python[^\n|;]*\.py\b(?![^\n]*--(?:dry|check|help))|clasp\s+push|curl[^\n]*-X\s*(?:POST|PUT|PATCH)", re.I)
+NOT_CONT = re.compile(
+    r"(?:始め|実行し|着手し|進め|書き換え|直し|手を付け|取り(?:か|掛)か|適用し|反映し|編集し|変更し|行っ)て(?:い|お)?(?:ません|りません)"
+    r"|(?:着手|実行|書き換え|適用|反映|編集)(?:は|を)?(?:まだ|見送|保留|控え|止め|次|後)"
+    r"|未着手|未実施|見送(?:り|っ)|保留(?:に|し|中|と)|控えて|止めて(?:い|お)"
+    r"|(?:たあと|た後|てから|次第)に?[^。\n]{0,6}(?:進め|着手し|始め|行い|書き換え)ます"
+    r"|(?:られる|できる)状態に(?:して|なって)(?:あり|い|おき)ます|準備(?:が|は)(?:でき|整い|整っ)"
+    r"|(?:次回|次の(?:ターン|セッション|指示)|後日|別途|改めて|分けて)[^。\n]{0,20}(?:行い|進め|対応し|実施し|始め|回し|書き換え)"
+    r"|(?i:\bon\s+hold\b|haven.?t\s+(?:started|begun|done|applied)|not\s+(?:started|yet\s+(?:started|done|applied))|\bpending\s+your)")
+USER_OWN = re.compile(
+    r"決める(?:の|こと)は(?:あなた|ユーザー|依頼者|ご本人|本人)|(?:あなた|ユーザー|依頼者|ご本人)(?:が|の)(?:決め|判断|ご判断|決定|お考え)"
+    r"|(?:ご|お)?(?:指示|判断|了承|承認|ゴーサイン|返事|返信|OK|ＯＫ)[^。\n]{0,8}(?:を受けて|を頂|をいただ|があれば|があり次第|を待|待ち|次第)"
+    r"|(?:依頼|ご依頼)(?:が|は|の)[^。\n]{0,40}(?:だけ|まで|のみ|範囲外|趣旨)|範囲外|お任せ|お決め|決めていただ|(?:見て|ご覧)いただ(?:いて|いた)(?:から|あと|後)"
+    r"|いかがでしょうか|よろしいでしょうか|問題なければ|違和感がなければ|送っていただければ"
+    r"|(?i:\byour\s+(?:call|go|decision|approval|instruction)|\bscoped\s+to\b)")
+HARD_OP = re.compile(
+    r"(?:force|強制|削除|消去|課金|料金|支払|購入|送金|振込|発注|注文|契約|売却|公開|投稿|出品|送信|メールを送|提出|申請|応募|publish|本番|clasp\s*push"
+    r"|上書き|再公開|退会|解約)[^。\n]{0,30}(?:取り消せ|元に戻せ|戻せな|不可逆|発生|外に出|名義|お金|費用がかか)"
+    r"|(?:取り消せ|元に戻せ)[^。\n]{0,12}(?:削除|公開|送信|push|反映)")
+LEGIT_EVIDENCE = re.compile(r"Permission denied|権限(?:が|は)(?:無|な)|拒否され|エラー[(（「]|\berror\b[^。\n]{0,40}[:：「]"
+                            r"|(?:ID|ジョブ)[:：\s(（]*[0-9a-z]{6,}|CronCreate|run_in_background|使用率[^。\n]{0,6}[0-9]+\s*%"
+                            r"|[0-9]+\s*%[^。\n]{0,10}(?:/compact|圧縮)", re.I)
+# Calibration 2026-11-21 (138 real re-answers after a block, 21 days): blocking every no-work re-answer fired on
+# 59.4%, and most of those named a stake that really is the user's -- the production GAS rule, a password only
+# the user knows, how to spend the user's own 30-45 hours, the loss the user accepts, the user having stopped
+# the run. Those stakes pass; 「本人」「好み」 alone do not (the defect's own words: 「決めるのはあなた」).
+OWN_STAKE = re.compile(r"本番|お金|損失|損を|資金|資産|口座|売買|課金|費用|料金|時間(?:を|の)(?:使|割)|[0-9０-９]+\s*時間"
+                       r"|パスワード|合言葉|暗証|秘密鍵|ログイン|(?:本人|あなた)しか(?:知ら|分から|わから|でき)"
+                       r"|止められ|止めた|止めて(?:と|ほしい)|中止(?:と|を)言|OK、完了|医療|医師|病院|電話|署名|押印|証明書|健康"
+                       r"|リスク|破綻|法的|契約|雇用|退職|家族|生年月日|個人情報"
+                       r"|GAS|clasp|指示に反する|(?:あなた|ご本人|依頼者)の指示(?:だから|で止め)")
+
+
+def read_turn_events(tp):
+    """(prompt, ts, [(kind, name, payload)]) of the last turn; kind = tool | text | block."""
+    size = os.path.getsize(tp)
+    with open(tp, "rb") as f:
+        f.seek(max(0, size - TAIL_BYTES))
+        data = f.read().decode("utf-8", "replace").splitlines()
+    prompt, pts, events = None, "", []
+    for line in data:
+        try:
+            d = json.loads(line)
+        except Exception:
+            continue
+        if d.get("isSidechain"):
+            continue
+        if _is_prompt(d):
+            prompt, pts, events = _text(d.get("message")).strip(), d.get("timestamp", ""), []
+        elif d.get("type") == "user" and d.get("isMeta"):
+            t = _text(d.get("message"))
+            if V6_BLOCK.search(t[:1200]):
+                events.append(("block", "", t))
+        elif d.get("type") == "assistant":
+            c = (d.get("message") or {}).get("content")
+            if isinstance(c, list):
+                for b in c:
+                    if not isinstance(b, dict):
+                        continue
+                    if b.get("type") == "tool_use":
+                        events.append(("tool", b.get("name") or "", json.dumps(b.get("input"), ensure_ascii=False)))
+                    elif b.get("type") == "text" and (b.get("text") or "").strip():
+                        events.append(("text", "", b["text"].strip()))
+    return prompt, pts, events
+
+
+def _is_work(name, payload):
+    if name in WRITE_TOOLS or name.startswith("mcp__"):
+        return True
+    return name in ("Bash", "PowerShell") and bool(WRITE_CMD.search(payload or ""))
+
+
+def reanswer(final, work, prompt="", bg_live=False):
+    """v6 verdict on the reply written after a delegation block: (kind, sentence) or None.
+    work = number of write / delegate tool calls after the block."""
+    p = re.sub(r"<pasted_content.*?(?:</pasted_content>|$)", " ", prompt or "", flags=re.S)
+    if HOLD.search(p) or BOUNDED.search(p):
+        return None
+    a = re.sub(r"```.*?```", " ", final or "", flags=re.S)
+    units = _units(a)
+    nc = [s for s in units if NOT_CONT.search(s)]
+    uo = [s for s in units if USER_OWN.search(s)]
+    if bg_live or LEGIT_EVIDENCE.search(a) or any(HARD_OP.search(s) for s in units):
+        return None
+    if any(OWN_STAKE.search(s) for s in (uo + nc)):
+        return None
+    if work:
+        return ("excuse", uo[0]) if (nc and uo) else None
+    if nc or uo:
+        return ("nowork", (uo or nc)[0])
+    # no work and no stated reason (silence, 「Next Action: なし」): shown to the user, not blocked
+    return ("silent", (units[-1:] or [""])[0])
+
+
+def recheck(ev, tp):
+    prompt, pts, events = read_turn_events(tp)
+    if not prompt:
+        return
+    last = max([i for i, e in enumerate(events) if e[0] == "block"], default=-1)
+    if last < 0:
+        return
+    after = events[last + 1:]
+    work = sum(1 for k, n, x in after if k == "tool" and _is_work(n, x))
+    final, _tools = final_and_tools(after)
+    hit = reanswer(final, work, prompt, bool(bg_pending(tp, pts)))
+    if not hit:
+        return
+    if hit[0] == "silent":
+        # log only: 42% of real re-answers (48/115) end like this, mostly after a block that was itself a false
+        # positive -- a message on each would be noise. Read with firing_log (delegation_guard_v6_silent).
+        _record_firing(NAME + "_v6_silent", ev)
+        return
+    key = hashlib.sha1((pts + (prompt or "")).encode("utf-8", "replace")).hexdigest()[:16]
+    base = os.path.join(STATE_DIR, "".join(ch for ch in (ev.get("session_id") or "x") if ch.isalnum() or ch in "-_") + "_" + key)
+    n = 1 if not os.path.exists(base + "_v6_1") else 2 if not os.path.exists(base + "_v6_2") else 0
+    if not n:
+        sys.stdout.buffer.write(json.dumps({"systemMessage": "【丸投げ検査v6・未解決】block 後の再回答が続けて、作業をせずに止まりました（「%s」）。"
+                                            "続けさせるには「やって」と送ってください。" % hit[1][:60]}, ensure_ascii=True).encode("ascii"))
+        return
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        open(base + "_v6_%d" % n, "w").close()
+    except Exception:
+        pass
+    _record_firing(NAME + "_v6", ev)
+    what = ("block のあと、作業を1つもせずに止まっている" if hit[0] == "nowork"
+            else "作業はしたが、頼まれた作業をしていないと書き、その決定や範囲をユーザーに返している")
+    reason = ("【丸投げ検査v6・block 後の再回答（%d/2）】再回答が、%s（「%s」）。"
+              "「依頼が確認まで」「決めるのはあなた」「指示を受けて始める」は、依頼文に「実行はまだ」「計画だけ」のような保留の"
+              "言葉が無い限り、本人の意思決定ではなく自分の言い換えである（2026-11-21 依頼者「嘘つくな！やれ！」）。"
+              "今このターンで頼まれた作業を実行し、結果を報告し直せ。止めてよいのは、取り消せない操作・お金・外への送信や公開の"
+              "直前（その操作の名前と、取り消せない・費用が出る等の理由を同じ文に書く）、権限エラー（エラー文を引用）、"
+              "完了待ちのバックグラウンド処理、予約したジョブ（ID）だけ。" % (n, what, hit[1][:120]))
+    sys.stdout.buffer.write(json.dumps({"decision": "block", "reason": reason}, ensure_ascii=True).encode("ascii"))
+
+
 def main():
     try:
         me = os.path.abspath(__file__)
@@ -972,10 +1128,11 @@ def main():
         ev = json.loads(sys.stdin.buffer.read().decode("utf-8", "replace"))
     except Exception:
         return
-    if ev.get("stop_hook_active"):
-        return
     tp = ev.get("transcript_path") or ""
     if not os.path.isfile(tp):
+        return
+    if ev.get("stop_hook_active"):
+        recheck(ev, tp)      # v6: the re-answer after a block is checked too (it used to pass unread)
         return
     prompt, pts, answer = read_turn(tp)
     hit = decide(answer) if prompt else None
@@ -1033,7 +1190,7 @@ def main():
                 "offer": "ユーザーの希望・指示があれば続けると申し出て止まっている",
                 "announce": "残りの作業を自分の次の手順として書いたまま止まっている"}[kind]
         reason = ("【丸投げ検査v4・自分で決められる続行で停止（1回のみ）】回答の締めが、%s（「%s」）。"
-                  "ユーザーにしか決められない争点（取り消せない操作・削除・お金・公開や送信・本人の意思や好み・権限が無い・"
+                  "ユーザーにしか決められない争点（取り消せない操作・削除・お金・公開や送信・依頼文が保留した判断（依頼文を逐語で引用）・権限が無い・"
                   "外部の出来事を待つ）が締めに書かれていない。その続行は自分で決めてよいので、このターンで続けて実行し、"
                   "終わった結果を報告し直せ（CLAUDE.md Top10 の6「事前確認しない」・§11.2）。止める理由が本当にあるなら、"
                   "どの争点か（例: 「削除は取り消せないため」「課金が発生するため」「/compact が必要なため」）を締めに1文で書け。"
