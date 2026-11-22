@@ -51,6 +51,7 @@ Deployed from claude-governance/templates/hooks/ -- edit there, not here.
 """
 import hashlib
 import io
+import time
 import json
 import os
 import re
@@ -389,7 +390,152 @@ def disclosed(text):
     return False
 
 
-def decide(events):
+AUDIT_LINE = re.compile(r"【抜き取り監査 AUDIT-(\d{14}-[0-9a-f]{6})】[^\n]*")
+AUDIT_DIR = os.path.join(os.path.expanduser("~"), ".claude", "state", "audit")
+# the escape needs a reason in brackets, and the same answer must not call the work done (Fable E2)
+NO_AUDIT_DECL = re.compile(r"抜き取り監査(?:は|を)?(?:していない|していません|しなかった|しませんでした|未実施)[（(][^）)\n]{4,}[）)]")
+DONE_WORDS = re.compile(r"完了|○|すべて合格|全件合格|全部合格|反映済み")
+BULK_MIN = 5
+BULK_EXT_MIN = 10   # the same extension spread over several folders (Fable B2)
+GIT_LAND = re.compile(r"\bgit\b[^;&|\n]*?\b(?:commit|merge|push|cherry-pick|am|apply)\b"
+                      r"|\bgh\s+pr\s+merge\b|\bclaude\s+-p\b|deploy_all|sync_all|/git/(?:commits|refs|trees)|contents/")
+WRITE_HINT = re.compile(r">|open\([^)]*['\"][wa]|Set-Content|Out-File|Copy-Item|Move-Item|\bcp\b|\bmv\b|write_text|json\.dump")
+
+
+def _iso_epoch(ts):
+    try:
+        import datetime
+        return datetime.datetime.strptime(ts[:19], "%Y-%m-%dT%H:%M:%S").replace(
+            tzinfo=datetime.timezone.utc).timestamp()
+    except Exception:
+        return 0
+
+
+def valid_audit(text, events, pts="", files=None):
+    """The audit pasted verbatim from `acceptance_audit.py score`, -> its result dict, or None.
+    Accepted only when (Fable 2026-11-22 S1-S15): the line equals result.json; the draw was made in this
+    instruction; k >= min(5, population); the requester's words were found (>= 1); a separate Agent with
+    model fable got the printed prompt unchanged; the main session did not write the verdicts; and, for a
+    bulk change, the audited population holds >= 90% of the changed files. Any error -> not accepted."""
+    for m in AUDIT_LINE.finditer(text or ""):
+        aid = m.group(1)
+        d = os.path.join(AUDIT_DIR, aid)
+        try:
+            with io.open(os.path.join(d, "result.json"), encoding="utf-8") as f:
+                res = json.load(f)
+            with io.open(os.path.join(d, "sample.json"), encoding="utf-8") as f:
+                rec = json.load(f)
+            line = res.get("line")
+            if not isinstance(line, str) or not line or line not in text:
+                continue                       # retyped, edited or empty line
+            created = int(rec.get("created") or 0)
+            if pts and created < _iso_epoch(pts) - 60:
+                continue                       # an old audit reused for a new instruction
+            if not pts and created < time.time() - 2 * 3600:
+                continue                       # instruction start unknown: only a fresh audit (S15b)
+            if int(rec.get("n_requests") or 0) < 1:
+                continue
+            pop = int(rec.get("population") or 0)
+            if int(rec.get("k") or 0) < min(5, pop) or pop < 1:
+                continue
+            prompt = (rec.get("prompt") or "").strip()
+            judged = any(e[0] == "call" and e[1] in AGENT_TOOLS and "fable" in _agent_model(e[2] or {})
+                         and str((e[2] or {}).get("prompt") or "").strip() == prompt for e in events) if prompt else False
+            if not judged:
+                continue                       # no separate judge, another model, or a steered prompt (S8, S9)
+            adir = _norm(d)
+            self_wrote = False
+            for e in events:
+                if e[0] != "call" or e[1] in AGENT_TOOLS:
+                    continue
+                inp = e[2] or {}
+                fp = inp.get("file_path") or inp.get("notebook_path")
+                if fp and e[1] in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
+                    if _norm(fp).startswith(adir):
+                        self_wrote = True
+                elif e[1] in SHELL_TOOLS:
+                    cmd = str(inp.get("command") or "")
+                    if aid in cmd and ("verdicts" in cmd or "result.json" in cmd) and WRITE_HINT.search(cmd):
+                        self_wrote = True
+            if self_wrote:
+                continue
+            if files:
+                popset = {_norm(x) for x in rec.get("files") or []}
+                if sum(1 for x in files if _norm(x) in popset) * 10 < len(files) * 9:
+                    continue                   # the audit did not draw from what was changed (S1, S13)
+            return res
+        except Exception:
+            continue
+    return None
+
+
+def _repos_of(cwd, events):
+    """Git toplevels this instruction worked in: the session folder, every file it wrote, every `git -C`."""
+    import subprocess
+    dirs = [cwd]
+    for e in events:
+        if e[0] != "call":
+            continue
+        inp = e[2] or {}
+        fp = inp.get("file_path") or inp.get("notebook_path")
+        if fp:
+            dirs.append(os.path.dirname(fp))
+        for m in re.finditer(r"git\s+-C\s+(\"[^\"]+\"|'[^']+'|\S+)", str(inp.get("command") or "")):
+            dirs.append(m.group(1).strip("\"'"))
+    tops = []
+    for d in dict.fromkeys(dirs):
+        try:
+            if not d or not os.path.isdir(d):
+                continue
+            top = subprocess.run(["git", "-C", d, "rev-parse", "--show-toplevel"], capture_output=True,
+                                 timeout=10).stdout.decode("utf-8", "replace").strip()
+            if top and top not in tops:
+                tops.append(top)
+        except Exception:
+            continue
+    return tops[:8]
+
+
+BULK_SKIP = (".git/", ".claude/hooks/", ".claude/state/")
+
+
+def bulk_families(cwd, since_ts, events=()):
+    """-> [(family label, count, [abs paths])] for families changed during the instruction in every repo it
+    worked in (commits since its start + the working tree incl. new files): >= BULK_MIN in one folder with
+    one extension, or >= BULK_EXT_MIN with one extension anywhere (Fable B2-B5, E4)."""
+    import subprocess
+    res = []
+    for top in _repos_of(cwd, events):
+        files = set()
+        try:
+            if since_ts:
+                out = subprocess.run(["git", "-C", top, "log", "--since=" + since_ts, "--name-only", "--pretty=format:"],
+                                     capture_output=True, timeout=20).stdout.decode("utf-8", "replace")
+                files.update(l.strip() for l in out.splitlines() if l.strip())
+            out = subprocess.run(["git", "-C", top, "status", "--porcelain", "--untracked-files=all"],
+                                 capture_output=True, timeout=20).stdout.decode("utf-8", "replace")
+            files.update(l[3:].strip().strip('"') for l in out.splitlines() if len(l) > 3)
+        except Exception:
+            continue
+        fam, ext = {}, {}
+        for f in files:
+            f = f.replace("\\", "/")
+            if f.startswith(BULK_SKIP) or "/node_modules/" in f or not os.path.splitext(f)[1]:
+                continue
+            k = (os.path.dirname(f), os.path.splitext(f)[1].lower())
+            fam.setdefault(k, set()).add(f)
+            ext.setdefault(k[1], set()).add(f)
+        name = os.path.basename(top)
+        for k, v in sorted(fam.items()):
+            if len(v) >= BULK_MIN:
+                res.append(("%s:%s/*%s" % (name, k[0] or ".", k[1]), len(v), [os.path.join(top, x) for x in sorted(v)]))
+        for e_, v in sorted(ext.items()):
+            if len(v) >= BULK_EXT_MIN and not any(len(fam[k]) >= BULK_MIN for k in fam if k[1] == e_ and fam[k] <= v and len(fam[k]) == len(v)):
+                res.append(("%s:**/*%s" % (name, e_), len(v), [os.path.join(top, x) for x in sorted(v)]))
+    return res
+
+
+def decide(events, pts=""):
     """Returns a list of (kind, detail) problems, or []."""
     text = all_text(events)
     out = []
@@ -399,7 +545,10 @@ def decide(events):
     elif not bad and attacks(events) and checker_changes(events) and not FABLE_RESULT.search(text):
         out.append(("design_result", [lbl for _k, lbl in checker_changes(events)]))
     claim = pass_claim(text) or ledger_claim(_md_bodies(events))
-    if claim and not disclosed(text):
+    va = valid_audit(text, events, pts)
+    # only a clean audit replaces the disclosure; a line with violations cannot back a pass (Fable S12)
+    clean = bool(va) and va.get("bad") == 0 and not va.get("unread") and not va.get("changed")
+    if claim and not disclosed(text) and not clean:
         out.append(("report", claim))
     return out
 
@@ -494,6 +643,15 @@ REASON_REPORT = ("【検査の合格を報告しているのに、その検査�
                  "「見ていない項目はありません」のような否定だけの文は数えない。見ていない項目を「直った」「完了」「○」と言わない。")
 
 
+REASON_BULK = ("【同じ種類のファイルをまとめて変えたのに、抜き取り監査が無い（1回のみ）】この指示の間に %s が変わった"
+               "（コミットと作業ツリー。誰が変えたか・回答の言い回しに関係なく数える）。" + USER_WORDS +
+               "まとめて変えた物は、書き手の検査が通っても依頼どおりとは限らない（2026-11-21: ゲート合格の70本すべてに漏れ）。"
+               "`python ~/.claude/hooks/acceptance_audit.py sample --repo <リポ> --k 5 <変えたファイル>` で無作為に抜き、"
+               "出た依頼文で Agent(model=\"fable\") に依頼者の発言の全文と照合させ、`score <ID>` の1行を最終回答にそのまま貼る。"
+               "依頼文は一字も足さずに渡す（足す・別のモデル・自分で verdicts を書く・変えたファイルを含まない対象の監査は無効）。"
+               "監査しない場合は「抜き取り監査はしていない（理由）」と理由を括弧で書き、同じ回答で変えた物を「完了」「○」「反映済み」と言わない。")
+
+
 def _mark(ev, key):
     sid = "".join(ch for ch in (ev.get("session_id") or "x") if ch.isalnum() or ch in "-_")
     return os.path.join(STATE_DIR, sid + "_" + hashlib.sha1(key.encode("utf-8", "replace")).hexdigest()[:16])
@@ -532,7 +690,30 @@ def main():
     prompt, pts, events = t
     turn_key = pts + (prompt or "")[:200]
     reasons = []
-    for kind, detail in decide(events):
+    found = decide(events, pts)
+    final = ""
+    for e in reversed(events):
+        if e[0] == "text":
+            final = e[1]
+            break
+    # Only when this session itself landed or delegated work, or wrote into a changed family: files changed
+    # by OTHER sessions in the same repo are not this answer's work (calibration 2026-11-15..22). Checked
+    # whatever else was found: all reasons go out in the one block stop_once lets through (Fable E3).
+    text_all = all_text(events)
+    decl = NO_AUDIT_DECL.search(text_all) and not DONE_WORDS.search(final)
+    if final and not decl:
+        fams = bulk_families(ev.get("cwd") or os.getcwd(), pts, events)
+        if fams:
+            wrote = {_norm((e[2] or {}).get("file_path") or "") for e in events
+                     if e[0] == "call" and (e[2] or {}).get("file_path")}
+            # a Fable reviewer/judge does not change files; any other delegated agent may
+            landed = any(e[0] == "call" and ((e[1] in AGENT_TOOLS and "fable" not in _agent_model(e[2] or {}))
+                                             or (e[1] in SHELL_TOOLS and GIT_LAND.search(
+                str((e[2] or {}).get("command") or "")))) for e in events)
+            mine = [f for f in fams if landed or any(_norm(x) in wrote for x in f[2])]
+            if mine and not valid_audit(text_all, events, pts, [x for f in mine for x in f[2]]):
+                found.append(("bulk", [(f[0], f[1]) for f in mine]))
+    for kind, detail in found:
         if kind == "design":
             new = [c for c in detail if _first_time(ev, "design:" + turn_key + c)]
             if new:
@@ -541,6 +722,8 @@ def main():
             reasons.append(REASON_RESULT % "・".join(detail))
         elif kind == "report" and _first_time(ev, "report:" + turn_key):
             reasons.append(REASON_REPORT % detail[:60])
+        elif kind == "bulk" and _first_time(ev, "bulk:" + turn_key):
+            reasons.append(REASON_BULK % "・".join("%s %d件" % f for f in detail[:3]))
     if not reasons:
         return
     _record_firing(NAME, ev)
@@ -548,6 +731,11 @@ def main():
 
 
 if __name__ == "__main__":
+    try:  # one block per hook per human instruction (stop_once.py, 2026-11-22)
+        import stop_once
+        stop_once.install("verification_design_guard")
+    except Exception:
+        pass
     try:
         main()
     except Exception:

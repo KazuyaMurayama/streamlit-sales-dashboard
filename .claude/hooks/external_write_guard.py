@@ -466,6 +466,11 @@ def _selftest():
 
 
 if __name__ == "__main__":
+    try:  # one block per hook per human instruction (stop_once.py, 2026-11-22)
+        import stop_once
+        stop_once.install("external_write_guard")
+    except Exception:
+        pass
     if "--selftest" in sys.argv:
         # Piped stdout (CI, Claude Code's Bash tool) is cp932 on this host and
         # cannot encode ⚠ or many symbols -> UnicodeEncodeError masqueraded as

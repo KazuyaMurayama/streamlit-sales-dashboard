@@ -759,6 +759,11 @@ def main():
 
 
 if __name__ == "__main__":
+    try:  # one block per hook per human instruction (stop_once.py, 2026-11-22)
+        import stop_once
+        stop_once.install("request_ledger_guard")
+    except Exception:
+        pass
     try:
         main()
     except Exception:
