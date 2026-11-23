@@ -521,7 +521,71 @@ def repetition(prevs, draft, changed=()):
     return out
 
 
-def analyze(ev):
+# REMOTE CONTROL VIEW (2026-11-23, user: 「スマホの画面で見ると、あなたの回答が一部しか載って
+# いません。例えば添付の場合だと、表が載っていません。PC の VSコードで回答させているのを
+# リモートコントロールでスマホに飛ばすと、一部しか表示されない」).
+# The phone shows the LAST answer of an instruction; an answer followed by a Stop-hook
+# re-open is not shown there. Session c93a6ae3: a 2,397-char answer with a 32-row table,
+# then a 449-char re-answer 「前の回答の32本の表で答えています」 -- the phone showed only the
+# latter. Replay of the last 80 transcripts, sessions with a bridge-session row: 286
+# instructions, 190 re-opened by a Stop hook, 162 (57%) ended with a final answer missing
+# >=50% of the earlier answer, 107 of them dropping its table (one final was just 「以上」).
+# The 2026-11-03 rule "re-answer = only what changed" is right on the PC (both answers are
+# on screen) and wrong when Remote Control is attached, so it is switched by the session.
+BRIDGE_ROW = "bridge-session"
+LOSS_MIN_PREV = 200       # an earlier answer shorter than this is not a lost report
+LOSS_COVER = 0.50         # share of the earlier answer's 4-grams the final must keep
+LOSS_LEN = 0.70           # ...unless the final is at least this long relative to it
+TABLE_RE = re.compile(r"^\s*\|.*\|\s*\n\s*\|[\s:|-]*-[\s:|-]*\|\s*$", re.M)
+BACKREF_RE = re.compile(u"前の回答(?:の|で|に|を|と)|上の回答(?:の|で|に)|先ほどの(?:回答|表)")
+
+
+def remote_view(rows):
+    """True when Remote Control (claude.ai / phone) is attached to this session."""
+    return any(isinstance(r, dict) and r.get("type") == BRIDGE_ROW for r in rows or [])
+
+
+def _answers_marked(ev):
+    out, cur = [], []
+    for e in ev:
+        if e[0] == "text":
+            cur.append(e[1])
+        elif e[0] == "tool":
+            cur = []
+        elif e[0] == "mark":
+            if cur:
+                out.append(("\n".join(cur), e[1]))
+            cur = []
+    if cur:
+        out.append(("\n".join(cur), None))
+    return out
+
+
+def remote_loss(ev):
+    """-> reason when the final answer, written after a Stop-hook re-open, leaves out
+    what the earlier answer showed (the phone shows only the final one); else None."""
+    pairs = _answers_marked(ev)
+    if len(pairs) < 2 or pairs[-1][1] is not None:
+        return None
+    prevs = [a for a, m in pairs[:-1] if m == "stopfb" and _count(a) >= LOSS_MIN_PREV]
+    if not prevs:
+        return None
+    final = pairs[-1][0]
+    big = prevs[-1]   # the answer this one replaces (Fable S3: not the longest one)
+    why = []
+    if TABLE_RE.search(big) and not TABLE_RE.search(final):
+        why.append(u"表が無い")
+    gb = _grams(big)
+    cov = len(gb & _grams(final)) / float(len(gb)) if gb else 1.0
+    if cov < LOSS_COVER and _count(final) < LOSS_LEN * _count(big):
+        why.append(u"前の回答の%d%%しか含まない（%d字→%d字）" % (round(100 * cov), _count(big), _count(final)))
+    m = BACKREF_RE.search(_visible(final))
+    if m and why:
+        why.append(u"「%s」と前の回答を参照している" % m.group(0))
+    return u"・".join(why) or None
+
+
+def analyze(ev, bridge=False):
     kind = classify(ev)
     inters, finals = split_inters(ev)
     final = "\n\n".join(finals)
@@ -543,8 +607,9 @@ def analyze(ev):
     }
     answers = answers_of_turn(ev)
     res["answers"] = len(answers)
-    res["repeat"] = [(i + 1, why) for i in range(1, len(answers))
-                     for why in [repetition(answers[:i], answers[i])] if why]
+    res["repeat"] = [] if bridge else [(i + 1, why) for i in range(1, len(answers))
+                                       for why in [repetition(answers[:i], answers[i])] if why]
+    res["remote_loss"] = remote_loss(ev) if bridge else None
     res["violations"] = violations(res)
     return res
 
@@ -592,6 +657,17 @@ RULES = (u"【回答の長さ上限】本文は 質問への回答600字／作�
          u"`python ~/.claude/hooks/answer_precheck.py` に標準入力で通し、出た指摘を直してから1回だけ書く"
          u"（Stop フックに差し戻されて2本目を書かないため）。Stop フックの差し戻しや通知のあとで書き足すときは、"
          u"前の回答の結論・成果物表・留保・Next Action を再掲せず、変わった点だけを書く。")
+REMOTE_RULE = (u"Stop フックの差し戻しや通知のあとに書く回答は、前の回答を置き換える完全版にする"
+               u"（結論・表・成果物表・留保・Next Action を全部含め、「前の回答の表で」のように前の回答を参照しない）。"
+               u"このセッションは Remote Control につながっており、スマホには1つの指示の最後の回答しか表示されない"
+               u"（2026-11-23 ユーザー指摘「スマホの画面で見ると、あなたの回答が一部しか載っていません」）。")
+_PC_RULE_HEAD = u"Stop フックの差し戻しや通知のあとで書き足すときは、"
+
+
+def rules(bridge=False):
+    if not bridge:
+        return RULES
+    return RULES[:RULES.index(_PC_RULE_HEAD)] + REMOTE_RULE
 
 
 def _state_path(ev, suffix=""):
@@ -748,6 +824,10 @@ def on_wake(ev, rows, in_tx):
         msg = head + (u"待ちが残り%d件ある。この応答ではテキストを1字も書かずに終える"
                       u"（「終わりました」「残りを待ちます」も書かない。VS Code の"
                       u"「毎ターン文で終える」より優先）。全件そろってから最終回答を1本だけ書く。" % pending)
+    elif remote_view(rows):
+        msg = head + (u"まだ待っているタスクがあるなら、テキストを書かずに終える。"
+                      u"全件そろった・続きの作業をするなら、途中経過は書かずにツールへ進むか"
+                      u"最終回答を1本だけ書く。" + REMOTE_RULE)
     else:
         msg = head + (u"まだ待っているタスクがあるなら、テキストを書かずに終える。"
                       u"全件そろった・続きの作業をするなら、途中経過は書かずにツールへ進むか"
@@ -770,7 +850,8 @@ def on_prompt(ev):
         on_wake(ev, rows, in_tx)
         return
     st = _load(_state_path(ev))
-    msg = RULES
+    bridge = remote_view(rows) or remote_view(read_rows(ev.get("transcript_path") or "", TAIL_BYTES))
+    msg = rules(bridge)
     prev = st.get("violations") or []
     if prev:
         # Worst item + trend only. Listing every item every turn is wallpaper
@@ -783,7 +864,7 @@ def on_prompt(ev):
             msg += u"。直近%d回の本文は上限の中央値%d%%" % (tr[1], tr[0])
         msg += u"。今回はこの分を削ること。"
         rpt = [v for v in prev[1:] if v.startswith(u"前の回答の再掲")]
-        if rpt:
+        if rpt and not bridge:
             msg += u"\n【前回・再掲】" + rpt[0] + u"。最終回答は下書きを answer_precheck.py に通してから1回だけ書き、"\
                    u"差し戻し・通知の後は変わった点だけを書く。"
         obv = [v for v in prev[1:] if v.startswith(u"自明な補足")]
@@ -907,15 +988,32 @@ def on_post_tool(ev):
     _emit("PostToolUse", fmt + (u"\n" + cap_msg if cap_msg else u""))
 
 
+_ONCE = False   # set in __main__ when stop_once captured this Stop event
+REMOTE_BLOCK = (u"【スマホに出ない回答（1回のみ）】このセッションは Remote Control につながっており、"
+                u"スマホには1つの指示の最後の回答しか表示されない。差し戻しのあとに書いた今の回答は、"
+                u"その前の回答に比べて %s。前の回答を置き換える完全版（結論・表・成果物表・留保・Next Action）を"
+                u"書き直す。差し戻しで訂正した点は訂正後の形で書き、取り下げた内容は戻さない。前の回答を参照せず、この1本だけで読めるようにする"
+                u"（2026-11-23 ユーザー指摘「スマホの画面で見ると、あなたの回答が一部しか載っていません」）。")
+
+
 def on_stop(ev):
-    ev_list = turn_events(read_rows(ev.get("transcript_path") or "",
-                                    need_boundary=True))
+    rows = read_rows(ev.get("transcript_path") or "", need_boundary=True)
+    ev_list = turn_events(rows)
     if ev_list is None:
         return
-    r = analyze(ev_list)
+    bridge = remote_view(rows)
+    r = analyze(ev_list, bridge)
     _save(_state_path(ev), {"violations": r["violations"], "kind": r["kind"],
                             "body": r["body"]})
     _save(_state_path(ev, "_inter"), {"warned": 0})
+    if r.get("remote_loss") and (_ONCE or os.environ.get("ANSWER_PRECHECK") == "1"):
+        # At most once per instruction: only when stop_once is active (Fable S8).
+        _record_firing(NAME, ev)
+        sys.stdout.buffer.write(json.dumps(
+            {"decision": "block", "reason": REMOTE_BLOCK % r["remote_loss"]},
+            ensure_ascii=True).encode("ascii"))
+        sys.stdout.buffer.flush()
+        return
     if ev.get("stop_hook_active"):
         return  # a re-answer forced by another hook: history keeps the first
     try:
@@ -953,6 +1051,11 @@ def main():
 
 
 if __name__ == "__main__":
+    try:  # the Remote Control block fires once per instruction (stop_once.py)
+        import stop_once
+        _ONCE = bool(stop_once.install("response_length_guard"))
+    except Exception:
+        pass
     try:
         main()
     except Exception:

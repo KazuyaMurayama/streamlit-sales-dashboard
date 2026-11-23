@@ -223,9 +223,26 @@ PRE_NOTE = ("これは最終回答を書く前の点検である。不足は下�
             "answer_precheck.py に通してから最終回答を1回だけ書く（追記・「以上」は不要）。")
 
 
-def _prompt(tier, request, files, answer):
+# Remote Control attached (2026-11-23, user: 「スマホの画面で見ると、あなたの回答が一部しか載って
+# いません」): the phone shows only the last answer of an instruction, so 「以上」 or an add-on
+# replaces the whole report there. response_length_guard.remote_view decides.
+REMOTE_NOTE = ("このセッションは Remote Control につながっており、スマホには最後の回答しか表示されない。"
+               "追記や「以上」ではなく、点検で補った内容を入れた完全版の回答（結論・表・成果物表・留保・"
+               "Next Action）を書き直す。前の回答を参照しない。")
+
+
+def _remote(transcript_path):
+    try:
+        import response_length_guard as _R
+        return _R.remote_view(_R.read_rows(transcript_path or "", _R.TAIL_BYTES))
+    except Exception:
+        return False
+
+
+def _prompt(tier, request, files, answer, remote=False):
     """Build the review instruction. Kept short: it is paid on every fire."""
-    tail_note = PRE_NOTE if os.environ.get("ANSWER_PRECHECK") else NO_NOISE
+    tail_note = (PRE_NOTE if os.environ.get("ANSWER_PRECHECK")
+                 else REMOTE_NOTE if remote else NO_NOISE)
     req = (request or "").strip()
     req = re.sub(r"<[^>]+>.*?</[^>]+>", "", req, flags=re.S).strip()
     if len(req) > 700:
@@ -323,7 +340,7 @@ def main():
     # entirely. Do not "simplify" this to print(..., ensure_ascii=False).
     payload = json.dumps({
         "decision": "block",
-        "reason": _prompt(tier, request, files, answer),
+        "reason": _prompt(tier, request, files, answer, _remote(ev.get("transcript_path"))),
     }, ensure_ascii=True)
     # 発火記録: 無反応と故障を区別するため(CLAUDE.md §14 F2)。ledger が読む
     _record_firing("review_gate", ev)
