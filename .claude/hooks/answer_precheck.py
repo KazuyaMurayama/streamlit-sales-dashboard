@@ -156,10 +156,6 @@ def own_checks(rows, draft):
     if pending:
         out.append(u"[待ち] 自分で起動したバックグラウンド作業が%d件まだ終わっていない。結果が報告に入るなら、"
                    u"いま最終回答を書かずに終え、全件そろってから1回だけ書く（途中で書くと同じ報告が2本になる）。" % pending)
-    if R.remote_view(rows):
-        # Remote Control: the phone shows only the last answer, so a re-answer must be the
-        # complete one; the repeat check would push the other way (2026-11-23).
-        return out
     prevs = R.answers_of_turn(ev)
     why = R.repetition(prevs, draft, changed_since_last_answer(ev))
     if why:

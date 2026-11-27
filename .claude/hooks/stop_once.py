@@ -151,35 +151,6 @@ class _Sink(io.BytesIO):
         pass
 
 
-# Remote Control (2026-11-23, user: 「スマホの画面で見ると、あなたの回答が一部しか載っていません」):
-# the phone shows only the last answer of an instruction, so every pushback -- from any hook --
-# must be answered with the complete answer, not an add-on or 「以上」 (Fable S2: one place).
-REMOTE_NOTE = (u"\n【Remote Control】このセッションはスマホにつながっており、スマホには最後の回答しか表示されない。"
-               u"この差し戻しへの回答は、追記や「以上」ではなく、前の回答を置き換える完全版"
-               u"（結論・表・成果物表・留保・Next Action）にする。前の回答を参照しない。")
-BRIDGE_MARK = b'"type":"bridge-session"'
-BRIDGE_TAIL = 2 * 1024 * 1024
-
-
-def _remote_note(data, ev):
-    try:
-        if not _is_block(data):
-            return data
-        with io.open(ev.get("transcript_path") or "", "rb") as f:
-            f.seek(0, 2)
-            f.seek(max(0, f.tell() - BRIDGE_TAIL))
-            if BRIDGE_MARK not in f.read():
-                return data
-        obj = json.loads(data.decode("utf-8", "replace").strip())
-        reason = obj.get("reason") or ""
-        if "Remote Control" in reason:
-            return data
-        obj["reason"] = reason + REMOTE_NOTE
-        return json.dumps(obj, ensure_ascii=True).encode("ascii")
-    except Exception:
-        return data
-
-
 def install(hook=None):
     if os.environ.get("ANSWER_PRECHECK") == "1":
         return   # answer_precheck shows every pushback on the draft; its HOME is a copy (Fable S6)
@@ -216,11 +187,9 @@ def install(hook=None):
             except Exception:
                 ok = True
             if ok:
-                data = _remote_note(data, ev)
                 real.buffer.write(data)
                 real.buffer.flush()
         except Exception:
             pass
 
     atexit.register(_finish)
-    return True
