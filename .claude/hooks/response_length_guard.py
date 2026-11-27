@@ -792,6 +792,25 @@ def _newest_user_text(rows):
     return None, ""
 
 
+def _sched_store(ev):
+    return _state_path(ev, "_sched")
+
+
+def remember_sched(ev):
+    """PostToolUse(CronCreate): keep the stored prompt. Live 2026-11-27: at
+    UserPromptSubmit the check-in's own transcript row is NOT written yet (the newest row
+    was the previous check-in, also after 1.4 s of waiting), so the transcript cannot tell
+    a check-in from a human prompt; the prompt CronCreate registered can."""
+    if ev.get("tool_name") != "CronCreate":
+        return
+    p = ((ev.get("tool_input") or {}).get("prompt") or "").strip()
+    if not p:
+        return
+    st = _load(_sched_store(ev))
+    keep = [x for x in (st.get("prompts") or []) if x != p][-49:] + [p]
+    _save(_sched_store(ev), {"prompts": keep})
+
+
 def is_sched_prompt(ev, rows, reread=None):
     """The prompt is a scheduled check-in (CronCreate), not a human instruction: the
     NEWEST user row carries exactly this text and isMeta=true (an older check-in with the
@@ -799,6 +818,8 @@ def is_sched_prompt(ev, rows, reread=None):
     p = (ev.get("prompt") or "").strip()
     if not p or not _is_sched_text(p):
         return False
+    if p in (_load(_sched_store(ev)).get("prompts") or []):
+        return True
     for i, wait in enumerate(SCHED_WAIT_S):
         if wait:
             if not reread:
@@ -815,6 +836,13 @@ def on_prompt(ev):
     rows = []
     if ev.get("transcript_path"):
         rows = read_rows(ev["transcript_path"], POST_TAIL_BYTES)
+    if (ev.get("prompt") or "").strip() and _is_sched_text(ev.get("prompt")):
+        # live calibration (2026-11-27: the first real check-in was missed): what the
+        # payload and the newest transcript row look like at this moment
+        _r, _t = _newest_user_text(rows)
+        _probe({"t": int(time.time()), "ups": 1, "keys": sorted(ev.keys())[:12],
+                "p": (ev.get("prompt") or "")[:24], "row": (_t or "")[:24],
+                "meta": bool(_r and _r.get("isMeta"))})
     if is_sched_prompt(ev, rows, lambda: read_rows(ev.get("transcript_path") or "", POST_TAIL_BYTES)):
         _probe({"t": int(time.time()), "sched": 1})
         _record_firing(NAME, ev)
@@ -944,6 +972,10 @@ def _emit_cap(ev, cap_msg):
 
 
 def on_post_tool(ev):
+    try:
+        remember_sched(ev)
+    except Exception:
+        pass
     rows = read_rows(ev.get("transcript_path") or "", POST_TAIL_BYTES)
     cap_msg = check_count(ev, rows)
     text = last_text_before_tool(rows)
